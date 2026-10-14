@@ -14,7 +14,7 @@ value class MoneyFen(val fen: Long) : Comparable<MoneyFen> {
     companion object {
         val ZERO = MoneyFen(0)
         fun fromYuanText(yuan: String): MoneyFen =
-            MoneyFen(java.math.BigDecimal(yuan).movePointRight(2).toLongExact())
+            MoneyFen(java.math.BigDecimal(yuan).movePointRight(2).longValueExact())
     }
 }
 
