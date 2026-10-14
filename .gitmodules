@@ -1,0 +1,3 @@
+[submodule "thirdparty/ECShopX"]
+	path = thirdparty/ECShopX
+	url = git@gitee.com:ShopeX/ECShopX.git
