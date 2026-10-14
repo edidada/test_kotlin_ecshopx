@@ -4,6 +4,7 @@ import com.ecshopx.kotlin.common.api.PageParam
 import com.ecshopx.kotlin.common.api.PageQuery
 import com.ecshopx.kotlin.common.domain.MoneyFen
 import com.ecshopx.kotlin.common.domain.TimeSec
+import com.ecshopx.kotlin.common.domain.toYuanText
 import com.fasterxml.jackson.databind.ObjectMapper
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -16,8 +17,9 @@ class PageQueryTest {
         assertEquals(PageQuery.MAX_SIZE, PageQuery.of(1, 9999).pageSize)
     }
 
-    @Test fun offset 计算() {
-        assertEquals(20L, PageQuery(2, 10).offset)
+    @Test fun `offset 计算`() {
+        assertEquals(10L, PageQuery(2, 10).offset)   // page 1 基：第 2 页偏移 10
+        assertEquals(20L, PageQuery(3, 10).offset)
     }
 
     @Test fun `page_size 优先于 pageSize`() {

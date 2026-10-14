@@ -3,9 +3,9 @@ package com.ecshopx.kotlin.service.tx
 import org.springframework.stereotype.Component
 import org.springframework.transaction.TransactionDefinition
 import org.springframework.transaction.PlatformTransactionManager
-import org.springframework.transaction.TransactionTemplate
 import org.springframework.transaction.support.TransactionSynchronization
 import org.springframework.transaction.support.TransactionSynchronizationManager
+import org.springframework.transaction.support.TransactionTemplate
 
 /**
  * Kotlin 事务模板 DSL —— 收编 PHP 侧 718 处 beginTransaction/commit/rollback
