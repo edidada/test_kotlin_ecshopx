@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.ecshopx.kotlin</groupId>
+        <artifactId>kotlin-ecshopx</artifactId>
+        <version>${revision}</version>
+    </parent>
+    <artifactId>ecshopx-boot</artifactId>
+    <name>ecshopx-boot</name>
+    <description>启动装配：聚合两个 web surface、application.yml、spring.sql.init、fat-jar 打包</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.ecshopx.kotlin</groupId>
+            <artifactId>ecshopx-web-admin</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.ecshopx.kotlin</groupId>
+            <artifactId>ecshopx-web-front</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-actuator</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals><goal>repackage</goal></goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
