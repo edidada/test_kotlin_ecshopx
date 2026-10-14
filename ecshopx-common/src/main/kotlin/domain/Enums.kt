@@ -1,7 +1,15 @@
 package com.ecshopx.kotlin.common.domain
 
-/** 业务单号种类；值必须与 seq_generator.seq_name 一致（sql/schema.sql） */
-enum class SeqName { ORDER_NO, TRADE_NO, REFUND_NO, AFTERSALES_NO }
+/**
+ * 业务单号种类；dbValue 必须与 seq_generator.seq_name 一致（sql/schema.sql 小写行），
+ * prefix 为源系统单号前缀（order 裸数字 / trade T / refund R / aftersales AS）。
+ */
+enum class SeqName(val dbValue: String, val prefix: String) {
+    ORDER_NO("order_no", ""),
+    TRADE_NO("trade_no", "T"),
+    REFUND_NO("refund_no", "R"),
+    AFTERSALES_NO("aftersales_no", "AS"),
+}
 
 /** 订单主状态（大写态，与 PHP order_status/pay_status 字符串枚举一致，概要设计 §3） */
 object OrderStatus {
