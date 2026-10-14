@@ -73,5 +73,5 @@ INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VA
   (1, 'order.auto_cancel_minutes', '30', 0),
   (1, 'point.deduct.max_ratio', '50', 0);
 
--- 号段行已在 schema.sql 中初始化；此处仅推进起始值
-UPDATE seq_generator SET current_value = 100000 WHERE seq_name IN ('order_no','trade_no','refund_no','aftersales_no');
+-- 号段行已在 schema.sql 中初始化；起始值只前进不回退（重启安全）
+UPDATE seq_generator SET current_value = GREATEST(current_value, 100000) WHERE seq_name IN ('order_no','trade_no','refund_no','aftersales_no');

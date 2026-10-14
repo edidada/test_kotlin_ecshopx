@@ -10,9 +10,12 @@ spring:
     driver-class-name: org.h2.Driver
   sql:
     init:
-      mode: embedded     # schema.sql/seed.sql 来自 ecshopx-dao jar（classpath:sql/），均已幂等化
-      schema-locations: classpath:sql/schema.sql
-      data-locations: classpath:sql/seed.sql
+      # 实测：fat jar + H2 file 库下 mode=embedded 会静默跳过脚本（mem 单测正常）；
+      # schema/seed 已全部幂等化（IF NOT EXISTS / INSERT IGNORE / GREATEST），故用 always。
+      mode: always
+      # classpath* 才能解析到嵌套 jar（BOOT-INF/lib/ecshopx-dao.jar!/sql/*.sql）中的脚本
+      schema-locations: classpath*:/sql/schema.sql
+      data-locations: classpath*:/sql/seed.sql
   jackson:
     default-property-inclusion: non_null
 

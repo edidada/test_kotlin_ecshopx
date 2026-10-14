@@ -37,3 +37,4 @@ build/
 data/
 *.mv.db
 *.trace.db
+.flattened-pom.xml
