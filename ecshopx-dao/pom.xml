@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.ecshopx.kotlin</groupId>
+        <artifactId>kotlin-ecshopx</artifactId>
+        <version>${revision}</version>
+    </parent>
+    <artifactId>ecshopx-dao</artifactId>
+    <name>ecshopx-dao</name>
+    <description>MyBatis Mapper / DO / 分页组件 / 数据源配置。部署 SQL 单一来源为仓库根 sql/ 目录，经资源打包进 jar。</description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.ecshopx.kotlin</groupId>
+            <artifactId>ecshopx-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.mybatis.spring.boot</groupId>
+            <artifactId>mybatis-spring-boot-starter</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <resources>
+            <!-- 单一来源：根目录 sql/ 打包到 classpath:sql/（boot 的 spring.sql.init 从此处加载） -->
+            <resource>
+                <directory>${project.basedir}/../sql</directory>
+                <targetPath>sql</targetPath>
+                <includes>
+                    <include>schema.sql</include>
+                    <include>seed.sql</include>
+                </includes>
+            </resource>
+        </resources>
+    </build>
+</project>
