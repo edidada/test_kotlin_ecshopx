@@ -25,6 +25,8 @@ class NormalOrderDO : Stampable {
     var orderFrom: String? = null
     var itemFee: Long = 0
     var totalFee: Long = 0
+    /** 实付（分）：M0-7 结清时写入，未付款恒 0；渠道侧金额以 trade.pay_fee 为准 */
+    var payFee: Long = 0
     var marketFee: Long = 0
     var costFee: Long = 0
     var commissionFee: Long = 0
@@ -244,6 +246,8 @@ class TransitPatch {
     var cancelStatus: String? = null
     var payType: String? = null
     var payChannel: String? = null
+    /** 实付金额（分）：M0-7 支付结清随状态一并落库 */
+    var payFee: Long? = null
     var endTime: Long? = null
     var deliveryTime: Long? = null
     var deliveryCorp: String? = null

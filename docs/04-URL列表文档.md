@@ -288,3 +288,24 @@ is_check_store // 是否做库存校验提示
 | C45 | ORDER-5 出参 | 前台**不输出**流转日志（`operate_logs=[]`）；`tradeInfo={}`、`coupon_info=[]`、`cancelData` 仅取消过才有值；`distributor` 取店铺档案三源合并，`receiver_*` 由 `address_id` 展开地址簿快照后落库（后续改地址不影响历史单） |
 | C46 | 后台 ORDER-9 族 | `/api/orders`（列表，权限码 `orders.lists`）、`/api/orders/{order_id}`、`PUT /api/orders/remark`、`PUT /api/orders/delivery`（`orders.update`/`orders.delivery`）、`/api/orders/timeout`（到期单排查，只回 `order_ids`）；`user_id` 等筛选参数走后台链，前台会员令牌访问后台链一律 401 |
 | C47 | ORDER-3 / 支付 | ORDER-3（订单支付/`pay_trade`）与 `pay_fee` 回填属 M0-7；M0-6 先落 `markPaid(orderId, payFee, payType, payChannel)` 挂点：PAY 箭头迁移 + 幂等（已付款再调返回 false），`pay_status=PAYED` 后 `pay_fee=total_fee` |
+
+## 8. 实现期语义补充（M0-7 支付闭环落地时确认，追加于 §7 之后，不回改上文）
+
+| # | 条目 | 实现口径 |
+|---|---|---|
+| C48 | `trade` 生命周期 | 只有 `NOTPAY → SUCCESS`（结清）与 `NOTPAY → CLOSED`（作废）两条出边，全部是 `UPDATE … WHERE trade_state='NOTPAY'` 条件更新；影响 0 行即代表并发已抢到，调用方**不得**再做动账与订单迁移 |
+| C49 | 应付/实付分账 | `trade.total_fee` **只取订单表**（`orders_normal_orders.total_fee`），渠道报文里的金额只做**校验**不参与计算；结清时 `pay_fee` 同时写 `trade.pay_fee`（渠道真相）与 `orders_normal_orders.pay_fee`（订单实付，M0-7 新增列，默认 0） |
+| C50 | 换渠道重试 | 同一订单**至多一条活跃支付单**：`pay_type` 不变复用原单（改金额需重新下单），`pay_type` 变化则旧单 `CLOSED` + 新发一单；因此"重试"永不产生 NOTPAY 堆积（端到端断言 `COUNT(NOTPAY)=0`、`COUNT(SUCCESS)=1`） |
+| C51 | PAY-2 出参 | `data` = 渠道参数包 + 支付摘要（`order_id/trade_id/trade_state/pay_type/total_fee/pay_fee/trade_info`）+ **ORDER-5 detail 合并**（`orderInfo/items/logistics_items`），前端一次拿到"付完了 + 订单长什么样"；point/deposit 即时结清时 `orderInfo.pay_status=PAYED` |
+| C52 | 积分支付 | M0 口径是**纯积分全额兑换**（1 积分 = 1 分，`PointRate.POINT_PER_FEN=1`），`point < total_fee` → 422「积分不足」；混合支付（`point.deduct.max_ratio` 按比例抵扣）留 M1，扣减仍是 `WHERE point >= ?` 条件更新 |
+| C53 | 余额支付 | **赠金优先**（先扣 `gift_amount` 再扣 `deposit_amount`），整行乐观比对 `user_deposit.swap`；余额不足 422「余额不足，当前 N 分」+ `errors.deposit`，**不动账、不改订单状态、不把支付单写成成功** |
+| C54 | 支付赠分 | 订单 `get_points > 0` 才入账，加 `point_member.point` 并写 `point_member_log(remark="订单支付赠送积分", before/after)`；与结清同一 `db.transactional`，回滚则积分不落 |
+| C55 | 线下转账 | `offline_pay` 只生成 `offline_payment`（`check_status=0` 待审核、`pay_sn = trade_id`），返回 `trade_state=NOTPAY`，订单保持待付款且 `pay_fee=0`；后台审核结清（`check_status=1` → 走同一 `markPaid`）属 M1 |
+| C56 | wxpay 渠道 | M0 为**本地 mock**：不请求真实网关，直接拼 JSAPI 参数包 `appId/timeStamp/nonceStr/package=prepay_id=<trade_id>/signType=RSA/paySign`；`appId` 取 `sys_config.pay.wxpay.appid`，缺省回落 `wxmock0000000000` |
+| C57 | PAY-5 应答体 | **不走 `{"data":…}` 包络**，返回渠道约定的 XML：`<xml><return_code>SUCCESS|FAIL</return_code><return_msg>…</return_msg></xml>`；金额不符、`trade_state` 非 SUCCESS、缺 `out_trade_no`、支付单不存在一律 `FAIL`；已结清/已关闭回 `SUCCESS` 以免渠道无限重试 |
+| C58 | 关单收单 | 用户取消（ORDER-6）与超时关单（`runClose`）都调用 `closeByOrder` 把该单在途支付单置 `CLOSED`；`CLOSED` 单收到"钱其实付了"的回调只应答成功、**不自动退款**（退款/售后域属 M1，`return_msg` 里写明需人工退回） |
+| C59 | 充值单 | PAY-4 产出 `CZ` + 16 位号段（**整串 18 字符**），落 `deposit_trade`（不写 `trade` 表）；赠金按 `deposit_recharge_rule` 档位匹配（seed：充 100 送 10、充 500 送 80），非档位金额 `gift_amount=0`；PAY-2/PAY-3 以 `CZ` 前缀分流，充值结清即本金进 `deposit_amount`、赠金进 `gift_amount` |
+| C60 | PAY-1 出参 | 固定 16 键（`order_id/order_type/title/total_fee/pay_fee/order_status/pay_status/trade_state/trade_id/pay_types/deposit/point/auto_cancel_time/receipt_type/shop_id/distributor_id`）；未付款 `pay_fee=0`，`pay_types` 取渠道注册表 `supported`，`point.can_pay = (point >= total_fee)`；订单不存在 404 |
+| C61 | 回调面免鉴权 | `api/notify` 前缀在后台链 `permitAll`（渠道不带令牌）；请求体支持 `application/x-www-form-urlencoded`、`text/xml`、`application/xml` 与通配，XML 按叶子节点正则抽取为同名参数（`<![CDATA[]]>` 自动剥离），未知 `trade_id` 也只回 `FAIL` 不回 401 |
+| C62 | 账本不变量 | 端到端逐分核对三条：`SUM(trade.pay_fee WHERE SUCCESS) == SUM(orders.pay_fee)`、`pay_status=PAYED` 的单必须 `pay_fee == total_fee`（M0 无部分支付）、每笔 `SUCCESS` 支付单必有 `transaction_id` |
+| C63 | 幂等与并发 | 「渠道出参 → `trade.settle` CAS → `markPaid` → 赠分」四步在同一事务内，CAS 抢输的一边抛 422「支付单已结清，请勿重复支付」；重复回调、双击支付、并发关单+支付三类竞态均已钉死为"只结清一次、只回补一次" |

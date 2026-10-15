@@ -294,7 +294,7 @@ class OrderQueryService(
         "get_points" to o.getPoints,
         "total_rebate" to o.totalRebate,
         "total_fee" to o.totalFee,
-        "pay_fee" to if (o.payStatus == PayStatus.PAYED) o.totalFee else 0L,
+        "pay_fee" to o.payFee,
         "pay_type" to o.payType,
         "pay_channel" to o.payChannel,
         "receipt_type" to o.receiptType,

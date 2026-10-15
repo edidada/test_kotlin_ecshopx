@@ -178,3 +178,20 @@ INSERT IGNORE INTO members_address (address_id, user_id, company_id, username, t
 VALUES
   (1, 1, 1, '张三', '13800000001', '广东省', '深圳市', '南山区', '科技园科苑路 15 号 3 栋 301', '518000', TRUE, 0, 0),
   (2, 2, 1, '李四', '13800000002', '北京市', '北京市', '朝阳区', '望京 SOHO T1 座 1801', '100102', TRUE, 0, 0);
+
+-- ===== M0-7 支付域演示数据（追加于末尾，不回改上文） =====
+-- 充值单号段（SeqName.RECHARGE_NO，前缀 CZ）：缺行会让取号直接报错
+INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('recharge_no', 0);
+
+-- 储值充值档位（分）：充 100 送 10 / 充 500 送 80，PAY-4 按金额命中档位才送赠金
+INSERT IGNORE INTO deposit_recharge_rule (id, company_id, rule_name, recharge_amount, gift_amount, status, created, updated) VALUES
+  (1, 1, '充 100 送 10', 10000, 1000, 1, 0, 0),
+  (2, 1, '充 500 送 80', 50000, 8000, 1, 0, 0);
+ALTER TABLE deposit_recharge_rule ALTER COLUMN id RESTART WITH 100;
+
+-- 线下/渠道支付开关：M0 只放开 mock 与三种本地渠道
+INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VALUES
+  (1, 'pay.wxpay.enable', '1', 0),
+  (1, 'pay.deposit.enable', '1', 0),
+  (1, 'pay.point.enable', '1', 0),
+  (1, 'pay.offline.enable', '1', 0);

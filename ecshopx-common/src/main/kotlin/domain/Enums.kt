@@ -9,6 +9,8 @@ enum class SeqName(val dbValue: String, val prefix: String) {
     TRADE_NO("trade_no", "T"),
     REFUND_NO("refund_no", "R"),
     AFTERSALES_NO("aftersales_no", "AS"),
+    /** 储值充值单（PAY-4），出参 order_id 即形如 CZyyMMddHHmmssNNNN */
+    RECHARGE_NO("recharge_no", "CZ"),
 }
 
 /** 订单主状态（大写态，与 PHP order_status/pay_status 字符串枚举一致，概要设计 §3） */

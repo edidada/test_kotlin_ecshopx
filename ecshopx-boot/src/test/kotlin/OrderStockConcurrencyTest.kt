@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.jdbc.core.JdbcTemplate
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -23,6 +24,9 @@ import kotlin.test.assertTrue
 @SpringBootTest(
     properties = [
         "spring.datasource.url=jdbc:h2:mem:exccstock;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1;LOCK_TIMEOUT=30000",
+        // 50 线程各要一条连接：Hikari 默认 10 会把 41 个线程压成「Could not open JDBC Connection」，
+        // 那是连接池饥饿，不是超卖。压测上下文单独放宽池，断言的仍是 CAS 不超卖。
+        "spring.datasource.hikari.maximum-pool-size=64",
         "ecx.schedule.order-timeout-initial-delay-ms=3600000",
         "ecx.schedule.order-timeout-ms=3600000",
     ],
@@ -45,6 +49,8 @@ class OrderStockConcurrencyTest {
         val threads = 50
         val pool = Executors.newFixedThreadPool(threads)
         val start = CountDownLatch(1)
+        // 失败原因必须可见：只统计 true/false 会把「连接池饥饿」和「CAS 抢输」混成同一个数字
+        val errs = ConcurrentLinkedQueue<String>()
         try {
             val results = (1..threads).map {
                 pool.submit<Boolean> {
@@ -52,13 +58,14 @@ class OrderStockConcurrencyTest {
                     try {
                         create.create(1L, 1L, form()); true
                     } catch (e: Exception) {
+                        errs.add("${e::class.simpleName}: ${e.message}")
                         false
                     }
                 }
             }
             start.countDown()
             val ok = results.count { it.get(60, TimeUnit.SECONDS) }
-            assertEquals(30, ok, "库存 30 → 恰好 30 单成功")
+            assertEquals(30, ok, "库存 30 → 恰好 30 单成功；失败样本 ${errs.take(5)}（共 ${errs.size} 例）")
             assertEquals(0L, jdbc.queryForObject("SELECT store FROM items WHERE item_id = 3", Long::class.java))
             assertEquals(30L, jdbc.queryForObject("SELECT sales FROM items WHERE item_id = 3", Long::class.java), "销量不重复计")
             assertEquals(

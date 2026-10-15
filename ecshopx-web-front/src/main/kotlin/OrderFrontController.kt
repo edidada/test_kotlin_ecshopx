@@ -10,6 +10,7 @@ import com.ecshopx.kotlin.service.order.OrderCreateForm
 import com.ecshopx.kotlin.service.order.OrderCreateService
 import com.ecshopx.kotlin.service.order.OrderFlowService
 import com.ecshopx.kotlin.service.order.OrderQueryService
+import com.ecshopx.kotlin.service.pay.PayService
 import org.springframework.security.core.annotation.AuthenticationPrincipal
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
@@ -28,6 +29,7 @@ class OrderFrontController(
     private val create: OrderCreateService,
     private val query: OrderQueryService,
     private val flow: OrderFlowService,
+    private val pay: PayService,
 ) {
 
     /** ORDER-2 创建订单（不含支付）；带 client_token 时重复提交返回同一单 */
@@ -36,6 +38,19 @@ class OrderFrontController(
         @RequestBody form: OrderCreateForm,
         @AuthenticationPrincipal p: Principal?,
     ): ApiResponse<Map<String, Any?>> = ApiResponse.ok(create.create(userId(p), cid(p), form))
+
+    /**
+     * ORDER-3 创建订单 + 预支付：建单后直接按 `pay_type` 出渠道参数（point/deposit 会当场结清）。
+     * 建单与预支付是两个事务——下单成功但渠道失败时订单仍在待付款列表里，可再次 PAY-2 支付。
+     */
+    @PostMapping("/api/h5app/wxapp/order")
+    fun createAndPay(
+        @RequestBody form: OrderCreateForm,
+        @AuthenticationPrincipal p: Principal?,
+    ): ApiResponse<Map<String, Any?>> {
+        val created = create.create(userId(p), cid(p), form)
+        return ApiResponse.ok(pay.prepay(userId(p), cid(p), created.getValue("order_id").toString().toLong(), form.payType))
+    }
 
     /** ORDER-4 我的订单列表（status 数字页签或精确态字符串，见 OrderQueryService.applyStatusTab） */
     @GetMapping("/api/h5app/wxapp/orders")

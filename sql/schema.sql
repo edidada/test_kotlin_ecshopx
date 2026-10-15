@@ -1263,3 +1263,8 @@ INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('order_no', 0
 INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('trade_no', 0);
 INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('refund_no', 0);
 INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('aftersales_no', 0);
+
+-- ===== M0-7 支付域补列（追加于末尾，不回改上文）=====
+-- 订单表落一列实付：结清时由 PayService 写入，未付款恒 0。
+-- 渠道侧金额仍以 trade.pay_fee 为准，这里只是列表/详情的读视图，避免每次都对 trade 做 join。
+ALTER TABLE orders_normal_orders ADD COLUMN IF NOT EXISTS pay_fee BIGINT NOT NULL DEFAULT 0;

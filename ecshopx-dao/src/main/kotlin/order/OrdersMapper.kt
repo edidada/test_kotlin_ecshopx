@@ -21,7 +21,7 @@ interface OrdersMapper {
         const val COLS =
             "order_id, title, company_id, shop_id, user_id, act_id, mobile, order_class, order_type, " +
             "order_status, pay_status, delivery_status, cancel_status, order_source, order_holder, order_from, " +
-            "item_fee, total_fee, market_fee, cost_fee, commission_fee, freight_fee, discount_fee, member_discount, " +
+            "item_fee, total_fee, pay_fee, market_fee, cost_fee, commission_fee, freight_fee, discount_fee, member_discount, " +
             "coupon_discount, point_fee, point_use, item_point, get_points, total_rebate, distributor_id, salesman_id, " +
             "supplier_id, merchant_id, original_order_id, type, taxable_fee, total_tax, fee_type, fee_rate, fee_symbol, " +
             "pay_type, pay_channel, receipt_type, ziti_code, ziti_status, invoice, is_invoiced, invoice_status, " +
@@ -107,6 +107,7 @@ interface OrdersMapper {
             "<if test='patch.cancelStatus != null'>, cancel_status = #{patch.cancelStatus}</if>" +
             "<if test='patch.payType != null'>, pay_type = #{patch.payType}</if>" +
             "<if test='patch.payChannel != null'>, pay_channel = #{patch.payChannel}</if>" +
+            "<if test='patch.payFee != null'>, pay_fee = #{patch.payFee}</if>" +
             "<if test='patch.endTime != null'>, end_time = #{patch.endTime}</if>" +
             "<if test='patch.deliveryTime != null'>, delivery_time = #{patch.deliveryTime}</if>" +
             "<if test='patch.deliveryCorp != null'>, delivery_corp = #{patch.deliveryCorp}</if>" +

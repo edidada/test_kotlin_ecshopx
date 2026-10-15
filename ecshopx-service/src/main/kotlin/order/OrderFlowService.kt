@@ -9,6 +9,7 @@ import com.ecshopx.kotlin.common.domain.PayStatus
 import com.ecshopx.kotlin.common.domain.TimeSec
 import com.ecshopx.kotlin.dao.goods.ItemsMapper
 import com.ecshopx.kotlin.dao.goods.SysConfigMapper
+import com.ecshopx.kotlin.dao.pay.TradeMapper
 import com.ecshopx.kotlin.dao.order.NormalOrderDO
 import com.ecshopx.kotlin.dao.order.OrderCancelDO
 import com.ecshopx.kotlin.dao.order.OrderCancelOrderMapper
@@ -43,6 +44,7 @@ class OrderFlowService(
     private val deliveryItems: OrderDeliveryItemMapper,
     private val goodsItems: ItemsMapper,
     private val configs: SysConfigMapper,
+    private val trades: TradeMapper,
     private val db: Db,
     private val mapper: ObjectMapper,
 ) {
@@ -94,7 +96,7 @@ class OrderFlowService(
      * 支付结清挂点（M0-7 的 TradeService 回调里调用）：NOTPAY --PAY--> PAYED。
      * @return false = 重复回调或并发已结清，调用方按幂等处理
      */
-    fun markPaid(orderId: Long, payType: String?, payChannel: String?, logText: String? = null): Boolean {
+    fun markPaid(orderId: Long, payType: String?, payChannel: String?, logText: String? = null, payFee: Long? = null): Boolean {
         val o = orders.findById(orderId) ?: return false
         if (!OrderStatusMachine.can(o.orderStatus, OrderEvent.PAY)) return false
         val t = OrderStatusMachine.require(o.orderStatus, OrderEvent.PAY)
@@ -102,6 +104,8 @@ class OrderFlowService(
         val patch = t.toPatch().apply {
             this.payType = payType
             this.payChannel = payChannel
+            // 渠道未报实付时按应付结清（point/deposit 的部分支付由调用方显式传）
+            this.payFee = payFee ?: o.totalFee
         }
         return db.transactional {
             val hit = orders.transit(orderId, patch, fromStatus = o.orderStatus, fromPayStatus = null, userId = null, updated = now)
@@ -296,6 +300,8 @@ class OrderFlowService(
             o.orderId, t.toPatch(), fromStatus = o.orderStatus, fromPayStatus = fromPayStatus, userId = null, updated = now,
         )
         if (hit == 0) return@transactional false
+        // 关单同时收掉该单所有未付支付单：否则渠道回调可能把已关闭的单"付活"
+        trades.closeByOrder(o.orderId.toString(), now)
         val rows = orderItems.listByOrder(o.orderId)
         val restored = rows.filter { it.cancelItemNum == 0 }
         restored.forEach { row ->

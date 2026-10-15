@@ -58,7 +58,7 @@ class SecurityConfig(
             .csrf { it.disable() }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
             .authorizeHttpRequests {
-                it.requestMatchers("/api/operator/login", "/api/ping").permitAll()
+                it.requestMatchers("/api/operator/login", "/api/ping", "/api/notify/**").permitAll()
                     .anyRequest().authenticated()
             }
             .addFilterBefore(JwtOperatorFilter(jwt, operators), UsernamePasswordAuthenticationFilter::class.java)
