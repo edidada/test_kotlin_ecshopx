@@ -14,8 +14,8 @@
 --   Spring Boot 亦可自动执行：spring.sql.init.mode=always + schema/data 指向本文件
 -- =====================================================================
 
-CREATE SCHEMA IF NOT EXISTS ECX;
-SET SCHEMA ECX;
+-- 注：不再显式建/切 ECX schema —— SET SCHEMA 仅作用于当前会话，连接池其余连接仍落默认
+--     schema（实测 H2 2.2.224 池外新连接解析不到表）。MySQL 部署选库即等效；H2 走 public。
 
 -- =====================================================================
 -- 1. 平台 / 租户 / 权限域（对应 CompanysBundle + SuperAdminBundle 核心表）

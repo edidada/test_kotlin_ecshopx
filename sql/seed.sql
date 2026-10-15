@@ -2,15 +2,15 @@
 -- kotlin-ecshopx 初始化数据脚本（H2, 配合 schema.sql 使用）
 -- 独立部署模式：company_id 固定为 1（对应 PHP config/common.php system_companys_id）
 -- =====================================================================
-SET SCHEMA ECX;
+-- 表在连接默认 schema（见 schema.sql 顶部说明），此处不再 SET SCHEMA
 
 -- 租户
 INSERT IGNORE INTO company (company_id, company_name, status, system_is_saas, created, updated)
 VALUES (1, 'ECShopX Kotlin 演示租户', 'normal', FALSE, 0, 0);
 
--- 运营账号：admin / admin123（password 为 BCrypt 占位，首次启动由 DataInitializer 重算）
+-- 运营账号：admin / admin123（BCrypt 真实哈希，cost=10，jshell spring-security-crypto 生成）
 INSERT IGNORE INTO operators (operator_id, company_id, username, password, operator_type, created, updated)
-VALUES (1, 1, 'admin', '$2a$10$N.zmdr9k7uOCQb376NoUnuTJ8iAt6Z5EHsM8lE9lBOsl7iKTVEFDa', 'admin', 0, 0);
+VALUES (1, 1, 'admin', '$2a$10$gOYr5CPR.WnU/oVv49.JmeEPIk.kywxGMoWzlrbhO1ujEuM3rCyxi', 'admin', 0, 0);
 
 -- 角色与权限资源（示例：商品/订单管理）
 INSERT IGNORE INTO roles (role_id, company_id, role_name, role_type) VALUES (1, 1, '超级管理员', 'system');
@@ -75,3 +75,8 @@ INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VA
 
 -- 号段行已在 schema.sql 中初始化；起始值只前进不回退（重启安全）
 UPDATE seq_generator SET current_value = GREATEST(current_value, 100000) WHERE seq_name IN ('order_no','trade_no','refund_no','aftersales_no');
+
+-- ===== M0-3 追加：鉴权用例账号 =====
+-- viewer / viewer123：staff 类型、未挂任何角色 —— 用于越权(403)用例
+INSERT IGNORE INTO operators (operator_id, company_id, username, password, operator_type, created, updated)
+VALUES (2, 1, 'viewer', '$2a$10$YEbWtixU4m1Hy41ZGdreMudQjBcFAp1BXcphiR1ZwdwpwIryD2PWC', 'staff', 0, 0);

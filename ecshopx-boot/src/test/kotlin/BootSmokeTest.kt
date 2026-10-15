@@ -45,7 +45,7 @@ class BootSmokeTest {
                 st.executeQuery(
                     // MODE=MySQL 下 information_schema.tables 含字典基表，必须按 BASE TABLE 过滤
                     "SELECT COUNT(*) FROM information_schema.tables " +
-                        "WHERE table_schema='ecx' AND table_type='BASE TABLE'"
+                        "WHERE table_schema='public' AND table_type='BASE TABLE'"
                 ).use { rs ->
                     rs.next()
                     assertTrue(rs.getInt(1) == 70, "expect 70 base tables, got ${rs.getInt(1)}")

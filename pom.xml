@@ -70,6 +70,18 @@
                 <artifactId>jjwt-api</artifactId>
                 <version>${jjwt.version}</version>
             </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-impl</artifactId>
+                <version>${jjwt.version}</version>
+                <scope>runtime</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.jsonwebtoken</groupId>
+                <artifactId>jjwt-jackson</artifactId>
+                <version>${jjwt.version}</version>
+                <scope>runtime</scope>
+            </dependency>
             <!-- internal modules -->
             <dependency>
                 <groupId>com.ecshopx.kotlin</groupId>
@@ -139,6 +151,8 @@
                     <jvmTarget>${java.version}</jvmTarget>
                     <args>
                         <arg>-Xjsr305=strict</arg>
+                        <!-- 切面 @annotation(rc) 参数绑定依赖 MethodParameters 属性，Kotlin 默认不写 -->
+                        <arg>-java-parameters</arg>
                     </args>
                     <!-- @Service/@Component 类无需 open 关键字即可被 CGLIB 代理 -->
                     <compilerPlugins>

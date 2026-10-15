@@ -35,3 +35,8 @@ ecx:
   seq:
     node: 1
     step: 100
+  security:
+    jwt-secret: M0-dev-secret-change-me-0123456789abcdef
+    jwt-ttl-seconds: 43200
+    login-captcha: false      # true 时 AUTH-1 需 yzm=8888（M0 mock）
+    sms-mock-code: "8888"     # M0 短信验证码固定值，P1 接真实通道
