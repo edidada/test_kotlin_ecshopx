@@ -234,6 +234,15 @@ class OrderCountRow {
 }
 
 /**
+ * MEM-1 消费统计行：累计实付（分）+ 已付订单数。
+ * 口径与后台一致——只认 `pay_status = 'PAYED'`，未付/已取消的单不计入成长值。
+ */
+class ConsumptionRow {
+    var totalConsumption: Long = 0
+    var paidOrders: Long = 0
+}
+
+/**
  * 状态迁移补丁：字段**全部可空**，null=不改。
  *
  * 不能拿 NormalOrderDO 当补丁用——它的状态列是非空 String 且带默认值（NOTPAY/PENDING…），

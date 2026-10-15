@@ -195,3 +195,46 @@ INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VA
   (1, 'pay.deposit.enable', '1', 0),
   (1, 'pay.point.enable', '1', 0),
   (1, 'pay.offline.enable', '1', 0);
+
+-- ===== M0-8 追加：会员/支撑域权限与演示数据（追加于末尾，不回改上文） =====
+-- SUP-1/2/4 后台权限（config 读写分立，运营能改业务参数不等于能改支付开关之外的东西；
+-- upload 与 operator.logs 各一条，viewer 账号不挂角色 → 天然用来验 403）
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (8,  0, '系统设置',   'config',        'catalog'),
+  (9,  8, '配置查看',   'config.lists',  'actived'),
+  (10, 8, '配置修改',   'config.update', 'actived'),
+  (11, 0, '图片上传',   'upload.image',  'actived'),
+  (12, 0, '操作日志',   'operator.logs', 'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES (1, 8), (1, 9), (1, 10), (1, 11), (1, 12);
+
+-- 会员资料补全：演示用户给全字段（收藏/个人中心页要能渲染头像、生日、爱好标签）
+UPDATE members_info SET avatar = '/img/avatar-1.png', birthday = '1990-01-01',
+    email = 'demo@example.com', industry = '互联网', income = '10000',
+    edu_background = 'bachelor', habbit = '[{"name":"数码","ischecked":1},{"name":"运动","ischecked":0}]'
+  WHERE user_id = 1;
+UPDATE members_info SET avatar = '/img/avatar-2.png', birthday = '1988-06-06',
+    email = 'gold@example.com', industry = '金融', income = '20000',
+    edu_background = 'master', habbit = '[{"name":"咖啡","ischecked":1}]'
+  WHERE user_id = 2;
+
+-- 收藏快照（item_price 是收藏当时的价格，列表出参另给实时价，降价提示靠两者对比）
+INSERT IGNORE INTO members_items_fav (fav_id, user_id, company_id, item_id, item_name, item_image, item_price, created) VALUES
+  (1, 1, 1, 3, '每日坚果礼盒（旧价）', '/img/nut.jpg', 9900, 0),
+  (2, 1, 1, 1, '测试手机 X1', '/img/x1-1.jpg', 199900, 0);
+ALTER TABLE members_items_fav ALTER COLUMN fav_id RESTART WITH 100;
+
+-- 浏览足迹（同一 item 只留最新一条，服务层先删后插）
+INSERT IGNORE INTO members_browse_history (history_id, user_id, item_id, company_id, created) VALUES
+  (1, 1, 3, 1, 0), (2, 1, 1, 1, 0);
+ALTER TABLE members_browse_history ALTER COLUMN history_id RESTART WITH 100;
+
+-- 会员个人中心的展示型配置（SUP-1 读写演示 + 前台"我的"页文案）
+INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VALUES
+  (1, 'member.center.banner', '/img/member-banner.jpg', 0),
+  (1, 'site.contact_phone', '400-000-0000', 0);
+
+-- 只存在于全局层（company_id=0）的默认值：SUP-1 合并视图要能读到它，
+-- 且它永远不会被接口写进租户层（写只落租户），所以冒烟重跑也不会失配。
+INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VALUES
+  (0, 'site.member_center_copy', '登录后查看专属价', 0);
+

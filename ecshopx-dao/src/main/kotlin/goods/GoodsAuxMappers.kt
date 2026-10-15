@@ -1,5 +1,6 @@
 package com.ecshopx.kotlin.dao.goods
 
+import com.ecshopx.kotlin.dao.stamp.Stampable
 import org.apache.ibatis.annotations.Delete
 import org.apache.ibatis.annotations.Insert
 import org.apache.ibatis.annotations.Mapper
@@ -152,10 +153,34 @@ interface ShippingTemplatesMapper {
     fun updateFull(t: ShippingTemplateDO): Int
 }
 
-/** 全局/租户配置（warning_store 阈值等） */
+/**
+ * 全局/租户配置（warning_store 阈值、站点 tdk、支付开关…）。
+ * `company_id = 0` 是全局行，租户行覆盖全局行——SUP-1 读取时两层合并，写入只写租户层。
+ */
 @Mapper
 interface SysConfigMapper {
 
     @Select("SELECT config_value FROM sys_config WHERE company_id = #{companyId} AND config_key = #{key}")
     fun getValue(@Param("companyId") companyId: Long, @Param("key") key: String): String?
+
+    @Select("SELECT id, company_id, config_key, config_value, updated FROM sys_config WHERE company_id IN (0, #{companyId})")
+    fun listForCompany(@Param("companyId") companyId: Long): List<SysConfigDO>
+
+    /**
+     * 有则改、无则插。uk_cfg_key(company_id, config_key) 是冲突键，
+     * H2 MODE=MySQL 与 MySQL 8 都支持 ON DUPLICATE KEY UPDATE。
+     */
+    @Insert("INSERT INTO sys_config(company_id, config_key, config_value, updated) " +
+        "VALUES(#{companyId}, #{configKey}, #{configValue}, #{updated}) " +
+        "ON DUPLICATE KEY UPDATE config_value = #{configValue}, updated = #{updated}")
+    fun upsert(c: SysConfigDO): Int
+}
+
+class SysConfigDO : Stampable {
+    var id: Long = 0
+    var companyId: Long = 0
+    var configKey: String = ""
+    var configValue: String? = null
+    override var created: Long = 0
+    override var updated: Long = 0
 }

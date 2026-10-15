@@ -40,6 +40,7 @@ class SecurityConfig(
                 it.requestMatchers(
                     "/api/h5app/wxapp/new_login",
                     "/api/h5app/ping",
+                    "/api/h5app/vcode",
                     "/api/h5app/wxapp/goods/items",
                     "/api/h5app/wxapp/goods/items/*",
                 ).permitAll()
@@ -69,8 +70,23 @@ class SecurityConfig(
         return http.build()
     }
 
-    private fun write(res: jakarta.servlet.http.HttpServletResponse, status: Int, message: String) {
-        res.status = status
+    /**
+     * M0-8 追加：上传件的静态面。`/storage` 前缀下的资源不属于任何 API 面（没有 JSON 包络、没有令牌语义），
+     * 显式建一条 permitAll 链，而不是依赖"没有链匹配就放行"这种隐式行为。
+     * 图片 URL 会进商品主图/头像等公开字段，浏览器 <img> 请求不会带令牌。
+     */
+    @Bean
+    @org.springframework.core.annotation.Order(3)
+    fun storageChain(http: HttpSecurity): SecurityFilterChain {
+        http
+            .securityMatcher("/storage/**")
+            .csrf { it.disable() }
+            .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
+            .authorizeHttpRequests { it.anyRequest().permitAll() }
+        return http.build()
+    }
+
+    private fun write(res: jakarta.servlet.http.HttpServletResponse, status: Int, message: String) {        res.status = status
         res.contentType = "application/json;charset=UTF-8"
         res.writer.write(mapper.writeValueAsString(ApiError(message, emptyMap(), status, status)))
     }

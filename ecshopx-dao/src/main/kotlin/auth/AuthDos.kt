@@ -47,4 +47,7 @@ class MemberGradeDO {
     var gradeName: String = ""
     var level: Int = 1
     var discount: Int = 100
+
+    /** 升级门槛（累计实付，分）—— MEM-1 等级进度与升等判定都读它 */
+    var growthValue: Long = 0
 }

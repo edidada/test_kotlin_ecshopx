@@ -22,6 +22,11 @@ spring:
     # 出参保留显式 null（源系统 Fractal 会输出 null 字段，GOODS 商品行的
     # barcode/brief/weight 等空值字段必须存在，契约测试按字段集合 diff）
     default-property-inclusion: always
+  servlet:
+    multipart:
+      # Spring 默认单文件 1MB，M0-8 的 SUP-2 与 ecx.upload.max-size 对齐
+      max-file-size: 5MB
+      max-request-size: 6MB
 
 mybatis:
   configuration:
@@ -44,3 +49,8 @@ ecx:
     jwt-ttl-seconds: 43200
     login-captcha: false      # true 时 AUTH-1 需 yzm=8888（M0 mock）
     sms-mock-code: "8888"     # M0 短信验证码固定值，P1 接真实通道
+  upload:
+    # SUP-2 本地存储根目录（相对启动目录）；url 前缀与 boot 侧静态映射共用同一配置
+    root: data/storage
+    url-prefix: /storage
+    max-size: 5242880         # 5MB，与 spring.servlet.multipart.max-file-size 对齐

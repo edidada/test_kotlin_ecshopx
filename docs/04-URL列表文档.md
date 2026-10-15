@@ -309,3 +309,60 @@ is_check_store // 是否做库存校验提示
 | C61 | 回调面免鉴权 | `api/notify` 前缀在后台链 `permitAll`（渠道不带令牌）；请求体支持 `application/x-www-form-urlencoded`、`text/xml`、`application/xml` 与通配，XML 按叶子节点正则抽取为同名参数（`<![CDATA[]]>` 自动剥离），未知 `trade_id` 也只回 `FAIL` 不回 401 |
 | C62 | 账本不变量 | 端到端逐分核对三条：`SUM(trade.pay_fee WHERE SUCCESS) == SUM(orders.pay_fee)`、`pay_status=PAYED` 的单必须 `pay_fee == total_fee`（M0 无部分支付）、每笔 `SUCCESS` 支付单必有 `transaction_id` |
 | C63 | 幂等与并发 | 「渠道出参 → `trade.settle` CAS → `markPaid` → 赠分」四步在同一事务内，CAS 抢输的一边抛 422「支付单已结清，请勿重复支付」；重复回调、双击支付、并发关单+支付三类竞态均已钉死为"只结清一次、只回补一次" |
+
+## 9. 实现期语义补充（M0-8 会员与支撑域落地时确认，追加于 §8 之后，不回改上文）
+
+| # | 条目 | 实现口径 |
+|---|---|---|
+| C64 | `nickname` 来源 | 会员昵称取 `members_info.username`（源系统即把昵称存在该列，不是 `members.username` 的登录名）；MEM-1 同时原样回显 `username`，前端两者同值 |
+| C65 | 手机号只出掩码 | MEM-1/2/3 出参里的 `mobile` 一律 `take(3)+"****"+takeLast(4)`；`members.mobile` 是登录凭据，任何读接口都不给全量 |
+| C66 | MEM-2 白名单写 | 可改字段=docs §2.6 列出的 10 项；`company_id/user_id/have_consume` 出现即 400「该字段不允许修改」；`mobile` 单独判定：掩码串或与当前号相同**静默忽略**（小程序会把 GET 的整包资料原样 PUT 回来），只有"与当前号不同且不含 `*`"才 400 并把 `errors.mobile` 指向 MEM-3 |
+| C67 | 校验类错误用 400 | 资料拒改、地址必填缺失、配置空对象、上传缺字段一律 `ErrorCode.VALIDATION` → HTTP 400 + `errors` 逐字段数组（与 Dingo 参数错误同族）；业务前置条件不满足（号码被占用、非本人号码）才用 422 |
+| C68 | MEM-3 换绑 | `PUT /api/h5app/wxapp/member/mobile`：验证码比对 `ecx.security.sms-mock-code`（M0 恒码，MEM-8 不入库），新旧号相同 422、新号已被占用 422；写库是 `UPDATE … WHERE mobile = <旧号>` 的**条件更新**，0 行即抛 422，天然防并发换绑 |
+| C69 | MEM-8 出参 | `{mobile(掩码), type, status:1, expire_seconds:300, mock:true, mock_code}`，`type ∈ {login, register, rebind_mobile, reset_password, bind_mobile}`；`mock_code` 只在 `mock=true` 时出现，P1 接真实通道后去掉该键并改为入库发号 |
+| C70 | 地址包络与整串 | 地址列表用 `{total_count, list[]}`（§2.4 订单列表同构），不是裸数组；行内除源表列外补 `receiver_address`（省+市+区+`adrdetail` 拼接串）与 `is_def`（1/0 而非布尔），前端直接展示不需再拼 |
+| C71 | 地址默认互斥 | 首条地址**无条件置默认**（用户不需要先知道有默认概念）；此后任何 `is_def=1` 都在同一事务里 `clearDefault(userId)` + `markDefault(addressId,userId)`，全局至多一条；编辑不传 `is_def` 时保持原状；删除默认地址后由剩余**最新一条**顶替 |
+| C72 | 地址越权=404 | `update/delete` 的 WHERE 同时带 `address_id` 与 `user_id`，越权与不存在同返回 404「地址不存在」，不泄露 id 是否存在 |
+| C73 | MEM-4 动词与入参 | `POST` 新增、`PUT /{address_id}` 改、`DELETE /{address_id}` 删；同时兼容源系统"DELETE 带 `{address_id}` 请求体"的写法（两条路径同一实现），前端两种调用都能走 |
+| C74 | 收藏快照 vs 实时价 | `members_items_fav` 存收藏当时的 `item_name/item_image/item_price`（=出参 `fav_price`），列表**始终批量 join `items` 出实时 `item_price`**（一次 `listByIds`，无 N+1）；降价提示由两价对比得出，因此下架商品**不静默过滤**，改出 `is_onsale=0` 让前端标注 |
+| C75 | MEM-6 幂等 | 收藏前先 `findId(userId,itemId)`，已存在直接回原行（不产生第二行）；取消收藏删不到也不报错（与 PHP 一致的宽松语义），出参恒 `{fav_id, item_id, is_collect:0}` |
+| C76 | 浏览足迹 | 同一 `(user_id, item_id)` **先删后插**只留最新一次，列表按 `MAX(created) DESC` 分页；`GET /api/h5app/wxapp/member/browse/items`、`DELETE …/browse/items/{item_id}`、`DELETE …/browse/items`（清空，出参 `{deleted}`）三条是本文新增端点（源系统同语义散在 `member` 控制器）；**匿名浏览不写任何人名下**，GOODS-8 只在带令牌时记录，记录失败不影响详情出参 |
+| C77 | GOODS-8 会员价 | `member_price` 不再是回填占位（C13 的 M0-8 待办在此关闭）：`price - price*(100-discount)/100`，与购物车 `MemberDiscountRule` **同一算式同一取整**，因此详情页价格==结算价格；普通会员/匿名 `member_price == price`。`collect` 键带令牌时为 `{fav_id, is_collect}`、匿名为 `null` |
+| C78 | MEM-7 与 ORDER-8 同口径 | `statistical` 的 `orderscount` 直接复用 `OrderQueryService.counts`（七键 `notpay/pending_delivery/pending_receive/done/evaluation/cancel/total`），不再独立实现一份 SQL；`point/deposit/totalConsumption` 与 MEM-1 同源同值 |
+| C79 | SUP-1 两层合并 | `GET /api/config` 读 `company_id IN (0, 当前租户)`，先铺全局行再用同键租户行**覆盖**，合并视图里同键只出一条且全局行不复制；`PUT` **只写租户层**（全局行只读），数组/对象值序列化成 JSON 文本存 `config_value`（回读得到 `["深圳","北京"]` 这种字符串），空对象 400 |
+| C80 | SUP-2 落盘命名 | 存储名一律服务端生成：`{yyyyMM}/{uuid}.{ext}`，**不含原始文件名**（防路径穿越与互相覆盖）；扩展名白名单 `{jpg,jpeg,png,gif,webp,bmp}` + `Content-Type` 必须是 `image/*`，超限/空文件/缺 `file` 字段分别 400；写盘后再次校验解析路径仍在 `ecx.upload.root` 内；成功后 `upload_files` 落台账（`user_id` 可空，供后台审计溯源） |
+| C81 | `/storage` 静态面 | `ecx.upload.url-prefix`（默认 `/storage`）注册为资源映射（`file:` 指向 `ecx.upload.root`，启动即建目录），并显式挂在**第三条 SecurityFilterChain**（`@Order(3)`、`permitAll`）上——不依赖"没有链匹配即放行"的默认行为；`<prefix>/**` 在文档里请写成"prefix 通配"以免 Kotlin 嵌套注释（详设 §8 已记一次同类踩坑） |
+| C82 | SUP-4 只读审计 | `GET /api/operator/logs` 分页倒序（`ORDER BY id DESC`），过滤入参 `operator_id/keyword(命中 route_name)/start_time/end_time(比对 created)`，出参行固定九键 `id, company_id, operator_id, operator_name, route_name, method, params, ip, created`；**无写接口**（日志不可删不可改，清理属运维脚本）；写路径由 `@Audited(route=…)` 切面留痕，`SUP-2` 上传刻意**不加** `@Audited`——切面会把全部入参序列化进 `params`，二进制文件不应入日志 |
+| C83 | 跨面令牌 | 会员令牌打到后台面、后台令牌打到会员面都是 401 `Unauthenticated.`（签发方/受众不匹配即视为未认证，不是 403），与源系统 Dingo 行为一致；权限不足（如 `viewer` 改配置、看日志）才是 403 |
+
+## 10. P0 端点交付勾选（M0 收尾盘点，追加于 §9 之后，不回改上文）
+
+逐条对照 §2 的 47 条 P0 编号（AUTH 5 / GOODS 8 / CART 6 / ORDER 9 / PAY 5 / MEM 8 / SUP 6）。
+"验证"列指该端点被哪些测试覆盖：`*EndToEndTest` 是 MockMvc 契约测试（`mvn -B verify` 内跑），`mNN_smoke` 是 fat jar + 文件 H2 的实跑冒烟。
+
+| 编号 | 状态 | 落点 | 验证 |
+|---|---|---|---|
+| AUTH-1..5 | ✅ 已交付 | `AuthController` / `FrontAuthController` + `JwtService` | `AuthEndToEndTest` 14 例、`m04_smoke` 前置登录段 |
+| GOODS-1..6 | ✅ 已交付 | `GoodsAdminController` + `ItemService` | `GoodsEndToEndTest` 12 例、`m04_smoke` 14/14 |
+| GOODS-7/8 | ✅ 已交付 | `GoodsFrontController`（8 号带令牌时出 `collect`/`member_price`，见 C77） | `GoodsEndToEndTest`、`m08_smoke` 金卡折让段 |
+| CART-1..6 | ✅ 已交付 | `CartFrontController` + `CartService.quote` | `CartEndToEndTest` 12 例 + `PricingPropertyTest`、`m05_smoke` 23/23 |
+| ORDER-1..3 | ✅ 已交付 | `CartFrontController`(预览) / `OrderFrontController`(建单、预支付) | `OrderEndToEndTest` 14 例 + `OrderStockConcurrencyTest`、`m06_smoke` 48/48 |
+| ORDER-4..8 | ✅ 已交付 | `OrderFrontController` + `OrderQueryService.counts` | `OrderEndToEndTest`、`m06_smoke`、MEM-7 与 ORDER-8 同口径断言（C78） |
+| ORDER-9 | ✅ 已交付 | `OrderAdminController`（列表/详情/备注/发货/超时关单） | `OrderEndToEndTest`、`PayEndToEndTest` 第 10 例后台发货 |
+| PAY-1..5 | ✅ 已交付 | `PaymentFrontController` + `NotifyController`（回调面免鉴权、XML 应答） | `PayEndToEndTest` 14 例、`m07_smoke` 60/60 + 超时模式 5/5 |
+| MEM-1 | ✅ 已交付 | `MemberFrontController` + `MemberService.profile` | `MemberEndToEndTest` 第 2 例、`m08_smoke` §1 |
+| MEM-2 | ✅ 已交付 | 同上（白名单写 + 掩码忽略，见 C66） | `MemberEndToEndTest` 第 3 例、`m08_smoke` §2 |
+| MEM-3 | ✅ 已交付 | `MemberService.rebindMobile`（条件更新 CAS） | `MemberEndToEndTest` 第 5 例、`m08_smoke` §3 |
+| MEM-4 | ✅ 已交付 | `AddressService` + `MemberFrontController`（两种删除写法都收，C73） | `MemberEndToEndTest` 第 6 例、`m08_smoke` §4 |
+| MEM-5/6 | ✅ 已交付 | `CollectService`（实时价/快照价双出，C74） | `MemberEndToEndTest` 第 7 例、`m08_smoke` §5 |
+| MEM-7 | ✅ 已交付 | `MemberService.statistical` | `MemberEndToEndTest` 第 9 例、`m08_smoke` §7 |
+| MEM-8 | ✅ 已交付 | `VcodeService`（M0 恒码，C69） | `MemberEndToEndTest` 第 4 例、`m08_smoke` §2 |
+| SUP-1 | ✅ 已交付 | `SupportAdminController` + `ConfigService`（两层合并，C79） | `SupportEndToEndTest` 第 2 例、`m08_smoke` §9 |
+| SUP-2 | ✅ 已交付 | 同上 + `UploadService` + `StorageResourceConfig`（`/storage` 链，C81） | `SupportEndToEndTest` 第 3 例、`m08_smoke` §10 |
+| SUP-4 | ✅ 已交付 | `OperatorLogService` + `@Audited` 切面（只读，C82） | `SupportEndToEndTest` 第 4 例、`m08_smoke` §11 |
+| SUP-5 | ✅ 已交付 | Spring Boot Actuator `/actuator/health`（`management.endpoints` 暴露 health,info） | 实跑 curl 200 `{"status":"UP"}` |
+| SUP-3 | ⏸ 按计划留 P1 | 店铺下拉简版：`DistributorShopMapper.listByIds` 已在 M0-5 落地并用于购物车分组/订单出参，独立的 `/api/distributor/list` 端点属 §3 店铺分销 P1 | 现有调用点在 `CartEndToEndTest`/`OrderEndToEndTest` 的店铺名字段断言里 |
+| SUP-6 | ✅ 语义等价交付 | 不新增端点：线下转账凭证提交走 **PAY-2 `pay_type=offline_pay`**（只落 `offline_payment`、订单留待付款，见 §8 C55），与源系统"订单详情里点转账"同一业务事实 | `PayEndToEndTest` 线下转账例、`m07_smoke` |
+
+结论：§2 的 P0 编号中除 SUP-3（店铺分销域，P1 已登记）外全部交付并有测试覆盖；M0 的 H5 主链路
+「登录→逛→加购→预览→下单→支付→发货→收货→个人中心」在实跑与 MockMvc 两条腿上都已闭环。

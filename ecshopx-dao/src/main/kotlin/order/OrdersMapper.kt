@@ -171,6 +171,14 @@ interface OrdersMapper {
         "COUNT(*) AS total FROM orders_normal_orders WHERE company_id = #{companyId} AND user_id = #{userId}")
     fun countByUser(@Param("companyId") companyId: Long, @Param("userId") userId: Long): OrderCountRow?
 
+    /**
+     * MEM-1/MEM-7 消费聚合：累计实付与已付单数。
+     * 只认结清态（M0 无售后，REFUND* 不出现）；别名用下划线式，H2 会把驼峰别名整段小写。
+     */
+    @Select("SELECT COALESCE(SUM(pay_fee), 0) AS total_consumption, COUNT(*) AS paid_orders " +
+        "FROM orders_normal_orders WHERE company_id = #{companyId} AND user_id = #{userId} AND pay_status = 'PAYED'")
+    fun consumption(@Param("companyId") companyId: Long, @Param("userId") userId: Long): ConsumptionRow?
+
     /** 超时未支付（扫描用；主键升序限量，处理完自然滚过） */
     @Select("SELECT order_id FROM orders_normal_orders " +
         "WHERE order_status = 'NOTPAY' AND pay_status = 'NOTPAY' AND auto_cancel_time IS NOT NULL AND auto_cancel_time < #{now} " +
