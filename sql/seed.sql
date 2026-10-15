@@ -162,3 +162,19 @@ INSERT IGNORE INTO user_deposit (company_id, user_id, deposit_amount) VALUES (1,
 -- 第二张运费模板：按件 8 元、无包邮门槛（item.templates_id=1 仍是默认包邮，本张供购物车/预览按件计费用例）
 INSERT IGNORE INTO shipping_templates (template_id, company_id, name, is_free, valuation, status, fee_conf, created, updated)
 VALUES (2, 1, '按件 8 元模板', 'n', '1', TRUE, '{"first_fee":8}', 0, 0);
+
+-- ===== M0-6 订单域演示数据（追加，不回改上文）=====
+-- 后台订单编辑权限（备注/改价等卖家操作，发货已单独有 orders.delivery）
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type)
+VALUES (7, 4, '订单编辑', 'orders.update', 'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES (1, 7);
+
+-- 确认收货后的自动完成天数（发货时算 auto_finish_time；缺省值 10 天写在服务层）
+INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated)
+VALUES (1, 'order.auto_finish_days', '10', 0);
+
+-- 会员收货地址（下单可用 address_id 展开，省一组建件参数）
+INSERT IGNORE INTO members_address (address_id, user_id, company_id, username, telephone, province, city, county, adrdetail, postal_code, is_def, created, updated)
+VALUES
+  (1, 1, 1, '张三', '13800000001', '广东省', '深圳市', '南山区', '科技园科苑路 15 号 3 栋 301', '518000', TRUE, 0, 0),
+  (2, 2, 1, '李四', '13800000002', '北京市', '北京市', '朝阳区', '望京 SOHO T1 座 1801', '100102', TRUE, 0, 0);

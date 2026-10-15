@@ -267,3 +267,24 @@ is_check_store // 是否做库存校验提示
 | C29 | ORDER-1 形态 | 跨店铺**扁平聚合**（`item_fee/freight_fee/discount_fee/total_fee` 为各组合计）另给 `group_count`；`items[]` 为参与算价的勾选行（含 `cart_id`，M0-6 下单据此清车），失效行在 `invalid_items[]` |
 | C30 | 加价购行 | `is_plus_buy` 行参与算价（计入 `item_fee`），同时单列进组内 `plus_buy[]`；因此它必须是唯一键的一部分，否则与普通行互相覆盖 |
 | C31 | 金额单位 | 与 §5/C3 同：出参一律分；只有 `shipping_templates.minprice`/`fee_conf.first_fee`（DDL 为元）在读入时换算成分 |
+
+## 7. 实现期语义补充（M0-6 订单创建与状态机落地时确认，追加于 §6 之后，不回改上文）
+
+| # | 条目 | 实现口径 |
+|---|---|---|
+| C32 | 下单取价 | ORDER-2 复用 C17 的**同一条 `CartService.quote`**（fastbuy 走 `quoteFromEntries`、车内走 `quoteFromCart`），客户端传来的 `price/total_fee/item_fee` 一律忽略；端到端用 `{total_fee:1, price:1}` 伪入参钉死"仍按 8900 收" |
+| C33 | 一单一店 | `group_count > 1` → 422「暂不支持多店铺合并下单」；`orders_normal_orders.original_order_id` 列已建但 M0 不写值，拆单（PHP `split_order`）属后续里程碑 |
+| C34 | `order_id` 类型 | 16 位（`yyMMddHHmmss` + 段内 4 位），**超出 JS 安全整数，出参恒为字符串**；入参路径变量/表单同样按字符串解析，`order_id=not-a-number` → 404 而非 500 |
+| C35 | `client_token` 幂等 | 键 `companyId:userId:client_token`，同令牌重复提交返回**同一 `order_id`** 且不重复扣库存。M0 用 Caffeine（30m TTL / 20k，单 JVM），多实例部署前须换 Redis SETNX（M1） |
+| C36 | 库存并发 | 扣减 `UPDATE items SET store=store-?, sales=sales+? WHERE store>=?`、回补 `store=store+?, sales=CASE WHEN sales>=? THEN sales-? ELSE 0 END` 全 CAS；影响 0 行 → 事务回滚 → 422，**不存在先读后写**（门槛：50 线程抢 30 件恰好成 30 单，`store=0/sales=30`，无孤儿明细行） |
+| C37 | 状态机 | `(order_status, event) → Transit` 白名单驱动（`OrderStatusMachine`，15 条箭头，单测钉死全集合）；非法迁移 422 + `errors.order_status`；写库用 `transit(... WHERE order_status=? AND pay_status=?)` 乐观 CAS，0 行 → 422「订单状态已变更，请刷新后重试」 |
+| C38 | 分包补发 | `WAIT_BUYER_CONFIRM + SHIP` 是**自环**（状态不回退）：整单已在待收货但仍有明细未发时允许再发一包。"发齐"由 `shipPlan` 判定（无未发行 → 422「订单已发货完毕」），`CANCEL + SHIP` 仍非法 |
+| C39 | 行级发货态 | `delivery_status`（`PART_DONE`/`DONE`）按**明细行**判定：`delivery_item_num + 本次件数 >= num` 才置 `DONE`；单头 `delivery_status` 与 `orders_associations` 由整单是否发齐收口，多包裹时 `logistics_items[].package_type` 首包 `sep`、补包 `batch` |
+| C40 | 确认收货 | 只做状态迁移 + 留痕，**不回补库存、不写 `cancel_item_num`、不生成取消申请单** —— 这些是关单（CANCEL/TIMEOUT_CANCEL）专属副作用；曾误把 confirm 路由到关单方法导致"收货后库存凭空 +N" |
+| C41 | 超时关单 | `auto_cancel_time = create_time + order.auto_cancel_minutes×60`；`@Scheduled` 扫到期单逐条 CAS 关闭（回补库存 + `cancel_item_num=num-delivery_item_num` + `cancel_from=system` 取消单 + `timeout_cancel` 留痕），成功后 `auto_cancel_time` 置 NULL 即"清定时器"，重扫幂等 0 条。未引入 ShedLock，靠 CAS 保证多实例安全 |
+| C42 | ORDER-4 页签 | 数字 `status` → 1 待收货 / 3 交易成功 / 4 待自提 / 5 待付款 / 6 待发货 / 7 待评价；显式 `order_status` 字符串参数**优先于** `status`（两者同时给时以后者为准） |
+| C43 | ORDER-8 角标 | 单条 `SUM(CASE…)` 出 7 键（`notpay/pending_delivery/pending_receive/done/evaluation/cancel/total`），分桶互斥且求和恒等 `total`（端到端与实跑都断言该不变量）；`evaluation` = `DONE 且 is_rate=false`，M0 不落评价故 `is_rate` 恒 false，评价域属 M1 |
+| C44 | 自动完成时刻 | 发货时写 `auto_finish_time = delivery_time + order.auto_finish_days×86400`（seed=10 天），与 `auto_cancel_time` 复用 `end_time` 列语义：有未完成定时器才非空 |
+| C45 | ORDER-5 出参 | 前台**不输出**流转日志（`operate_logs=[]`）；`tradeInfo={}`、`coupon_info=[]`、`cancelData` 仅取消过才有值；`distributor` 取店铺档案三源合并，`receiver_*` 由 `address_id` 展开地址簿快照后落库（后续改地址不影响历史单） |
+| C46 | 后台 ORDER-9 族 | `/api/orders`（列表，权限码 `orders.lists`）、`/api/orders/{order_id}`、`PUT /api/orders/remark`、`PUT /api/orders/delivery`（`orders.update`/`orders.delivery`）、`/api/orders/timeout`（到期单排查，只回 `order_ids`）；`user_id` 等筛选参数走后台链，前台会员令牌访问后台链一律 401 |
+| C47 | ORDER-3 / 支付 | ORDER-3（订单支付/`pay_trade`）与 `pay_fee` 回填属 M0-7；M0-6 先落 `markPaid(orderId, payFee, payType, payChannel)` 挂点：PAY 箭头迁移 + 幂等（已付款再调返回 false），`pay_status=PAYED` 后 `pay_fee=total_fee` |

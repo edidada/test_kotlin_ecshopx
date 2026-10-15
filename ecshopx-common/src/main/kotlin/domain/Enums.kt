@@ -27,3 +27,17 @@ object PayStatus {
     const val REFUND_PART = "REFUND_PART"
     const val REFUND = "REFUND"
 }
+
+object DeliveryStatus {
+    const val PENDING = "PENDING"
+    const val PART_DONE = "PART_DONE"
+    const val PACKED = "PACKED"
+    const val DONE = "DONE"
+}
+
+object CancelStatus {
+    const val NOCANCEL = "NOCANCEL"
+    const val CANCEL_APPLY = "CANCEL_APPLY"
+    const val CANCEL_AGREE = "CANCEL_AGREE"
+    const val REFUSE_CANCEL = "REFUSE_CANCEL"
+}

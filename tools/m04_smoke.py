@@ -38,6 +38,11 @@ st, res = req("GET", "/api/goods/items", token=tok)
 anon_st, anon = req("GET", "/api/goods/items")
 check("GOODS-1 anon 401", anon_st == 401, anon)
 
+# 复跑清理：固定 item_bn 的上一次实跑残留会撞唯一键，先删干净再建
+st, res = req("GET", "/api/goods/items?item_bn=RUN-TAB-T", token=tok)
+for r in res["data"]["list"]:
+    req("DELETE", "/api/goods/items/%d" % r["item_id"], token=tok)
+
 body = {
     "item_name": "实跑平板T", "item_bn": "RUN-TAB-T", "price": 88800, "store": 12,
     "approve_status": "onsale", "category": [2], "pics": ["/r/1.jpg"],

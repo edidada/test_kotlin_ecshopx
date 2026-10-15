@@ -13,6 +13,7 @@ class ShopProfileDO {
     var name: String = ""
     var mobile: String? = null
     var address: String? = null
+    var logo: String? = null
     var lat: String? = null
     var lng: String? = null
     var isZiti: Boolean = false
@@ -22,7 +23,7 @@ class ShopProfileDO {
 @Mapper
 interface DistributorShopMapper {
 
-    @Select("<script>SELECT distributor_id, name, mobile, address, lat, lng, is_ziti, is_delivery " +
+    @Select("<script>SELECT distributor_id, name, mobile, address, logo, lat, lng, is_ziti, is_delivery " +
         "FROM distribution_distributor WHERE company_id = #{companyId} AND distributor_id IN " +
         "<foreach item=\"i\" collection=\"ids\" open=\"(\" separator=\",\" close=\")\">#{i}</foreach></script>")
     fun listByIds(@Param("companyId") companyId: Long, @Param("ids") ids: List<Long>): List<ShopProfileDO>

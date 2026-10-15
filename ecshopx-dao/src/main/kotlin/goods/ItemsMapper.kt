@@ -87,6 +87,11 @@ interface ItemsMapper {
         "<foreach item=\"i\" collection=\"ids\" open=\"(\" separator=\",\" close=\")\">#{i}</foreach> ORDER BY item_id</script>")
     fun listChildren(@Param("ids") ids: List<Long>): List<ItemDO>
 
+    /** 订单快照/明细回查用：按 id 批量取，不判上下架（历史单要能读到已下架商品） */
+    @Select("<script>SELECT " + COLS + " FROM items WHERE item_id IN " +
+        "<foreach item=\"i\" collection=\"ids\" open=\"(\" separator=\",\" close=\")\">#{i}</foreach></script>")
+    fun listByIds(@Param("ids") ids: List<Long>): List<ItemDO>
+
     @Insert(
         "INSERT INTO items(company_id, goods_id, default_item_id, is_default, item_type, item_category, consume_type, " +
             "item_name, item_bn, brief, price, cost_price, market_price, store, warning_store, sales, item_unit, " +
@@ -123,4 +128,21 @@ interface ItemsMapper {
     /** GOODS-5 逻辑下架（对齐 PHP 删除=下架语义）；updated 由调用方取 TimeSec.now()，与 StampInterceptor 同源 */
     @Update("UPDATE items SET approve_status = 'offline_sale', updated = #{updated} WHERE item_id = #{id}")
     fun softDelete(@Param("id") id: Long, @Param("updated") updated: Long): Int
+
+    /**
+     * 下单扣库存（CAS，docs/05 M0-6 门槛「并发 50 单同库存不超卖」的唯一防线）：
+     * `store >= num` 作为更新条件写进 WHERE，返回 0 即库存不足或并发抢占，Service 不做"读—判—写"。
+     * 只碰 store/sales 两列，绝不走 updateFull，避免与改价并发互相覆盖。
+     */
+    @Update("UPDATE items SET store = store - #{num}, sales = sales + #{num}, updated = #{updated} " +
+        "WHERE item_id = #{itemId} AND store >= #{num}")
+    fun deductStock(@Param("itemId") itemId: Long, @Param("num") num: Long, @Param("updated") updated: Long): Int
+
+    /**
+     * 取消/超时关单回补库存：sales 回退同样用 `sales >= num` 兜底，防止重复回补把销量打成负数。
+     * store 上限不设（商品可能被改高库存），因此重复调用有超补风险——调用方必须先做订单状态 CAS。
+     */
+    @Update("UPDATE items SET store = store + #{num}, sales = CASE WHEN sales >= #{num} THEN sales - #{num} ELSE 0 END, " +
+        "updated = #{updated} WHERE item_id = #{itemId}")
+    fun restoreStock(@Param("itemId") itemId: Long, @Param("num") num: Long, @Param("updated") updated: Long): Int
 }
