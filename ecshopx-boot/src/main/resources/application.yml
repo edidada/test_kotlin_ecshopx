@@ -13,11 +13,15 @@ spring:
       # 实测：fat jar + H2 file 库下 mode=embedded 会静默跳过脚本（mem 单测正常）；
       # schema/seed 已全部幂等化（IF NOT EXISTS / INSERT IGNORE / GREATEST），故用 always。
       mode: always
+      # 脚本含中文演示数据，Windows 平台默认字符集（GBK）会读成乱码 → 显式 UTF-8
+      encoding: UTF-8
       # classpath* 才能解析到嵌套 jar（BOOT-INF/lib/ecshopx-dao.jar!/sql/*.sql）中的脚本
       schema-locations: classpath*:/sql/schema.sql
       data-locations: classpath*:/sql/seed.sql
   jackson:
-    default-property-inclusion: non_null
+    # 出参保留显式 null（源系统 Fractal 会输出 null 字段，GOODS 商品行的
+    # barcode/brief/weight 等空值字段必须存在，契约测试按字段集合 diff）
+    default-property-inclusion: always
 
 mybatis:
   configuration:

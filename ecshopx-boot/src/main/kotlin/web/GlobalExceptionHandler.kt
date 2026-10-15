@@ -39,8 +39,15 @@ class GlobalExceptionHandler(
         respond(ErrorCode.NOT_FOUND, "resource not found", emptyMap())
 
     @ExceptionHandler(Exception::class)
-    fun onOther(e: Exception): ResponseEntity<ApiError> =
-        respond(ErrorCode.INTERNAL, e.message ?: "internal error", emptyMap())
+    fun onOther(e: Exception): ResponseEntity<ApiError> {
+        // 500 一律留栈：响应体不暴露内部异常，排障靠日志
+        log.error("unhandled exception", e)
+        return respond(ErrorCode.INTERNAL, e.message ?: "internal error", emptyMap())
+    }
+
+    private companion object {
+        val log = org.slf4j.LoggerFactory.getLogger(GlobalExceptionHandler::class.java)
+    }
 
     private fun respond(ec: ErrorCode, message: String, errors: Map<String, List<String>>): ResponseEntity<ApiError> {
         val body = ApiError(message, errors, ec.code, ec.http)

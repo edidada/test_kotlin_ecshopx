@@ -37,7 +37,12 @@ class SecurityConfig(
             .csrf { it.disable() }
             .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
             .authorizeHttpRequests {
-                it.requestMatchers("/api/h5app/wxapp/new_login", "/api/h5app/ping").permitAll()
+                it.requestMatchers(
+                    "/api/h5app/wxapp/new_login",
+                    "/api/h5app/ping",
+                    "/api/h5app/wxapp/goods/items",
+                    "/api/h5app/wxapp/goods/items/*",
+                ).permitAll()
                     .anyRequest().authenticated()
             }
             .addFilterBefore(JwtMemberFilter(jwt), UsernamePasswordAuthenticationFilter::class.java)

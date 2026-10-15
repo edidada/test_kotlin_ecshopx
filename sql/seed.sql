@@ -80,3 +80,72 @@ UPDATE seq_generator SET current_value = GREATEST(current_value, 100000) WHERE s
 -- viewer / viewer123：staff 类型、未挂任何角色 —— 用于越权(403)用例
 INSERT IGNORE INTO operators (operator_id, company_id, username, password, operator_type, created, updated)
 VALUES (2, 1, 'viewer', '$2a$10$YEbWtixU4m1Hy41ZGdreMudQjBcFAp1BXcphiR1ZwdwpwIryD2PWC', 'staff', 0, 0);
+
+-- ===== M0-4 追加：商品域规格/条码/标签/服务标签/预警阈值演示数据 =====
+-- 属性定义：spec=规格轴（颜色/内存），item_param=参数（产地）
+INSERT IGNORE INTO items_attributes (attribute_id, company_id, attribute_type, attribute_name, attribute_show, sort) VALUES
+  (1, 1, 'spec', '颜色', 'select', 1),
+  (2, 1, 'spec', '内存', 'select', 2),
+  (3, 1, 'item_param', '产地', 'text', 3);
+INSERT IGNORE INTO items_attribute_values (attribute_value_id, attribute_id, company_id, attribute_value, sort) VALUES
+  (1, 1, 1, '白色', 1), (2, 1, 1, '黑色', 2),
+  (3, 2, 1, '128G', 1), (4, 2, 1, '256G', 2),
+  (5, 3, 1, '中国大陆', 1);
+
+-- 主行 X1 挂产地参数；子行 2（白色 128G）挂两条规格
+INSERT IGNORE INTO items_rel_attributes (id, item_id, attribute_id, attribute_type, attribute_value_id, company_id) VALUES
+  (1, 1, 3, 'item_param', 5, 1),
+  (2, 2, 1, 'spec', 1, 1),
+  (3, 2, 2, 'spec', 3, 1);
+
+-- 多规格主行/子行 nospec=FALSE（GOODS-1 主行聚合 spec_items 的前提）
+UPDATE items SET nospec = FALSE, warning_store = 10 WHERE item_id = 1;
+UPDATE items SET nospec = FALSE, warning_store = 5 WHERE item_id IN (2, 4);
+UPDATE items SET warning_store = 250 WHERE item_id = 3;   -- 让 is_warning=true 有命中
+
+-- X1 第二条 SKU（黑色 256G）
+INSERT IGNORE INTO items (item_id, company_id, goods_id, default_item_id, is_default, item_name, item_bn, price, cost_price, market_price, store, warning_store, sales, nospec, item_unit, pics, approve_status, audit_status, templates_id, item_type, distributor_id, created, updated) VALUES
+  (4, 1, 1, 1, FALSE, '测试手机 X1 黑色 256G', 'X1-BLK-256', 249900, 180000, 269900, 30, 5, 1, TRUE, '台', '["/x1-blk.jpg"]', 'onsale', 'approved', 1, 'normal', 1, 0, 0);
+INSERT IGNORE INTO items_rel_attributes (id, item_id, attribute_id, attribute_type, attribute_value_id, company_id) VALUES
+  (4, 4, 1, 'spec', 2, 1), (5, 4, 2, 'spec', 4, 1);
+INSERT IGNORE INTO goods_items_rel_cats (item_id, category_id, company_id, created, updated) VALUES (4, 2, 1, 0, 0);
+
+-- 条码
+INSERT IGNORE INTO items_barcode (id, item_id, barcode, default_item_id, company_id) VALUES
+  (1, 2, '6901234500011', 1, 1), (2, 4, '6901234500028', 1, 1), (3, 3, '6901234500035', 3, 1);
+
+-- 标签（front_show=1 才进 GOODS-8 tagList）
+INSERT IGNORE INTO items_tags (tag_id, company_id, tag_name, tag_color, font_color, front_show, created) VALUES
+  (1, 1, '新品', '#ff5000', '#ffffff', 1, 0),
+  (2, 1, '热卖', '#e1251b', '#ffffff', 1, 0);
+INSERT IGNORE INTO items_rel_tags (id, tag_id, item_id, company_id) VALUES (1, 1, 1, 1), (2, 2, 3, 1);
+
+-- 服务标签（items_rel_type = type_labels 来源；该表无 created/updated 列）
+INSERT IGNORE INTO servicelabels (label_id, company_id, label_name, label_price, service_type, created, updated) VALUES
+  (1, 1, '顺丰包邮', 0, 'express', 0, 0),
+  (2, 1, '7天无理由', 0, 'refund', 0, 0);
+INSERT IGNORE INTO items_rel_type (id, item_id, label_id, label_name, label_price, num_type, num, is_not_limit_num, limit_time) VALUES
+  (1, 1, 1, '顺丰包邮', 0, 'plus', 1, 1, 0),
+  (2, 1, 2, '7天无理由', 0, 'plus', 1, 1, 0);
+
+-- 预警阈值 + 前台展示配置（GOODS-1 warning_store、GOODS-8 cur/tdk_data）
+INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VALUES
+  (1, 'item.warning_store', '10', 0),
+  (1, 'site.currency', 'CNY', 0),
+  (1, 'site.currency_symbol', '¥', 0),
+  (1, 'site.currency_rate', '1', 0),
+  (1, 'site.tdk.title', 'ECShopX Kotlin 演示商城', 0),
+  (1, 'site.tdk.description', 'Kotlin 重写版 ECShopX 前台', 0),
+  (1, 'site.tdk.keywords', 'ECShopX,Kotlin,商城', 0);
+
+-- 演示行显式指定主键后，自增序列必须越过它们（否则 GOODS-3 新增会撞 PK）
+-- H2 语法；MySQL 部署时改写为 `ALTER TABLE <表名> AUTO_INCREMENT = 100;`
+ALTER TABLE items ALTER COLUMN item_id RESTART WITH 100;
+ALTER TABLE items_attributes ALTER COLUMN attribute_id RESTART WITH 100;
+ALTER TABLE items_attribute_values ALTER COLUMN attribute_value_id RESTART WITH 100;
+ALTER TABLE items_rel_attributes ALTER COLUMN id RESTART WITH 100;
+ALTER TABLE items_barcode ALTER COLUMN id RESTART WITH 100;
+ALTER TABLE items_tags ALTER COLUMN tag_id RESTART WITH 100;
+ALTER TABLE items_rel_tags ALTER COLUMN id RESTART WITH 100;
+ALTER TABLE servicelabels ALTER COLUMN label_id RESTART WITH 100;
+ALTER TABLE items_rel_type ALTER COLUMN id RESTART WITH 100;

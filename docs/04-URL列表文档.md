@@ -226,3 +226,24 @@ is_check_store // 是否做库存校验提示
 | D4 | `price_gt/price_lt` 元/分陷阱保留但不扩散：新增字段一律分 | 文档标注 |
 | D5 | 次卡/服务单（`order_type=service`）与 rights 系列 M1 才回 | 小程序侧功能开关 |
 | D6 | `/api/orders/{order_id}` 后台详情出参剔除药品/跨境扩展列 | P2 回补 |
+
+## 5. 实现期语义补充（M0-4 商品域落地时确认，追加于 §4 之后，不回改上文）
+
+| # | 条目 | 实现口径 |
+|---|---|---|
+| C1 | `store_gt/store_lt` | 库存边界按原值比较，**不做 ×100**；与 D4 里 `price_gt/price_lt`（元→分）规则不同，前端容易踩，端到端测试用 `price_lt=100`/`store_gt=150` 各只命中一行来钉死这一差异 |
+| C2 | `price_gt/price_lt` | 入参单位=元，服务端换算成分后与 `items.price`（分）比较 |
+| C3 | 出参金额 | 一律分，不换算（`price/cost_price/market_price/label_price`） |
+| C4 | `is_warning` | `true → store <= warning_store`，`false → store > warning_store`，两分支互斥（行内 `warning_store` 是商品自身阈值） |
+| C5 | 列表外层 `warning_store` | 取 `sys_config` 的 `item.warning_store`（租户全局阈值），与 C4 的行内字段同名不同义 |
+| C6 | `is_sku=true` | 主行与子行同构输出，主行同样带 `item_spec`（主行自身不挂规格时为空数组） |
+| C7 | `spec_items` | 恒为数组（无规格=空数组）；出参字段集合不随"主行/子行/详情"变化，便于契约 diff |
+| C8 | `category` | 支持单值与 csv，服务端按分类树展开到全部子孙；`item_cat_id`=首个挂载分类，`item_main_cat_id`=沿 parent 链上溯到的 `is_main_category` 祖先（叶子分类挂载时也能出主分类） |
+| C9 | `barcode` 过滤 | 条码可挂在子行，默认列表只看主行，故命中子行需配合 `is_sku=true` |
+| C10 | GOODS-3 主行自指 | 自增 id 只有 INSERT 后可知，主行落库后补 `goods_id = default_item_id = item_id`；子行继承主行的 `goods_id/default_item_id` |
+| C11 | GOODS-4 `spec_items` | 带 `item_id` 视为改子行，缺省视为新增子行；未列出的子行不删除（与 PHP 一致的宽松语义） |
+| C12 | GOODS-5 删除 | 逻辑下架：主行 + 全部子行 `approve_status=offline_sale`，前台详情 404、前台列表不出现，后台详情仍可读 |
+| C13 | GOODS-8 回填占位 | `member_price` 暂按售价回填（会员等级折扣属 M0-8）；`distributor_info`（M1）、`goods_brand`（M1 品牌主数据）先出空值占位保字段 |
+| C14 | 入参命名 | 商品写接口用 snake_case，通过 DTO 上的 `@JsonNaming(SnakeCaseStrategy)` 局部生效，不开全局命名策略（避免扰动 M0-3 已定契约） |
+| C15 | null 字段 | Jackson `default-property-inclusion=always`：源系统 Fractal 会输出值为 null 的键（如 `barcode/brief/weight`），本项目同样输出以保证字段集合可比对 |
+| C16 | `type_labels` | 来源 `items_rel_type`（服务标签快照，含 `label_name/label_price/num_type/num/is_not_limit_num/limit_time`），非实时 join `servicelabels` |
