@@ -138,8 +138,8 @@ interface RelTypeMapper {
 @Mapper
 interface ShippingTemplatesMapper {
 
-    @Select("SELECT template_id, company_id, name, is_free, valuation, status, fee_conf, distributor_id, supplier_id, created, updated " +
-        "FROM shipping_templates WHERE company_id = #{companyId} ORDER BY template_id")
+    @Select("SELECT template_id, company_id, name, is_free, valuation, status, minprice, fee_conf, distributor_id, supplier_id, created, updated " +
+        "FROM shipping_templates WHERE company_id = #{companyId} AND status = TRUE ORDER BY template_id")
     fun listByCompany(@Param("companyId") companyId: Long): List<ShippingTemplateDO>
 
     @Insert("INSERT INTO shipping_templates(company_id, name, is_free, valuation, status, fee_conf, distributor_id, supplier_id, created, updated) " +

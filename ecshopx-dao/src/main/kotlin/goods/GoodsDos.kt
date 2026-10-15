@@ -178,6 +178,8 @@ class ShippingTemplateDO : Stampable {
     var isFree: String = "n"
     var valuation: String = "1"
     var status: Boolean = true
+    /** 满额包邮门槛（元，DECIMAL(14,2)）；M0-5 换成分参与算价 */
+    var minprice: java.math.BigDecimal? = null
     var feeConf: String? = null
     var distributorId: Long = 0
     var supplierId: Long = 0

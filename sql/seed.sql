@@ -149,3 +149,16 @@ ALTER TABLE items_tags ALTER COLUMN tag_id RESTART WITH 100;
 ALTER TABLE items_rel_tags ALTER COLUMN id RESTART WITH 100;
 ALTER TABLE servicelabels ALTER COLUMN label_id RESTART WITH 100;
 ALTER TABLE items_rel_type ALTER COLUMN id RESTART WITH 100;
+
+-- ===== M0-5 追加：购物车与算价演示数据 =====
+-- 金卡会员（grade_id=3，discount=95 即 95 折）：会员等级折扣链路实跑用，
+-- 与 user_id=1（普通会员 100=无折扣）配对，正好覆盖"有无折扣"两条算价分支。
+INSERT IGNORE INTO members (user_id, company_id, grade_id, mobile, user_card_code, created, updated)
+VALUES (2, 1, 3, '13800000002', '80000002', 0, 0);
+INSERT IGNORE INTO members_info (user_id, username, name, sex) VALUES (2, '金卡用户', '李四', 2);
+INSERT IGNORE INTO point_member (company_id, user_id, point, total_point) VALUES (1, 2, 500, 500);
+INSERT IGNORE INTO user_deposit (company_id, user_id, deposit_amount) VALUES (1, 2, 0);
+
+-- 第二张运费模板：按件 8 元、无包邮门槛（item.templates_id=1 仍是默认包邮，本张供购物车/预览按件计费用例）
+INSERT IGNORE INTO shipping_templates (template_id, company_id, name, is_free, valuation, status, fee_conf, created, updated)
+VALUES (2, 1, '按件 8 元模板', 'n', '1', TRUE, '{"first_fee":8}', 0, 0);

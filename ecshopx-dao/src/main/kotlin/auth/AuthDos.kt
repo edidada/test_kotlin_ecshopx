@@ -36,3 +36,15 @@ class AssocDO {
     var unionid: String? = null
     var userType: String = "wechat"
 }
+
+/**
+ * members_grade：M0-5 算价只用 discount（百分比，100=无折扣）；
+ * 成长值/等级升降属 M0-8，此处不建写路径。
+ */
+class MemberGradeDO {
+    var gradeId: Long = 0
+    var companyId: Long = 0
+    var gradeName: String = ""
+    var level: Int = 1
+    var discount: Int = 100
+}

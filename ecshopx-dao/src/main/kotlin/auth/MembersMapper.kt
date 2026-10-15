@@ -29,3 +29,13 @@ interface MembersAssociationsMapper {
     @Options(useGeneratedKeys = true, keyProperty = "id")
     fun insert(a: AssocDO): Int
 }
+
+/** 会员等级读取（算价链路用） */
+interface MembersGradeMapper {
+
+    @Select("SELECT grade_id, company_id, grade_name, level, growth_value, discount FROM members_grade WHERE grade_id = #{gradeId}")
+    fun findById(@Param("gradeId") gradeId: Long): MemberGradeDO?
+
+    @Select("SELECT grade_id, company_id, grade_name, level, growth_value, discount FROM members_grade WHERE company_id = #{companyId} ORDER BY level")
+    fun listByCompany(@Param("companyId") companyId: Long): List<MemberGradeDO>
+}

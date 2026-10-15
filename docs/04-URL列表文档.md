@@ -247,3 +247,23 @@ is_check_store // 是否做库存校验提示
 | C14 | 入参命名 | 商品写接口用 snake_case，通过 DTO 上的 `@JsonNaming(SnakeCaseStrategy)` 局部生效，不开全局命名策略（避免扰动 M0-3 已定契约） |
 | C15 | null 字段 | Jackson `default-property-inclusion=always`：源系统 Fractal 会输出值为 null 的键（如 `barcode/brief/weight`），本项目同样输出以保证字段集合可比对 |
 | C16 | `type_labels` | 来源 `items_rel_type`（服务标签快照，含 `label_name/label_price/num_type/num/is_not_limit_num/limit_time`），非实时 join `servicelabels` |
+
+## 6. 实现期语义补充（M0-5 购物车与算价落地时确认，追加于 §5 之后，不回改上文）
+
+| # | 条目 | 实现口径 |
+|---|---|---|
+| C17 | 单条算价链路 | CART-2 列表、ORDER-1 预览、M0-6 下单**都调用同一个 `CartService.quote`**（同一 `PriceContext` + 同一条 `PriceRule` 责任链，纯函数、不查库、不取时间、无随机），"预览价==下单价"是结构事实而非约定；属性测试以"同用例建两份互不共享对象的 ctx，逐分比对全量快照"钉死（1000 例随机购物车×券×等级） |
+| C18 | 有效/失效判定 | `valid = 商品存在 且 approve_status='onsale' 且 store>0`；其余进 `invalid_cart`（按店铺分组同构输出）。ORDER-1 的 `invalid_items[].reason` 三档：商品不存在 / 库存不足 / 商品已下架 |
+| C19 | 未勾选行 | 仍出现在组内 `list`（字段齐全、带 `is_checked=false` 与行小计），但 `item_fee / cart_total_price / cart_total_num / cart_total_count / discount_fee / freight / total_fee` 一律只统计勾选行 |
+| C20 | `is_last_price` | = 车内快照价 ≠ 商品现价。**算价永远用现价**，快照只用于提示"价格已变动"，加购命中已有行时刷新快照（名称/图片/价格/件数） |
+| C21 | 加购唯一键 | `(company_id, user_id, item_id, shop_id, activity_type, activity_id, is_plus_buy)`；命中则改行数、未命中插入。`isAccumulate=true` 累加到原数量，缺省（false/不传）**覆盖**数量 —— 与 PHP `CartServices` 一致，批量加购里出现已有 SKU 时是覆盖不是累加 |
+| C22 | 会员折扣 | `members_grade.discount` 是**百分比**（100=无折扣）；折让逐行 `floor(行小计 × (100-discount) / 100)`，落在行 `member_discount` 与 `discount_fee`，组/预览的 `member_discount` 是勾选行之和。`grade_name` 随行输出（无等级=普通会员） |
+| C23 | 店铺分组 | 按 `shop_id` 分组并保持首次出现顺序；`shop_id` 取 `shop_id`/`distributor_id` 中**非 0 的那个**，商品加购缺省用 `items.distributor_id`。`shop_id=0` 视为平台自营，`shop_name` 回落 `company.company_name`；其余档案列（`shop_name/address/mobile/lat/lng/is_ziti/is_delivery`）取自 `distribution_distributor`，`hour` 该表无对应列 → 空串占位 |
+| C24 | 运费 | 组内取**首个 `templates_id>0`** 的模板（一店一模板口径）：`is_free='y'` → 0；组内商品应付 ≥ `minprice`（**元→分**）→ 0；否则 `fee_conf.first_fee`（元→分）× 计价量，`valuation` 1=件数 2=重量 3=体积（重量/体积按行 `×num` 求和后向上取整，且至少 1 档）；无模板或模板缺失 → 0（演示环境默认包邮）。地区分级与续重属 P1 |
+| C25 | 券与积分 | M0 为**开关位**：`coupon_code`/`not_use_coupon`/`point_use` 接受但不产生金额（`coupon_discount=0`、`coupon_info=[]`、`point_fee=0`），字段与结构先就位，券核销属 M1-2、积分抵扣属 M0-8。`point` 回填"商品积分×件数"供前端展示可得积分 |
+| C26 | CART-2 fastbuy | `GET /cart?cart_type=fastbuy&items= item_id:num,...` 用临时行（`cart_id=0`，不落库），出参结构与车内完全同构 |
+| C27 | 写端点出参 | CART-1/3/4/5 成功后一律回吐 **CART-2 全量购物车**（前端一次刷新，无需二次 GET），与 PHP 一致 |
+| C28 | CART-6 角标 | `count`=车内行数、`num`=件数之和，**不区分勾选**（PHP `getCount` 语义） |
+| C29 | ORDER-1 形态 | 跨店铺**扁平聚合**（`item_fee/freight_fee/discount_fee/total_fee` 为各组合计）另给 `group_count`；`items[]` 为参与算价的勾选行（含 `cart_id`，M0-6 下单据此清车），失效行在 `invalid_items[]` |
+| C30 | 加价购行 | `is_plus_buy` 行参与算价（计入 `item_fee`），同时单列进组内 `plus_buy[]`；因此它必须是唯一键的一部分，否则与普通行互相覆盖 |
+| C31 | 金额单位 | 与 §5/C3 同：出参一律分；只有 `shipping_templates.minprice`/`fee_conf.first_fee`（DDL 为元）在读入时换算成分 |
