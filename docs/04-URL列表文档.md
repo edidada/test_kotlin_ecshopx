@@ -501,3 +501,146 @@ M1-2 接进两条真渠道（微信支付 v3、支付宝）与线下转账审核
 | D19 | 两个仿真夹具的传输层不一样，是渠道要求不是随手挑的 | 微信 `HttpHeaders` 区分大小写（`Wechatpay-Signature` 等），JDK 的 HTTP 实现会规范化头名让 SDK 取不到签名 → 微信夹具必须裸 `ServerSocket`；支付宝只验应答正文里的节点子串，头名无所谓 → 可以用 JDK `HttpServer`。SDK 域名来自不可改的 `HostName` 枚举，接缝是 `ecx.pay.wxpay.base-url`：OkHttp 拦截器只换 scheme+host+port，**路径与查询串原样保留**（签名覆盖的正是"方法+路径+查询串+body"），换沙箱网关零代码改动 |
 | D20 | 出参键位不做假统一 | 微信 JSAPI 仍回 `appId/timeStamp/nonceStr/package/signType/paySign` 六键（PAY-2 契约不变、前端零改动，`paySign` 由 SDK 用商户私钥真签，`MOCK-` 假签名在这个 profile 下不可能出现）；支付宝 `trade.create` 只创建交易、前端用 `my.tradePay({tradeNO})` 调起，因此如实回 `trade_no/out_trade_no/total_amount`。硬凑成同一套键位只会让前端两套逻辑都要写 if |
 | D21 | 冒烟脚本对"待付款残单"改用差值口径 | m07 断言「清理后本人无待付款残单 = 0」是**全局归零**，而回调失败/凭证驳回的单本该留在 `NOTPAY`。七脚本同库顺序跑（m04→m12）时，m11 刻意留一笔未支付单验「未付款不能申请售后」，m12 若照抄全局口径就会被前一脚本的在途单踩出假 FAIL。m12 因此进场先记基线、收口后断言**回到基线**，并把自己造的残单全部取消 |
+
+## 14. P1 端点规格 —— 营销域（M1-3 开发前补齐，追加于 §13 之后，不回改上文）
+
+范围按 docs/05 §M1-3：**优惠券 + 满减满折 + 秒杀 + 拼团**，四项都挂进同一条算价链且与预览同源。
+不做（P2）：满赠、加价购扩展、砍价、签到/任务/抽奖、人群定向折扣、导购券、券转赠、兑换券核销、分类维度圈品（`use_bound=2`）。
+
+### 14.0 盘点结论：源系统落位与本项目落位
+
+| 本项目表（已存在） | PHP 落位 | 备注 |
+|---|---|---|
+| `promotions_coupon` / `promotions_coupon_user` | `kaquan_discount_cards` / `kaquan_user_discount`（KaquanBundle） | 源系统的券**不在 promotions 库**，本项目按 schema.sql 注释里"统一卡券表"落位 |
+| `promotions_marketing_activity(+_items)` | 同名（`MarketingActivity`，规则列是 **`condition_value`**） | docs/05 写的 `discount_config` 属于另一张表 `promotions_activity`（会员定向自动营销），RuleParser 两种存量形态都要认 |
+| `promotions_seckill_activity` / `_rel_goods` | 同名（`SeckillActivity`/`SeckillRelGoods`） | PHP 库存池在 Redis，本项目无 Redis |
+| `promotion_groups_activity/_team/_team_member` | 同名（**单数 promotion**，与 seckill 的复数前缀不同，沿用源系统列名） | 团号 PHP 是 16 位拼串 |
+
+仓库侧既有挂接点：`PriceContext`/`PriceRule` 责任链（M0-5）、`orders_cart.activity_type/activity_id`（CART-1 已接收）、`orders_normal_orders.act_id/order_class`、`orders_normal_items.coupon_discount/point_fee`、`orders_associations.coupon_discount`、`orders_rel_promotions`（** Kotlin 侧零引用，M1-3 起用它落优惠快照**）、`OrderCreateService.payloadOf` 里 `"team_id" to null` 的预留位、`PointRate.POINT_PER_FEN=1`、seed 里 `point.deduct.max_ratio=50` 与一张"满100减20"券。
+
+### 14.1 会员面（前缀 `/api/h5app/wxapp`，鉴权=会员 JWT，链=frontChain）
+
+| # | 方法 | URL | 说明 |
+|---|---|---|---|
+| CP-F1 | GET | `/coupons` | 可领券列表（分页）：`coupon_id,coupon_name,coupon_type,discount_fee,min_order_fee,valid_text,total_num,sent_num,received_num,can_receive,reason` |
+| CP-F2 | POST | `/coupons/receive` | 领取：`coupon_id`(Y)。CAS 抢量 + 每人限领 + 有效期起算，出参 `{coupon_user_id,coupon_code,expire_time}` |
+| CP-F3 | GET | `/coupons/my` | 我的券：`status`(`UNUSED`/`USED`/`LOCKED`/`EXPIRED`/缺省全部，`EXPIRED` 含"未用但已过期")分页 |
+| CP-F4 | GET | `/coupons/usable` | 结算页可用券：入参与 ORDER-1 同（`cart_type`/`items`/`shop_id`），出参 `usable[]{coupon_user_id,coupon_code,coupon_name,discount_fee,threshold_fee}` + `unusable[]{…,reason}` |
+| MK-F1 | GET | `/marketing/activities` | 进行中满减满折活动：`marketing_id,marketing_type,marketing_name,promotion_tag,condition_text,start_time,end_time,use_bound` |
+| MK-F2 | GET | `/marketing/activities/{marketing_id}` | 活动详情 + 圈定商品（`use_bound=1` 时列 `items[]`） |
+| SK-F1 | GET | `/seckill/activities` | 秒杀场次：`seckill_id,activity_name,activity_start_time,activity_end_time,date_status(pending/doing/end),items_count` |
+| SK-F2 | GET | `/seckill/activities/{seckill_id}/items` | 场次商品：`item_id,item_title,pic,activity_price,origin_price,sales_store,available,limit_num,bought_by_me,is_show` |
+| MK-F3 | GET | `/items/{item_id}/promotions` | 单商品可享的全部营销（满减 tag + 秒杀价），供商详页角标 |
+| GP-F1 | GET | `/groups/activities` | 拼团活动列表：`groups_activity_id,act_name,goods_id,act_price,origin_price,person_num,store,begin_time,end_time,team_count` |
+| GP-F2 | GET | `/groups/activities/{groups_activity_id}` | 详情 + 进行中的团 `teams[]{team_id,join_person_num,person_num,lack_num,end_time,head_nickname}` |
+| GP-F3 | GET | `/groups/teams/{team_id}` | 团成员（脱敏）：`team_id,team_status,person_num,members[]{user_id,nickname(掩码),avatar,join_time,paid,is_head}` |
+| GP-F4 | GET | `/groups/my/teams` | 我参与的团（含我发起的）：`teams[]{team_id,team_status,lack_num,end_time,order_id}` |
+
+### 14.2 后台（前缀 `/api`，鉴权=运营 JWT + `@RequiresResource`，写路径 `@Audited`）
+
+| # | 方法 | URL | 权限码 | 说明 |
+|---|---|---|---|---|
+| CP-A1 | POST | `/coupons` | `promotions.coupon.update` | 建券（面额/门槛/总量/有效期两种形态/限领） |
+| CP-A2 | GET | `/coupons` | `promotions.coupon.lists` | 列表：`coupon_name`(模糊)、`coupon_type`、`status`，分页带 `sent/used` 统计 |
+| CP-A3 | GET | `/coupons/{coupon_id}` | `promotions.coupon.lists` | 详情 + 发放/锁定/已用/过期四计数 |
+| CP-A4 | PUT | `/coupons/{coupon_id}` | `promotions.coupon.update` | 编辑；面额/门槛改动**不回溯**已发券（券快照列） |
+| CP-A5 | PUT | `/coupons/{coupon_id}/status` | `promotions.coupon.update` | 停发/恢复（`status` 布尔） |
+| CP-A6 | DELETE | `/coupons/{coupon_id}` | `promotions.coupon.update` | 删除；`send_num>0` → 422，只能停发 |
+| CP-A7 | GET | `/coupons/{coupon_id}/records` | `promotions.coupon.lists` | 领取/使用记录（分页，含会员昵称与券状态） |
+| CP-A8 | POST | `/coupons/send` | `promotions.coupon.send` | 后台发券：`coupon_id` + `user_ids[]`，或 `grade_id`（按 `promotions_activity.discount_config` 的等级发券映射） |
+| MK-A1 | POST | `/marketing/activities` | `promotions.marketing.update` | 建活动（含阶梯规则，服务端校验 JSON 形态） |
+| MK-A2 | GET | `/marketing/activities` | `promotions.marketing.lists` | 列表：`date_status`/`check_status`/`marketing_type` 过滤 |
+| MK-A3 | GET | `/marketing/activities/{marketing_id}` | `promotions.marketing.lists` | 详情（规则原样回 + 解析后的阶梯） |
+| MK-A4 | PUT | `/marketing/activities/{marketing_id}` | `promotions.marketing.update` | 编辑（重新审核后回到 `non-reviewed`） |
+| MK-A5 | PUT | `/marketing/activities/{marketing_id}/items` | `promotions.marketing.update` | 圈品：全量覆盖 `items[]{item_id,item_name,price,promotion_tag,is_show}` |
+| MK-A6 | PUT | `/marketing/activities/{marketing_id}/check` | `promotions.marketing.check` | 审核：`check_status=reviewed/unreviewed`（只有 reviewed 参与算价） |
+| MK-A7 | DELETE | `/marketing/activities/{marketing_id}` | `promotions.marketing.update` | 删除活动 + 其圈品行 |
+| SK-A1 | POST | `/seckill/activities` | `promotions.seckill.update` | 建场次（`validity_period` 分钟、`limit_money` 单笔限额） |
+| SK-A2 | GET | `/seckill/activities` | `promotions.seckill.lists` | 列表（`date_status` 过滤） |
+| SK-A3 | GET | `/seckill/activities/{seckill_id}` | `promotions.seckill.lists` | 详情 + 商品行（含 `hold_store`） |
+| SK-A4 | PUT | `/seckill/activities/{seckill_id}` | `promotions.seckill.update` | 改场次（时间/限额/名称） |
+| SK-A5 | PUT | `/seckill/activities/{seckill_id}/status` | `promotions.seckill.update` | 停用/恢复（`disabled`） |
+| SK-A6 | PUT | `/seckill/activities/{seckill_id}/goods` | `promotions.seckill.update` | 商品行 upsert：`items[]{item_id,activity_price,activity_store,limit_num,is_show}`；已产生销量的行**只允许加库存** |
+| SK-A7 | GET | `/seckill/activities/{seckill_id}/report` | `promotions.seckill.lists` | 场次销量报表（按行 `sales_store`/`hold_store`/金额） |
+| GP-A1 | POST | `/groups/activities` | `promotions.groups.update` | 建拼团活动（`person_num/limit_time/robot/limit_buy_num`） |
+| GP-A2 | GET | `/groups/activities` | `promotions.groups.lists` | 列表 |
+| GP-A3 | GET | `/groups/activities/{groups_activity_id}` | `promotions.groups.lists` | 详情 + 团统计（进行/成/败） |
+| GP-A4 | PUT | `/groups/activities/{groups_activity_id}` | `promotions.groups.update` | 编辑（`store` 只允许加） |
+| GP-A5 | PUT | `/groups/activities/{groups_activity_id}/status` | `promotions.groups.update` | 停用 / 强制结束（PHP `finish/{id}`：结束 = 未成团队立即失败退款） |
+| GP-A6 | GET | `/groups/teams` | `promotions.groups.lists` | 团列表：`act_id`/`team_status` 过滤，分页 |
+
+新增权限码 27..40（`sql/seed.sql` 末尾追加，挂 role 1）：`promotions`(catalog) + `promotions.coupon.lists/update/send` + `promotions.marketing.lists/update/check` + `promotions.seckill.lists/update` + `promotions.groups.lists/update`。
+
+### 14.3 结算与下单入参增量
+
+| 端点 | 新增入参 | 语义 |
+|---|---|---|
+| ORDER-1 / CART-2 / CP-F4 | `coupon_code`、`not_use_coupon`、`point_use` | 从 M0 的开关位变成**真产生金额**（撤销 C25 的"恒 0"口径，在 §15 以新 C 记录） |
+| ORDER-2/3 | `order_class`(`normal`/`seckill`/`groups`)、`act_id`、`team_id` | `order_type` 仍只接受 `normal`（`service` 等一律 501，M0 的守卫不动）；秒杀/拼团走 `order_class`，与 PHP 同列 |
+| ORDER-2/3 出参 | `team_id` | 开团/参团成功才回，普通单恒 `null`（`payloadOf` 的预留位落地） |
+
+### 14.4 满减满折规则：RuleParser 兼容的存量 JSON
+
+规则文本存在 `promotions_marketing_activity.condition_value`（**元**为单位的字符串金额，与 PHP 一致；本项目内部一律分，换算只发生在解析处）。阶梯数组按 `full` 升序，取**最高命中档**。
+
+| `marketing_type` | 存量形态（PHP 原样） | 解析结果 |
+|---|---|---|
+| `full_minus` | `[{"full":"100.00","minus":"20.00"},{"full":"200.00","minus":"50.00"}]` | 满 100 减 20 / 满 200 减 50（分：`10000→2000`） |
+| `full_discount` | `[{"full":"100.00","discount":"85"}]` | 满 100 打 85 折（`discount` 是百分数 1..<100，折让 = 基数 ×(100-85)/100 向下取整） |
+| `plus_price_buy` | `[{"full":"100.00","price":"10.00"}]` + `gifts[]` | **认得但不参与算价**（加价购 P2） |
+| `full_gift`/`single_gift` | `[{"full":"100.00"}]` | 认得但不参与算价（满赠 P2） |
+| `self_select` | `[{"full":"100.00","num":"2"}]` | 认得但不参与算价 |
+
+`condition_type` 决定基数口径：`totalfee` → 组内应付金额（分）；`quantity` → 组内件数。
+`canjoin_repeat=true`（上不封顶）→ 折让 ×`floor(基数/full)`；`false` → 只按最高命中档算一次。
+脏数据口径：`condition_value` 空/非法 JSON/负数/`full<=0` → 该活动视为未配置，**不报错、不产生优惠**（存量脏行不能把整条算价链打挂）；`full_minus` 里 `minus>full` 的档丢弃。
+另一形态 `promotions_activity.discount_config` = `{"coupons":{"<grade_id>":[{"id":<coupon_id>,"count":n}]},"goods":{…}}`，只在 CP-A8「按等级发券」里读，与满减无关 —— RuleParser 两种都解析，文档 §14.0 已说明列名漂移。
+
+### 14.5 算价链：固定顺序与叠加口径（门槛用例的坐标系）
+
+```
+10 GroupingRule        店铺分组（不变）
+15 ActivityPriceRule   秒杀/活动价覆盖行单价（新增；只改 l.price，下游一律以覆盖后为基准）
+20 MemberDiscountRule  会员等级折让（不变，逐行 floor）
+30 FullReductionRule   满减 / 满折（实装，按组匹配档位；free_postage 命中则组运费=0）
+40 CouponRule          优惠券（实装，按组抵扣 + 逐行分摊）
+50 PointDeductRule     积分抵扣（新增，受 point.deduct.max_ratio 约束）
+60 FreightRule         运费（不变，读 30 写的 freePostage）
+90 TotalSyncRule       汇总钳制（不变，钳制扩展到三类抵扣各自不得为负、合计不得超过行小计）
+```
+
+基数一律是"当前已折让后的应付"，所以叠加顺序 = 上面这张表，且**每一步都可复现**：
+- `行应付 = item_fee − discount_fee − coupon_fee − point_fee`（`PriceLine` 新增后两类字段，`total_fee` 口径随之扩展；活动/秒杀/满减继续走 `discount_fee`）；
+- 满减、券、积分三类抵扣**都逐行分摊**（按行应付占比 floor，余数给应付最大的那一行），因此 `Σ行 total_fee == 组 total_fee == 单 total_fee` 恒成立 — 售后按件分摊（M1-1）不会把积分/券抵扣重复退一次；
+- 券：门槛与抵扣都只比"券所在组的应付"（M0-6 已限定一单一店，`groupCount>1` 时券不生效并在 CP-F4/ORDER-1 里给出 `reason`）；抵扣 = `min(面额, 组应付)`，运费不参与（与 PHP 现金券排除运费一致）；
+- 积分：`抵扣上限(分) = min(可用积分 × 1分/积分, floor(剩余应付 × max_ratio%))`，`point_use = point_fee`（1 积分 = 1 分，`PointRate` 不变）；`pay_type=point` 是 C52 的**全额兑换**，与抵扣互斥 — 已用抵扣的单再选积分支付 → 422；
+- ORDER-1 出参落实 `coupon_discount/coupon_info[]{id,coupon_code,info,type,rule,discount_fee}/point_fee/user_point/max_point/limit_point`，`discount_info[]` 每项 `type` 取 `full_minus`/`full_discount`/`seckill`/`coupon`/`point`（PHP 同字段，M0 时恒空）。
+
+预览==下单不变：`ActivityPriceRule`/`FullReductionRule`/`CouponRule`/`PointDeductRule` 需要的活动、券、余额**全部由 `CartService.buildContext` 预取进 `PriceContext`**（含 `now`），规则链本身仍然不查库、不取时间、无随机 — M0-5 的属性测试继续有效。
+
+### 14.6 生命周期与定时
+
+| 对象 | 状态机 | 迁移点 |
+|---|---|---|
+| 券 `promotions_coupon_user.status` | `UNUSED → LOCKED → USED`，`LOCKED → UNUSED`（取消/关单），`UNUSED → EXPIRED`（回收） | 下单事务内 CAS 锁；`PayService` 结清后核销；`OrderFlowService` 取消回退；`CouponExpireJob` 扫 `expire_time<=now` |
+| 满减满折活动 | `non-reviewed → reviewed ⇄ unreviewed`，`status` 布尔另作"是否启用" | MK-A6；只有 `reviewed && status && 时间在窗` 参与算价 |
+| 秒杀场次 | `pending → doing → end`（按时间派生，不落列）+ `disabled` 停用 | SK-A5 |
+| 秒杀库存 | `available = activity_store − sales_store − hold_store` | 下单 CAS 占 `hold_store`，结清 `hold→sales`，取消/超时释放 `hold`；`auto_cancel_time = min(now+validity_period×60, activity_end_time)` |
+| 拼团 | `team_status 1 进行中 → 2 成功 / 3 失败` | 参团 CAS `join_person_num<person_num`；结清后计数满员即成团；`GroupsSettleJob` 到期失败→**复用 M1-1 退款链**自动全额退 + 释放库存与名额；临近结束（≤600s）且 `robot=true` 补 `user_id=0` 机器人成团 |
+| 拼团单发货 | 未成团（`team_status!=2`）不得发货 → 422 | `OrderAdminController` 发货前置校验；订单状态本身**不新增**（钱进来就是 `PAYED`） |
+
+定时任务沿用 M0-6 的口径（`@Scheduled` + 条件更新代替分布式锁，测试可直接调 `job.runNow()`）：`CouponExpireJob`、`GroupsSettleJob`、`SeckillSettleJob`（释放超时未付的 `hold_store`，与订单超时关单同一扫描节拍、不重复扣）。
+
+### 14.7 与源系统的差异（D 系列续编，追加于 §13.3 之后）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D22 | 券只落统一卡券表，不做 `kaquan_*` 全字段 | 源系统券有 12 类字段（导购券/兑换券/使用平台/转赠/`most_cost` 封顶…），本项目 `promotions_coupon(_user)` 只保留算价与生命周期必需列。**`coupon_type` 在 seed 里那张"满100减20"取的是 `discount`**，与 `cash` 同语义（都按 `discount_fee` 分抵扣）；按比例折扣券、兑换券属 P2，读到未知类型不产生优惠 |
+| D23 | 补齐"下单锁券"，源系统其实没有 | PHP `CountPreferentialFee` 调 `freezeUserCard()`，而该方法**全仓无实现** — 券没有锁定态，一张券可以同时挂在多笔待付款单上。本项目引入 `LOCKED` 态并走 CAS（`WHERE status='UNUSED'`），待付款单占用期间该券不可复用；取消/关单必回退，回退也走 CAS（`WHERE status='LOCKED' AND order_id=?`） |
+| D24 | 秒杀库存从 Redis 池改为 DB 三列 CAS | 源系统 `SeckillActivityItemStoreService` + Redis Lua + 延迟任务 `CancelSeckillPlatTicket`；本仓库无 Redis。改成 `activity_store/sales_store/hold_store` 三列，可购量 = 总 − 已售 − 占用，占用与释放都是条件更新（受影响行数 0 即失败），与 M0-6 商品库存同一套语义。Redis 的"占资格 ticket"由 `validity_period` + 超时关单代替 |
+| D25 | 拼团超员在结构上不可能发生 | 源系统 `updateNum()` 是 `findOneBy` + `+1` 的读—改—写（事务内但无 CAS），并发两笔能把 2 人团坐成 3 人，靠"已成团再来就立刻退款"兜底。本项目参团走 `WHERE team_status=1 AND join_person_num<person_num` 条件更新，抢不到名额直接 422；成团判定同样 CAS，只有一笔能把它推到 2 |
+| D26 | 不新增订单状态表达"待成团" | 源系统有 `WAIT_GROUPS_SUCCESS` 订单状态。本项目"未成团"是**团队状态**不是订单状态：付款成功即 `PAYED`，发货侧加"未成团不得发货"卡口，失败团由 `GroupsSettleJob` 走 M1-1 退款链全额退。少一个状态就少一处状态机漂移，且不影响 M0-6/M1-1 已交付的迁移白名单 |
+| D27 | 满减档位基数 = 会员折后应付 | 源系统 `OrderService` 按原价匹配档位、且会员折扣排在券之后，而同一份代码里交易级 `DiscountService::discount()` 是会员卡折扣先于券 — PHP 自身两处不一致。本项目固定为「等级折让 → 满减 → 券 → 积分」，docs/03 §7.1 的"会员折扣"位置留给 P2 的人群定向折扣；等级折让的逐行 floor 口径（C22）保持 M0-5 交付时一字不动 |
+| D28 | 券与积分抵扣逐行分摊 | 源系统只在单级记 `coupon_discount/point_fee`，行不分摊；本项目要求 `Σ行=组=单` 的守恒式（§14.5），否则 M1-1 的按件分摊会把未分摊的抵扣重复退一次。`orders_normal_items.coupon_discount/point_fee` 两列本来就为这个口径预留 |
+| D29 | 团号用号段，不用 PHP 的 16 位拼串 | PHP `GetTeamIdTrait::genId()` = 距 2012 的天数 + 90 秒槽 + Redis 计数器 + `user_id%10000`，依赖 Redis 且同秒并发靠运气。本项目 `team_id = "GT" + SeqGenerator(group_team_id)`，唯一索引 `uk_team` 兜底，可重复生成、可测 |
+| D30 | PHP 的 everyMinute 闭包与队列 job → 三个显式 Job 类 | 源系统调度写在 `EspierBundle/Console/Kernel.php`，本地不可复现也不便测试。本项目 `CouponExpireJob/GroupsSettleJob/SeckillSettleJob` 各暴露 `runNow(now)`，端到端用例直接驱动时间而不等调度 |
