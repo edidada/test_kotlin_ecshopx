@@ -23,6 +23,10 @@ import com.ecshopx.kotlin.dao.order.OrderOperateLogDO
 import com.ecshopx.kotlin.dao.order.OrderOperateLogMapper
 import com.ecshopx.kotlin.dao.order.OrdersMapper
 import com.ecshopx.kotlin.dao.order.TransitPatch
+import com.ecshopx.kotlin.dao.pay.PointLogDO
+import com.ecshopx.kotlin.dao.pay.PointMapper
+import com.ecshopx.kotlin.dao.promotion.RelPromotionMapper
+import com.ecshopx.kotlin.service.promotion.CouponService
 import com.ecshopx.kotlin.service.tx.Db
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
@@ -33,6 +37,11 @@ import org.springframework.stereotype.Service
  * 每一次状态变化都是「机器判定合法 → 条件更新 CAS → 只有 CAS 成功才做副作用」：
  * 用户点取消与定时任务关单同时命中同一单时，只有一边能拿到受影响行数 1，
  * 失败方得到 422「订单状态已变更」，库存不会出现重复回补。
+ *
+ * M1-3 起，用户资产的回退挂在这两条唯一入口上（不在各支付渠道里各写一遍）：
+ *  - 结清 `markPaid` → 券 `LOCKED→USED`（`consume` 按 order_id 走，重复回调第二次 0 行）；
+ *  - 关单 `runClose` → 券 `LOCKED→UNUSED`、积分余额回补、优惠快照作废。
+ * 没用券/没用积分的单在这几条语句上都是 0 行，因此不需要先查"这单用没用"。
  */
 @Service
 class OrderFlowService(
@@ -45,6 +54,9 @@ class OrderFlowService(
     private val goodsItems: ItemsMapper,
     private val configs: SysConfigMapper,
     private val trades: TradeMapper,
+    private val rels: RelPromotionMapper,
+    private val coupons: CouponService,
+    private val points: PointMapper,
     private val db: Db,
     private val mapper: ObjectMapper,
 ) {
@@ -111,6 +123,8 @@ class OrderFlowService(
             val hit = orders.transit(orderId, patch, fromStatus = o.orderStatus, fromPayStatus = null, userId = null, updated = now)
             if (hit == 0) return@transactional false
             orders.syncAssoc(orderId, OrderStatus.PAYED, o.cancelStatus, DeliveryStatus.PENDING, null, now)
+            // 券核销：按 order_id 从 LOCKED 出发；这单没用券就是 0 行，重复回调第二次也是 0 行
+            coupons.consume(orderId, now)
             logs.insert(
                 OrderOperateLogDO().apply {
                     this.orderId = orderId; operatorRole = "system"; operator = "system"; behavior = t.behavior
@@ -302,6 +316,10 @@ class OrderFlowService(
         if (hit == 0) return@transactional false
         // 关单同时收掉该单所有未付支付单：否则渠道回调可能把已关闭的单"付活"
         trades.closeByOrder(o.orderId.toString(), now)
+        // 用户资产回退：券回 UNUSED、积分抵现回补余额、优惠快照作废（没用过都是 0 行）
+        coupons.release(o.orderId)
+        refundPointFee(o, now)
+        rels.invalidate(o.orderId, now)
         val rows = orderItems.listByOrder(o.orderId)
         val restored = rows.filter { it.cancelItemNum == 0 }
         restored.forEach { row ->
@@ -333,6 +351,26 @@ class OrderFlowService(
 
     private fun load(orderId: Long): NormalOrderDO =
         orders.findById(orderId) ?: throw BizException(ErrorCode.NOT_FOUND, "订单不存在")
+
+    /**
+     * 关单回补积分抵现：只回余额、**不动 `total_point`**（回补不是"获得"，与 M1-1 退积分同口径）。
+     * 账户行不存在时静默跳过：那是数据异常，不该让一次取消失败。
+     */
+    private fun refundPointFee(
+        o: NormalOrderDO,
+        now: Long,
+    ) {
+        if (o.pointFee <= 0) return
+        val acc = points.find(o.companyId, o.userId) ?: return
+        if (points.refund(o.companyId, o.userId, o.pointFee, now) == 0) return
+        points.insertLog(
+            PointLogDO().apply {
+                companyId = o.companyId; userId = o.userId; orderId = o.orderId.toString()
+                changePoint = o.pointFee; beforePoint = acc.point; afterPoint = acc.point + o.pointFee
+                remark = "订单关闭，积分抵现回补"; created = now
+            },
+        )
+    }
 
     private fun loadOwned(userId: Long, orderId: Long): NormalOrderDO {
         val o = load(orderId)

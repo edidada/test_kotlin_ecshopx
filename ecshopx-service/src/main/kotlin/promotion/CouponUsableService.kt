@@ -1,7 +1,6 @@
 package com.ecshopx.kotlin.service.promotion
 
 import com.ecshopx.kotlin.common.domain.TimeSec
-import com.ecshopx.kotlin.dao.promotion.CouponUserDO
 import com.ecshopx.kotlin.service.cart.CartService
 import com.ecshopx.kotlin.service.cart.PreviewForm
 import org.springframework.stereotype.Service
@@ -42,11 +41,11 @@ class CouponUsableService(
             // 一单一店才有"这张券抵多少"的确定答案；多店时不猜店，直接判不可用
             val g = if (multiShop) null else groups.firstOrNull()
             val payFee = g?.cartTotalPrice ?: 0L
-            val reason = if (multiShop) "本单包含多个店铺，优惠券只支持单店铺结算" else coupons.usable(c, payFee, now)
+            val reason = if (multiShop) "本单包含多个店铺，优惠券只支持单店铺结算" else CouponCheck.usable(c, payFee, now)
             if (reason == null) {
-                usable += row(c, coupons.deductOf(c, payFee))
+                usable += CouponCheck.viewOf(c, CouponCheck.deductOf(c, payFee))
             } else {
-                unusable += LinkedHashMap(row(c, 0L)).apply { put("reason", reason) }
+                unusable += LinkedHashMap(CouponCheck.viewOf(c, 0L)).apply { put("reason", reason) }
             }
         }
         return linkedMapOf(
@@ -59,16 +58,4 @@ class CouponUsableService(
 
     private fun payFeeOf(groups: List<com.ecshopx.kotlin.service.cart.PriceGroup>, multiShop: Boolean): Long =
         if (multiShop) 0L else groups.firstOrNull()?.cartTotalPrice ?: 0L
-
-    private fun row(c: CouponUserDO, deduct: Long): Map<String, Any?> = linkedMapOf(
-        "coupon_user_id" to c.id,
-        "coupon_id" to c.couponId,
-        "coupon_code" to c.couponCode,
-        "coupon_name" to c.couponName,
-        "discount_fee" to c.discountFee,
-        "threshold_fee" to c.minOrderFee,
-        "min_order_fee" to c.minOrderFee,
-        "deduct_fee" to deduct,
-        "expire_time" to c.expireTime,
-    )
 }

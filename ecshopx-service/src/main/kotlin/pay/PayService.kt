@@ -92,6 +92,10 @@ class PayService(
         if (o.payStatus == "PAYED" || o.orderStatus != com.ecshopx.kotlin.common.domain.OrderStatus.NOTPAY) {
             throw BizException(ErrorCode.BIZ, if (o.payStatus == "PAYED") "订单已支付" else "订单当前状态不可支付")
         }
+        // D29：积分抵现（部分抵扣）与纯积分支付是两条路，同一单不能既抵一部分又按积分全额付
+        if (channel.payType == "point" && o.pointFee > 0) {
+            throw BizException(ErrorCode.BIZ, "本单已使用积分抵现，不能再用纯积分支付", mapOf("pay_type" to listOf("与积分抵扣互斥")))
+        }
         val trade = ensureTrade(o, channel.payType)
         val outcome = db.transactional {
             val out = channel.pay(o, trade)

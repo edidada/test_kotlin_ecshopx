@@ -70,7 +70,8 @@ data class PreviewForm(
     val distributorId: Long? = null,
     /** 券开关位，M0 不生效 */
     @JsonAlias("coupon_code") val couponCode: String? = null,
-    val usePoint: Boolean? = null,
+    /** 积分抵扣开关：docs/04 §2.4 公共入参名叫 `point_use`（与 ORDER-2 同一个键），`use_point` 兼容收 */
+    @JsonAlias("use_point") val pointUse: Boolean? = null,
 ) {
     fun entries(): List<CartItemNum> =
         items?.filter { it.itemId != null && it.itemId > 0 }

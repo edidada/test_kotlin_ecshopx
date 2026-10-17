@@ -644,3 +644,39 @@ M1-2 接进两条真渠道（微信支付 v3、支付宝）与线下转账审核
 | D28 | 券与积分抵扣逐行分摊 | 源系统只在单级记 `coupon_discount/point_fee`，行不分摊；本项目要求 `Σ行=组=单` 的守恒式（§14.5），否则 M1-1 的按件分摊会把未分摊的抵扣重复退一次。`orders_normal_items.coupon_discount/point_fee` 两列本来就为这个口径预留 |
 | D29 | 团号用号段，不用 PHP 的 16 位拼串 | PHP `GetTeamIdTrait::genId()` = 距 2012 的天数 + 90 秒槽 + Redis 计数器 + `user_id%10000`，依赖 Redis 且同秒并发靠运气。本项目 `team_id = "GT" + SeqGenerator(group_team_id)`，唯一索引 `uk_team` 兜底，可重复生成、可测 |
 | D30 | PHP 的 everyMinute 闭包与队列 job → 三个显式 Job 类 | 源系统调度写在 `EspierBundle/Console/Kernel.php`，本地不可复现也不便测试。本项目 `CouponExpireJob/GroupsSettleJob/SeckillSettleJob` 各暴露 `runNow(now)`，端到端用例直接驱动时间而不等调度 |
+
+## 15. 实现期语义补充（M1-3 #55 优惠券 + #56 满减满折挂进算价链，追加于 §14 之后，不回改上文）
+
+本节记的是"实现之后才确定"的口径；§14 的规格原文一字不动，冲突处以本节为准（与 §5..§13 同一惯例）。
+
+### 15.1 口径（C 系列续编，追加于 §13.2 之后）
+
+| # | 口径 | 说明 |
+|---|---|---|
+| C109 | ORDER-1 的积分开关请求名回到 `point_use` | §2.4 公共入参与 ORDER-2 一直是 `point_use`，`PreviewForm` 原先声明成 `use_point`——M0 把它当纯开关位，没人真传过，所以字段名漂移一直潜伏着；券/积分开始真抵钱后第一次暴露就是**预览不抵、下单却抵**（预览≠下单）。现按文档名收，`@JsonAlias("use_point")` 兼容旧写法。教训：凡"M0 接受但不产生金额"的字段，M1 落地时必须回头核对**请求侧键名 == 响应侧键名 == 兄弟端点键名**。 |
+| C110 | ORDER-2 显式给券码而抵扣为 0 → 422 | 撤销 C25 的开关位口径。券码给了但门槛没到 / 多店铺不抵时，下单直接拒绝并回**与 ORDER-1 同一个 `coupon_reason`**（复用 `CartService.couponReason`），绝不静默按"不用券"成交——否则用户看到的价格与成交价不同，还把券吞了。占用逻辑同口径：只有真扣了钱才 `UNUSED→LOCKED`，抵扣为 0 时不动券。 |
+| C111 | 一店一活动择优 | 同一店铺组内多个满减/满折**只记折让最大的一个**（同额按 `marketing_id` 升序定序），`discount_info[]` 与 `used_activity[]` 都只出一条。择优发生在算价而不是取数：库里可以同时是 `reviewed`，取数只筛「审核 + 启用 + 在窗」。 |
+| C112 | 满减基数不含加价购行 | `is_plus_buy` 的行不参与门槛与折让（它本身就是换购价），否则"满 100 减 20"会把 10 元换购品也算进门槛、再减一次。 |
+| C113 | `free_postage` 只写标记，运费仍由 FreightRule 判 | 活动命中只把组标记 `g.freePostage` 置真；`FreightRule` 的判序是「活动包邮 → 模板包邮 → 满额包邮 → 按计价量收费」。未命中的组不受影响（同模板的另一件照收运费），包邮也不参与抵扣（抵扣在前、运费在后，§14.5 的顺序）。 |
+| C114 | 元↔分只在 `MarketingRuleParser` 换算一次 | `condition_value` 入库保持 PHP 的**元字符串**（存量行不改写），出参 `steps[]` 给分 + 文案。脏数据分级：整串非法 JSON → `steps=[]`（活动视为未配置，不减钱也不报错）；单档脏（`full<=0`、金额型 `minus>full`、`discount` 不在 1..<100）丢该档；新建/编辑时一档都不合法 → 配置台 400「至少要有一档合法规则」，而**存量**脏行仍只判"不优惠"（不能因为一条脏历史把结算链打死）。 |
+| C115 | 审核与启用是两个维度 | MK-A6 只改 `check_status`；「审核通过但停用」这一态由 `status` 列表达（审核 API 不碰 `status`，用例只能配 SQL 出来）。配置台默认列表**不按 `status` 过滤**（运营要能看见并重新启用停用的活动，`?status=false` 才是筛停用的视图），前台与算价一律三筛 `reviewed && status && 在窗`——筛子与取数同一条 SQL 语义，所以"页面写着满 100 减 20、结算时不减"不会发生。 |
+| C116 | 行上活动痕迹只在 CART-2 | ORDER-1 的 `items[]` 是 PHP 的价格行（只有金额字段），`activity_info[]` 挂在 CART-2 的 `valid_cart[].list[]` 上。前端要显示"这一行的便宜是谁给的"读购物车面，不要读预览。 |
+| C117 | `limit_point`/`max_point` 是"本单可用"口径 | 未勾 `point_use` 时两者都回 0（比例位不显示，前端据此隐藏），勾了才回 `max_ratio` 与 `min(余额, 折让后应付 × 比例%)`；`user_point` 始终是账上余额。三个字段各说一件事，前端只有一个判据。1 积分 = 1 分（C52 的 `PointRate` 不变）。 |
+| C118 | 券的三处实现期口径 | `get_limit` 是**每会员累计限领**（不是每单）；CP-F3 默认桶不含 `LOCKED`（在途占用的券不单列，要看 `?status=LOCKED`）；`listAvailable` 故意不过滤已到期的 `UNUSED` 行——用户要能在结算页看到"我的券为什么不能用"，回收由 `CouponExpireJob` 负责而不是查询负责。 |
+| C119 | seed 那张"满100减20"的 `coupon_type='discount'` 按现金券抵 | 与 D22 同源：`cash`/`discount` 在本项目同语义（都读 `discount_fee` 分）。真正的比例折扣券、兑换券属 P2；读到未知类型**不产生优惠**而不是报错。 |
+| C120 | 关单回补抵现积分只回余额 | 只 `point += ?` 并记 `point_member_log`（`remark=订单关闭，积分抵现回补`），**不动 `total_point`**——回补不是"获得积分"，累计列一动等级与榜单就漂（与 M1-1 退积分同一口径）。账户行不存在时静默跳过：那是数据异常，不该让一次取消失败。 |
+| C121 | 优惠快照一行一笔折让，取消只作废不删行 | `orders_rel_promotions` 按「活动/券/积分各一行」落，`Σdiscount_fee == item_fee − total_fee`（不含运费）；关单把 `status` 置 `invalid`，行留着。退款与对账读快照不重算——活动模板与券模板随时会被改被删。 |
+| C122 | 权限码 seed 实落 27..37 | §14.2 的"27..40"是按端点位预留的编号段。#55/#56 落库的是 `promotions`(catalog) + `promotions.coupon.lists/update/send` + `promotions.marketing.lists/update/check` = 27..37；`seckill/groups` 的四条码随 #57 一起追加。**端点先有码再有路径**，编号段允许比文档窄。 |
+
+### 15.2 与源系统的差异续编（D 系列，追加于 §14.7 之后）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D31 | `use_bound` 只支持 0 全场 / 1 指定商品 | 源系统另有 2 按分类圈品，`use_shop`/`shop_ids`（多店铺定向）也未接。本项目对 `use_bound=2` 直接 400「只支持 0 全场 / 1 指定商品（按分类属 P2）」，并把列原样留着——存量行读得到，只是不参与算价。 |
+| D32 | 满折也记折让额，不记折率 | `full_discount` 的 `discount=85` 在解析时立刻折算成 `基数 ×15/100 向下取整`，落库与快照都走 `discount_fee` 一列（源系统同字段），`activity_type` 用 `full_minus`/`full_discount` 区分来源，不出第二列。 |
+| D33 | 圈品是全量覆盖，`errors` 键带下标 | MK-A5 一次 `PUT` 就是最终态（源系统先清后插但校验只到"整体非空"）。本项目逐行校验并把错误定位到 `items[0].item_id` / `items[0].price` 形态的键，后台表单能直接标红到行；空圈、重复 `item_id`、`id<=0`、负价都是 400。 |
+
+### 15.3 实跑冒烟
+
+`tools/m13_smoke.py`（#56：满减满折 + 券/积分挂链，53 项）设计成**可重复跑**：进场先按 `MK<时间戳>` 名字预清理上一轮的活动（半途中断的残档会污染收尾那条"全场折让回 0"），积分与待付款残单都按**基线差值**断言，本案建的活动全部 MK-A7 删除、券按 CP-A6 停发（已发放过的券删不掉，422 是正确行为）。注意 m07 与 m04 仍要求干净库（`user_deposit`、`items_rel_attributes` 的绝对值断言），这是它们 docstring 里写明的既有约束，不是本轮回归。
+

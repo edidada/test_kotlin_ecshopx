@@ -12,9 +12,20 @@ import com.ecshopx.kotlin.dao.cart.OrdersCartDO
 import com.ecshopx.kotlin.dao.cart.OrdersCartMapper
 import com.ecshopx.kotlin.dao.goods.RelAttributesMapper
 import com.ecshopx.kotlin.dao.goods.ShippingTemplatesMapper
+import com.ecshopx.kotlin.dao.goods.SysConfigMapper
+import com.ecshopx.kotlin.dao.pay.PointMapper
+import com.ecshopx.kotlin.dao.promotion.CouponUserDO
+import com.ecshopx.kotlin.dao.promotion.MarketingActivityMapper
+import com.ecshopx.kotlin.dao.promotion.MarketingBound
+import com.ecshopx.kotlin.dao.promotion.MarketingItemsMapper
+import com.ecshopx.kotlin.dao.promotion.MarketingType
 import com.ecshopx.kotlin.dao.tenant.CompanyMapper
 import com.ecshopx.kotlin.dao.tenant.DistributorShopMapper
 import com.ecshopx.kotlin.dao.tenant.ShopProfileDO
+import com.ecshopx.kotlin.service.promotion.CouponCheck
+import com.ecshopx.kotlin.service.promotion.CouponService
+import com.ecshopx.kotlin.service.promotion.MarketingOffer
+import com.ecshopx.kotlin.service.promotion.MarketingRuleParser
 import com.ecshopx.kotlin.service.tx.Db
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
@@ -26,6 +37,9 @@ import java.math.BigDecimal
  * 只有一条算价链路：车内行/fastbuy 行 → [Pending] → [quote] → MarketingEngine → 出参。
  * CART-2 与 ORDER-1 都调 [quote]，M0-6 下单同样只调 [quote]，
  * 「预览价==下单价」由此变成结构事实而不是约定。
+ *
+ * M1-3 之后这里是**整条算价链唯一的取数点**：活动、券、积分余额、时间戳都在这里查完塞进
+ * [PriceContext]，责任链节点因此可以保持纯函数（docs/04 §14.5）。
  */
 @Service
 class CartService(
@@ -37,6 +51,11 @@ class CartService(
     private val shops: DistributorShopMapper,
     private val templates: ShippingTemplatesMapper,
     private val relAttrs: RelAttributesMapper,
+    private val marketing: MarketingActivityMapper,
+    private val marketingItems: MarketingItemsMapper,
+    private val points: PointMapper,
+    private val configs: SysConfigMapper,
+    private val coupons: CouponService,
     private val engine: MarketingEngine,
     private val db: Db,
     private val mapper: ObjectMapper,
@@ -82,9 +101,28 @@ class CartService(
         val freightFee: Long get() = ctx.totalFreight
         val discountFee: Long get() = ctx.totalLineDiscount
         val memberDiscount: Long get() = ctx.groups.sumOf { it.memberDiscount }
+        /** 满减/满折给的那部分（= 行折让合计 − 会员折让），出参里的 `goods_discount` */
+        val activityDiscount: Long get() = (discountFee - memberDiscount).coerceAtLeast(0L)
+        val couponDiscount: Long get() = ctx.couponDiscount
+        val pointFee: Long get() = ctx.totalPointFee
+        val couponInfo: List<Map<String, Any?>> get() = ctx.groups.flatMap { it.couponInfo }
+        val usedActivity: List<Map<String, Any?>> get() = ctx.groups.flatMap { it.usedActivity }
         val totalFee: Long get() = ctx.totalPayFee()
         val totalItemNum: Long get() = ctx.checkedLines.sumOf { it.num }
         val groupCount: Int get() = ctx.groups.count { it.cartTotalCount > 0 }
+        val userPoint: Long get() = ctx.availablePoint
+        val pointRatio: Int get() = ctx.pointRatio
+
+        /**
+         * 本单最多可抵积分：`min(余额, floor(商品应付 × ratio%))`。
+         * 用"抵扣前应付"算上限，[com.ecshopx.kotlin.service.cart.PointDeductRule] 摊完的结果不会超过它。
+         */
+        val maxPoint: Long get() {
+            if (ctx.pointRatio <= 0) return 0L
+            val payable = ctx.groups.sumOf { it.cartTotalPrice } + pointFee
+            return minOf(userPoint, payable * ctx.pointRatio / 100)
+        }
+
         /** 参与算价的行（勾选与未勾选都在，未勾选金额不计入合计） */
         val pricedLines: List<PriceLine> get() = ctx.lines
         val checkStore: Boolean get() = valid.any { it.checked && (it.item?.store ?: 0) < it.num }
@@ -113,7 +151,7 @@ class CartService(
                     fromEntries(form.entries(), userId, companyId)
                 else fromCart(userId, companyId, firstNonZero(form.shopId, form.distributorId)),
                 couponCode = form.couponCode,
-                usePoint = form.usePoint == true,
+                usePoint = form.pointUse == true,
             ),
         )
 
@@ -141,7 +179,7 @@ class CartService(
         )
     }
 
-    /** 唯一建 ctx 的地方：单价取商品主表现价，快照价只用于 is_last_price */
+    /** 唯一建 ctx 的地方：单价取商品主表现价，快照价只用于 is_last_price；活动/券/积分在此预取 */
     private fun buildContext(
         companyId: Long,
         userId: Long,
@@ -150,6 +188,7 @@ class CartService(
         couponCode: String?,
         usePoint: Boolean,
     ): PriceContext {
+        val now = TimeSec.now()
         val lines = valid.map { p ->
             val it = p.item!!
             PriceLine(
@@ -163,14 +202,68 @@ class CartService(
                 checked = p.checked, plusBuy = p.plusBuy,
             )
         }
+        val (coupon, couponReason) = couponOf(companyId, userId, couponCode)
         return PriceContext(
             companyId = companyId, userId = userId,
             gradeName = grade?.gradeName ?: "普通会员",
             gradeDiscount = grade?.discount ?: 100,
             lines = lines, couponCode = couponCode, usePoint = usePoint,
+            availablePoint = pointBalance(companyId, userId),
             templates = freightTemplates(companyId),
+            now = now,
+            offers = pricableOffers(companyId, now, lines.map { it.itemId }.distinct()),
+            coupon = coupon,
+            couponReason = couponReason,
+            pointRatio = if (usePoint) pointRatio(companyId) else 0,
         )
     }
+
+    /**
+     * 算价可参与的满减/满折活动（已审核 + 启用 + 在窗 + 类型在白名单）。
+     *
+     * 圈品一次批量读：`use_bound=1` 的活动只对本次车里的商品做命中查询，
+     * `use_bound=0` 全场活动不看圈品表（PHP 同口径，圈品行只可能配在指定商品活动上）。
+     */
+    private fun pricableOffers(
+        companyId: Long,
+        now: Long,
+        itemIds: List<Long>,
+    ): List<MarketingOffer> {
+        val acts = marketing.listPricable(companyId, now, MarketingType.PRICABLE)
+        if (acts.isEmpty()) return emptyList()
+        val boundIds = acts.filter { it.useBound == MarketingBound.ITEMS }.map { it.marketingId }
+        val itemHit = if (boundIds.isEmpty() || itemIds.isEmpty()) emptyMap() else
+            marketingItems.listHit(boundIds, itemIds).groupBy({ it.marketingId }, { it.itemId }).mapValues { e -> e.value.toSet() }
+        return acts.map { a -> MarketingRuleParser.parse(a, mapper, itemHit[a.marketingId] ?: emptySet()) }
+    }
+
+    /**
+     * 选中的券实例。归属校验在这里做（不在规则里做）：
+     * 别人的券码等于不存在，[CouponCheck] 只负责"这张券本身能不能用"。
+     */
+    private fun couponOf(
+        companyId: Long,
+        userId: Long,
+        code: String?,
+    ): Pair<CouponUserDO?, String?> = when {
+        code.isNullOrBlank() -> null to null
+        else -> {
+            val c = coupons.byCode(code, companyId)
+            when {
+                c == null -> null to "优惠券不存在"
+                c.userId != userId -> null to "优惠券不属于当前会员"
+                else -> c to null
+            }
+        }
+    }
+
+    private fun pointBalance(companyId: Long, userId: Long): Long = points.find(companyId, userId)?.point ?: 0L
+
+    /** 积分抵扣上限比例：租户没配就用平台默认（company_id=0），都没有则不允许抵扣 */
+    private fun pointRatio(companyId: Long): Int =
+        configs.getValue(companyId, KEY_POINT_RATIO)?.toIntOrNull()
+            ?: configs.getValue(0L, KEY_POINT_RATIO)?.toIntOrNull()?.coerceIn(0, 100)
+            ?: 0
 
     private fun fromCart(userId: Long, companyId: Long, shopId: Long?): List<Pending> {
         val rows = carts.listByUser(companyId, userId, shopId)
@@ -328,6 +421,10 @@ class CartService(
             "cart_total_num" to 0L,
             "cart_total_count" to 0,
             "member_discount" to 0L,
+            "coupon_discount" to 0L,
+            "coupon_info" to emptyList<Map<String, Any?>>(),
+            "point_fee" to 0L,
+            "is_free_postage" to false,
             "used_activity" to emptyList<Map<String, Any?>>(),
             "used_activity_ids" to emptyList<Any?>(),
             "gift_activity" to emptyList<Map<String, Any?>>(),
@@ -346,6 +443,10 @@ class CartService(
             this["cart_total_num"] = g.cartTotalNum
             this["cart_total_count"] = g.cartTotalCount
             this["member_discount"] = g.memberDiscount
+            this["coupon_discount"] = g.couponDiscount
+            this["coupon_info"] = g.couponInfo
+            this["point_fee"] = g.pointFee
+            this["is_free_postage"] = g.freePostage
             this["used_activity"] = g.usedActivity
             this["used_activity_ids"] = g.usedActivity.mapNotNull { it["id"] }
             this["gift_activity"] = g.giftActivity
@@ -378,6 +479,8 @@ class CartService(
             "is_plus_buy" to p.plusBuy,
             "is_last_price" to (p.snapshotPrice != (it?.price ?: 0L)),
             "discount_fee" to 0L,
+            "coupon_fee" to 0L,
+            "point_fee" to 0L,
             "total_fee" to 0L,
             "store" to (it?.store ?: 0L),
             "market_price" to (it?.marketPrice ?: 0L),
@@ -415,6 +518,8 @@ class CartService(
             "is_plus_buy" to l.plusBuy,
             "is_last_price" to l.isLastPrice,
             "discount_fee" to l.discountFee,
+            "coupon_fee" to l.couponFee,
+            "point_fee" to l.pointFee,
             "total_fee" to l.totalFee,
             "store" to l.store,
             "market_price" to l.marketPrice,
@@ -491,19 +596,20 @@ class CartService(
             "item_fee" to q.itemFee,
             "freight_fee" to q.freightFee,
             "discount_fee" to q.discountFee,
-            "discount_info" to ctx.groups.flatMap { g -> g.usedActivity.map { linkedMapOf("type" to it["type"], "rule" to it["rule"], "discount_fee" to it["discount_fee"]) } },
-            "coupon_discount" to 0L,
-            "coupon_info" to emptyList<Map<String, Any?>>(),
+            "discount_info" to discountInfo(q),
+            "coupon_discount" to q.couponDiscount,
+            "coupon_info" to q.couponInfo,
+            "coupon_reason" to couponReason(q),
             "member_discount" to q.memberDiscount,
-            "goods_discount" to 0L,
+            "goods_discount" to q.activityDiscount,
             "point" to q.valid.sumOf { p -> (p.item?.point ?: 0L) * p.num },
             "point_use" to q.ctx.usePoint,
-            "point_fee" to 0L,
-            "get_points" to 0L,
+            "point_fee" to q.pointFee,
+            "get_points" to q.valid.sumOf { p -> (p.item?.point ?: 0L) * p.num },
             "bonus_points" to 0L,
-            "user_point" to 0L,
-            "max_point" to 0L,
-            "limit_point" to 0L,
+            "user_point" to q.userPoint,
+            "max_point" to q.maxPoint,
+            "limit_point" to q.pointRatio,
             "total_fee" to q.totalFee,
             "total_rebate" to 0L,
             "totalItemNum" to q.totalItemNum,
@@ -521,6 +627,7 @@ class CartService(
                     "pic" to jsonList(l.pics).firstOrNull(), "num" to l.num, "price" to l.price,
                     "item_fee" to l.itemFee, "total_fee" to l.totalFee,
                     "discount_fee" to l.discountFee, "member_discount" to l.memberDiscount,
+                    "coupon_fee" to l.couponFee, "point_fee" to l.pointFee,
                     "cart_id" to l.cartId, "is_checked" to l.checked, "store" to l.store,
                     "item_spec_desc" to q.specDescById[l.itemId], "approve_status" to l.approveStatus,
                 )
@@ -530,9 +637,51 @@ class CartService(
         )
     }
 
+    /**
+     * ORDER-1 `discount_info[]`：这笔单的折让构成（docs/04 §14.5，`type` 取
+     * `full_minus`/`full_discount`/`seckill`/`coupon`/`point`）。
+     *
+     * 活动、券、积分各记一行：结算页一个列表就能说清"便宜是怎么来的"，
+     * 不用在 `discount_fee/coupon_discount/point_fee` 三个字段之间自己拼。
+     */
+    private fun discountInfo(q: Quote): List<Map<String, Any?>> =
+        q.usedActivity.map { a ->
+            linkedMapOf<String, Any?>("type" to a["type"], "rule" to a["rule"], "discount_fee" to a["discount_fee"])
+        } + q.couponInfo.map { c ->
+            linkedMapOf<String, Any?>("type" to "coupon", "rule" to c["rule"], "discount_fee" to c["deduct_fee"])
+        } + if (q.pointFee > 0) {
+            listOf(linkedMapOf<String, Any?>("type" to "point", "rule" to "积分抵扣 ${q.pointFee} 分", "discount_fee" to q.pointFee))
+        } else {
+            emptyList()
+        }
+
     private fun invalidReason(p: Pending): String = when {
         p.item == null -> "商品不存在"
         p.item.store <= 0 -> "库存不足"
         else -> "商品已下架"
+    }
+
+    /**
+     * 给了券码却没抵到钱的人话原因（ORDER-1 `coupon_reason`）。
+     * 归属问题在预取阶段就有结论；剩下那些（状态/过期/门槛）要等算价跑完才知道比的是哪个数，
+     * 所以这里用**抵扣前的组内应付**再问一次 [CouponCheck]，与 CP-F4 的判据同源。
+     *
+     * 公开给下单侧复用（`OrderCreateService`）：预览说"这券能用"、下单却按不用券成交，
+     * 是最难解释的一类分歧 —— 两处必须读同一个判据。
+     */
+    fun couponReason(q: Quote): String? {
+        val ctx = q.ctx
+        if (ctx.couponCode.isNullOrBlank()) return null
+        ctx.couponReason?.let { return it }
+        val c = ctx.coupon ?: return "优惠券不存在"
+        if (q.couponDiscount > 0) return null
+        val g = ctx.activeGroups.singleOrNull()
+            ?: return if (ctx.activeGroups.size > 1) "本单包含多个店铺，优惠券只支持单店铺结算" else "没有可抵扣的商品金额"
+        return CouponCheck.usable(c, g.cartTotalPrice + g.couponDiscount, ctx.now)
+    }
+
+    companion object {
+        /** 积分抵现上限比例（`sys_config`，company_id=0 是平台默认） */
+        private const val KEY_POINT_RATIO = "point.deduct.max_ratio"
     }
 }

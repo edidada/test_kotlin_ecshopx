@@ -36,8 +36,14 @@ object MarketingType {
     const val FULL_GIFT = "full_gift"
     const val SINGLE_GIFT = "single_gift"
 
-    /** 算价链认识的类型白名单 —— 白名单外一律不进 ctx，脏数据与新型活动都不会算错 */
-    const val PRICABLE_IN = "full_minus, full_discount"
+    /**
+     * 参与算价的类型白名单。
+     *
+     * 这是一份 **Kotlin 列表**而不是 SQL 片段： annotation SQL 里手拼 `IN ('a','b')`
+     * 少写一个引号就是"未知列"运行时异常，编译期发现不了（M1-3 盘点时踩过）。
+     * 白名单外的类型一律不进 ctx —— 脏数据与 P2 新型活动都不会算错。
+     */
+    val PRICABLE = listOf(FULL_MINUS, FULL_DISCOUNT)
 }
 
 /** `use_bound`：0 全场 / 1 指定商品 / 2 分类（P2） */
@@ -179,13 +185,18 @@ interface MarketingActivityMapper {
     /**
      * 算价取数（唯一的算价入口查询）：已审核 + 启用 + 在窗 + 认识的类型。
      * `now` 由调用方传入（`CartService.buildContext` 取一次），规则链本身仍然不取时间。
+     * `types` 由调用方给 [MarketingType.PRICABLE]：白名单放进 SQL 会让"新增活动类型"变成改 SQL。
      */
     @Select(
-        "SELECT $M_COLS FROM promotions_marketing_activity WHERE company_id = #{companyId} AND status = TRUE " +
-            "AND check_status = 'reviewed' AND start_time <= #{now} AND (end_time = 0 OR end_time >= #{now}) " +
-            "AND marketing_type IN (" + MarketingType.PRICABLE_IN + ")",
+        "<script>SELECT $M_COLS FROM promotions_marketing_activity WHERE company_id = #{companyId} AND status = TRUE " +
+            "AND check_status = 'reviewed' AND start_time &lt;= #{now} AND (end_time = 0 OR end_time &gt;= #{now}) " +
+            "AND marketing_type IN <foreach collection=\"types\" item=\"t\" open=\"(\" separator=\",\" close=\")\">#{t}</foreach></script>",
     )
-    fun listPricable(@Param("companyId") companyId: Long, @Param("now") now: Long): List<MarketingActivityDO>
+    fun listPricable(
+        @Param("companyId") companyId: Long,
+        @Param("now") now: Long,
+        @Param("types") types: List<String>,
+    ): List<MarketingActivityDO>
 }
 
 @Mapper
@@ -213,4 +224,18 @@ interface MarketingItemsMapper {
             "AND item_id IN <foreach collection=\"itemIds\" item=\"i\" open=\"(\" separator=\",\" close=\")\">#{i}</foreach></script>",
     )
     fun listHit(@Param("ids") ids: List<Long>, @Param("itemIds") itemIds: List<Long>): List<MarketingItemDO>
+
+    /** MK-A2 列表的圈品计数：一次批量，别给每行活动都补一条 COUNT */
+    @Select(
+        "<script>SELECT marketing_id, COUNT(*) AS cnt FROM promotions_marketing_activity_items " +
+            "WHERE marketing_id IN <foreach collection=\"ids\" item=\"m\" open=\"(\" separator=\",\" close=\")\">#{m}</foreach> " +
+            "GROUP BY marketing_id</script>",
+    )
+    fun countBatch(@Param("ids") ids: List<Long>): List<MarketingItemCountRow>
+}
+
+/** 批量圈品计数的返回行（`marketing_id` 靠 map-underscore-to-camel-case 映射） */
+class MarketingItemCountRow {
+    var marketingId: Long = 0
+    var cnt: Long = 0
 }

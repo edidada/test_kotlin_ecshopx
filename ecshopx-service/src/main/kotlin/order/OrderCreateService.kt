@@ -18,8 +18,12 @@ import com.ecshopx.kotlin.dao.order.OrderItemsMapper
 import com.ecshopx.kotlin.dao.order.OrderOperateLogDO
 import com.ecshopx.kotlin.dao.order.OrderOperateLogMapper
 import com.ecshopx.kotlin.dao.order.OrdersMapper
+import com.ecshopx.kotlin.dao.pay.PointMapper
+import com.ecshopx.kotlin.dao.promotion.RelPromotionDO
+import com.ecshopx.kotlin.dao.promotion.RelPromotionMapper
 import com.ecshopx.kotlin.service.cart.CartService
 import com.ecshopx.kotlin.service.cart.PriceLine
+import com.ecshopx.kotlin.service.promotion.CouponService
 import com.ecshopx.kotlin.service.seq.SeqGenerator
 import com.ecshopx.kotlin.service.tx.Db
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -36,6 +40,10 @@ import org.springframework.stereotype.Service
  *    受影响行数 0 即库存不足/并发抢占，同事务回滚，绝不"读—判—写"；
  * 3. 一单一店：M0 不拆单（多店铺合并下单直接拒绝，`original_order_id` 列已预留，拆单属 M1-4）。
  *
+ * M1-3 起再加一条：**用户资产（券、积分）与库存同一条 CAS 语义** ——
+ * 券走 `UNUSED→LOCKED`、积分走 `point >= ?` 条件扣减，抢不到就整笔回滚。
+ * 算价已经把这些抵扣减进应付了，占用失败还继续下单等于白拿折扣（docs/04 §14.6）。
+ *
  * ORDER-3（创建+预支付）依赖 trade 表与 PayChannel，随 M0-7 支付闭环一并交付。
  */
 @Service
@@ -49,6 +57,9 @@ class OrderCreateService(
     private val goodsItems: ItemsMapper,
     private val addresses: MembersAddressMapper,
     private val configs: SysConfigMapper,
+    private val points: PointMapper,
+    private val coupons: CouponService,
+    private val rels: RelPromotionMapper,
     private val seq: SeqGenerator,
     private val db: Db,
     private val mapper: ObjectMapper,
@@ -104,6 +115,12 @@ class OrderCreateService(
         if (broken.isNotEmpty()) throw BizException(ErrorCode.BIZ, "存在不可购买的商品：${reason(broken.first())}")
         if (q.checkStore) throw BizException(ErrorCode.BIZ, "商品库存不足")
         if (q.groupCount > 1) throw BizException(ErrorCode.BIZ, "暂不支持多店铺合并下单，请按店铺分别结算")
+        // 用户显式点了券就不许"悄悄不用"：抵扣为 0 时拒绝成交并回预览同款原因
+        // （docs/04 §14.3 撤销 C25 的开关位口径——预览与下单同一个 quote，两边判据也同一个）
+        val code = q.ctx.couponCode
+        if (!code.isNullOrBlank() && q.couponDiscount == 0L) {
+            throw BizException(ErrorCode.BIZ, carts.couponReason(q) ?: "优惠券不可用", mapOf("coupon_code" to listOf("不可用")))
+        }
 
         val shopId = q.ctx.groups.first { it.cartTotalCount > 0 }.shopId
         val recv = receiver(userId, form)
@@ -114,10 +131,12 @@ class OrderCreateService(
             val id = seq.next(SeqName.ORDER_NO)
             val now = TimeSec.now()
             deductStock(lines, now)
+            holdUserAssets(userId, q, id, now)
 
             val order = orderRow(id, userId, companyId, shopId, form, q, lines, recv, now, snapshot)
             check(orders.insert(order) == 1) { "订单主行插入失败" }
             lines.forEach { l -> orderItems.insert(itemRow(id, userId, companyId, shopId, l, q, snapshot[l.itemId])) }
+            snapshotPromotions(id, userId, q, lines, now)
             assoc.insert(assocRow(order))
             logs.insert(
                 OrderOperateLogDO().apply {
@@ -137,6 +156,83 @@ class OrderCreateService(
         p.item?.approveStatus != "onsale" -> "商品已下架"
         else -> "库存不足"
     }
+
+    /**
+     * 占用用户资产（M1-3）。**只在算价真的扣了钱时才占用**：
+     * 券码给了但门槛没到 / 多店铺被拒时，抵扣是 0，此时不该把券锁住（用户还能拿它去别的单）。
+     *
+     * 两条都是 CAS，0 行即抛错回滚整笔下单：
+     *  - 券：`UNUSED→LOCKED` 并把 order_id 写进实例行，后续结清走 `consume(order_id)`、关单走 `release(order_id)`；
+     *  - 积分：`point >= ?` 条件扣减，扣完余额不够说明这一分钟内别的单先用掉了。
+     */
+    private fun holdUserAssets(
+        userId: Long,
+        q: CartService.Quote,
+        orderId: Long,
+        now: Long,
+    ) {
+        val ctx = q.ctx
+        val code = ctx.coupon?.couponCode?.takeIf { q.couponDiscount > 0 }
+        if (code != null) {
+            if (!coupons.lock(code, ctx.companyId, userId, orderId, now)) {
+                throw BizException(ErrorCode.BIZ, "优惠券已被其他订单占用，请重新结算", mapOf("coupon_code" to listOf("不可用")))
+            }
+        }
+        if (q.pointFee > 0 && points.deduct(ctx.companyId, userId, q.pointFee, now) == 0) {
+            throw BizException(ErrorCode.BIZ, "积分已变动，请重新结算", mapOf("use_point" to listOf("可用积分不足")))
+        }
+    }
+
+    /**
+     * 优惠快照（`orders_rel_promotions`）：这笔单便宜在哪个活动、那张券当时抵了多少，
+     * 活动模板与券模板后面会被改被删，快照是退款与对账唯一能信的历史记录（docs/03 §7.1）。
+     */
+    private fun snapshotPromotions(
+        orderId: Long,
+        userId: Long,
+        q: CartService.Quote,
+        lines: List<PriceLine>,
+        now: Long,
+    ) {
+        lines.forEach { l ->
+            l.activityInfo.forEach { a ->
+                rels.insert(
+                    RelPromotionDO().apply {
+                        moid = orderId; this.userId = userId
+                        orderType = "normal"
+                        itemId = l.itemId; itemName = l.itemName; itemType = l.itemType
+                        activityId = num(a["marketing_id"]); activityName = str(a["name"]); activityType = str(a["type"])
+                        discountFee = num(a["discount_fee"]); created = now; updated = now
+                    },
+                )
+            }
+        }
+        q.couponInfo.forEach { c ->
+            rels.insert(
+                RelPromotionDO().apply {
+                    moid = orderId; this.userId = userId
+                    orderType = "normal"
+                    itemName = str(c["coupon_name"]); activityType = "coupon"
+                    activityId = num(c["coupon_id"]); activityName = str(c["coupon_name"])
+                    couponId = num(c["coupon_id"]); couponCode = str(c["coupon_code"])
+                    discountFee = num(c["deduct_fee"]); created = now; updated = now
+                },
+            )
+        }
+        if (q.pointFee > 0) {
+            rels.insert(
+                RelPromotionDO().apply {
+                    moid = orderId; this.userId = userId
+                    orderType = "normal"; itemName = "积分抵扣"
+                    activityType = "point"; discountFee = q.pointFee; created = now; updated = now
+                },
+            )
+        }
+    }
+
+    private fun num(v: Any?): Long = (v as? Number)?.toLong() ?: 0L
+
+    private fun str(v: Any?): String? = v as? String
 
     /** 同商品可能有多行（不同规格/加购），按商品聚合后一次 CAS，避免同物品重复扣 */
     private fun deductStock(lines: List<PriceLine>, now: Long) {
@@ -225,7 +321,10 @@ class OrderCreateService(
             freightFee = q.freightFee
             discountFee = q.discountFee
             memberDiscount = q.memberDiscount
-            couponDiscount = 0L
+            couponDiscount = q.couponDiscount
+            // 积分抵现：1 积分 = 1 分（PointRate.POINT_PER_FEN），故抵扣金额与使用积分数同值
+            pointFee = q.pointFee
+            pointUse = q.pointFee
             itemPoint = lines.sumOf { (snapshot[it.itemId]?.point ?: 0L) * it.num }
             totalRebate = lines.sumOf { (snapshot[it.itemId]?.rebate ?: 0L) * it.num }
             distributorId = shopId
@@ -286,7 +385,8 @@ class OrderCreateService(
         rebate = item?.rebate ?: 0L
         totalRebate = rebate * l.num
         memberDiscount = l.memberDiscount
-        couponDiscount = 0L
+        couponDiscount = l.couponFee
+        pointFee = l.pointFee
         discountFee = l.discountFee
         discountInfo = mapper.writeValueAsString(l.activityInfo)
         orderItemType = if (l.plusBuy) "plus_buy" else "normal"

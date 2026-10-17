@@ -62,7 +62,7 @@ curl -s -X POST localhost:18080/api/h5app/wxapp/new_login \
 mvn -B verify                 # 全量测试 + JaCoCo 门槛（P0 契约测试全绿才算完成）
 mvn -B -DskipTests package    # 只出 fat jar
 mvn -B -pl ecshopx-boot -am test   # 单模块测试务必带 -am，否则会用 ~/.m2 里的旧 jar
-python tools/m04_smoke.py     # 实跑冒烟（服务需已在 18080）；m05..m08 同
+python tools/m04_smoke.py     # 实跑冒烟（服务需已在 18080）；m05..m13 同，顺序 m04→m05→m06→m07→m08→m11→m12→m13
 ```
 
 上传的的图片落在 `ecx.upload.root`（默认 `data/storage`），通过 `/storage/**` 静态面匿名回读。
@@ -84,3 +84,19 @@ ECX_PAY_PROFILE=wechatpay,alipay java -jar ecshopx-boot/target/ecshopx-boot-0.1.
 密钥只从环境/配置中心下发，不进代码也不进库：微信 `ECX_WX_MCH_ID / ECX_WX_APP_ID / ECX_WX_API_V3_KEY / ECX_WX_PRIVATE_KEY(_PATH) / ECX_WX_CERT_SERIAL / ECX_WX_PLATFORM_CERT(_PATH) / ECX_WX_NOTIFY_URL`，支付宝 `ECX_ALIPAY_SERVER_URL / ECX_ALIPAY_APP_ID / ECX_ALIPAY_PRIVATE_KEY / ECX_ALIPAY_PUBLIC_KEY / ECX_ALIPAY_NOTIFY_URL`。没开真渠道时 `pay_types` 里就看不到它（PAY-1），硬发起是 501；配了 profile 却缺密钥，第一次下单报「配置不全」而不是启动失败。补单作业（掉单结清 + 渠道侧关单）默认 5 分钟一轮、只扫 `wxpay/alipay`，`ECX_PAY_PROFILE=mock` 时它也只做无操作。
 
 两条真渠道的"真签真验全链路"跑在本地仿真网关上：`mvn -B test -pl ecshopx-boot -Dtest=WxPayV3SimulationTest+AliPaySimulationTest -Dsurefire.failIfNoSpecifiedTests=false`（各 8 例，夹具 `ecshopx-boot/src/test/kotlin/Sim*PayServer.kt` + 自签密钥库 `src/test/resources/sim/mockwx.p12`）。微信商户平台与支付宝沙箱的**真单**验证仍待商户资质到位后执行，代码不再改。
+
+## 营销域（M1-3）
+
+结算与预览走同一条责任链，顺序即叠加口径（docs/04 §14.5）：
+
+```
+10 分组 → 15 活动价(#57) → 20 会员等级折 → 30 满减/满折 → 40 优惠券 → 50 积分抵现 → 60 运费 → 90 汇总钳制
+```
+
+基数永远是"这一步之前已经折让的应付"，所以券的门槛比的是满减之后的钱；三类抵扣（活动/券/积分）都逐行分摊，`Σ行应付 + 运费 == 单应付` 恒成立。所有取数集中在 `CartService.buildContext`（活动、券实例、积分余额、`point.deduct.max_ratio`、`now`），规则链本身不查库、不取时间——M0-5 的属性测试因此一直有效。
+
+三条运营口径容易踩（详见 docs/04 §15）：**审核是唯一生效开关**（`non-reviewed` 的活动在算价链里等于不存在，编辑必打回重审）；`status` 与 `check_status` 是两个维度（"审核通过但停用"是合法态，配置台默认列表不按 `status` 过滤）；`point_use` 在 ORDER-1/ORDER-2 同名（`use_point` 只作 `@JsonAlias` 兼容）。
+
+实跑：`tools/m13_smoke.py` 覆盖券×满减×积分叠加、择优与上不封顶、按件门槛、圈品、包邮、前台三面、权限码、租户隔离与取消回退，**可重复跑**（进场预清理 `MK<时间戳>` 残档、积分与残单都按基线差值断言）。
+
+Windows + Git Bash 里指定本地仓库要写正斜杠：`mvn -B -Dmaven.repo.local=D:/develops/maven/mavenrepository …`。反斜杠会被 shell 剥掉，在工程根目录建出一个 `developsmavenmavenrepository/` 假仓库，症状是"依赖反复重下"或离线跑缺一堆 boot 作用域 jar。

@@ -414,17 +414,11 @@ class CouponService(
     /** CP-F4 / 算价预取：本人未过期的可用券（已按面额倒序，抵扣最大的排前面） */
     fun available(companyId: Long, userId: Long, now: Long): List<CouponUserDO> = mine.listAvailable(companyId, userId, now)
 
-    /** 券能不能用在这一组上（门槛只比"组内商品应付"，运费不参与 —— §14.5） */
-    fun usable(c: CouponUserDO, groupPayFee: Long, now: Long): String? = when {
-        c.status != CouponStatus.UNUSED -> "该券已被其他订单占用"
-        c.expireTime in 1..now -> "该券已过期"
-        groupPayFee <= 0 -> "没有可抵扣的商品金额"
-        c.minOrderFee > 0 && groupPayFee < c.minOrderFee -> "满 ${yuan(c.minOrderFee)} 元可用，当前 ${yuan(groupPayFee)} 元"
-        else -> null
-    }
+    /** 券能不能用在这一组上（判据在 [CouponCheck]，算价链的 CouponRule 走同一份） */
+    fun usable(c: CouponUserDO, groupPayFee: Long, now: Long): String? = CouponCheck.usable(c, groupPayFee, now)
 
     /** 抵扣额：`min(面额, 组应付)`，永不超过应付（§14.5 的钳制在这一处也做一次） */
-    fun deductOf(c: CouponUserDO, groupPayFee: Long): Long = c.discountFee.coerceAtMost(groupPayFee.coerceAtLeast(0L))
+    fun deductOf(c: CouponUserDO, groupPayFee: Long): Long = CouponCheck.deductOf(c, groupPayFee)
 
     fun requireMine(code: String, companyId: Long, userId: Long): CouponUserDO =
         byCodeAndUser(code, companyId, userId)
