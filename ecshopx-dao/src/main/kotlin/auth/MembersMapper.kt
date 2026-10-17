@@ -37,6 +37,23 @@ interface MembersMapper {
     /** 等级变更（成长值达标升级；M0 只在读路径算等级，此方法留给 M1 定时升等） */
     @Update("UPDATE members SET grade_id = #{gradeId}, updated = #{updated} WHERE user_id = #{userId}")
     fun updateGrade(@Param("userId") userId: Long, @Param("gradeId") gradeId: Long, @Param("updated") updated: Long): Int
+
+    /**
+     * CP-A8 按等级发券的取人查询。`disabled = FALSE` 是硬条件：给停用会员发券等于凭空造一张
+     * 永远用不掉的券（前台鉴权按会员状态拒绝登录），比不发更糟。
+     * `limit` 由服务层给（后台单次上限），避免一个等级几万人时把事务拖死。
+     */
+    @Select("SELECT user_id FROM members WHERE company_id = #{companyId} AND grade_id = #{gradeId} " +
+        "AND disabled = FALSE ORDER BY user_id LIMIT #{limit}")
+    fun listUserIdsByGrade(
+        @Param("companyId") companyId: Long,
+        @Param("gradeId") gradeId: Long,
+        @Param("limit") limit: Int,
+    ): List<Long>
+
+    @Select("<script>SELECT user_id, company_id, grade_id, mobile, disabled FROM members WHERE user_id IN " +
+        "<foreach collection=\"ids\" item=\"i\" open=\"(\" separator=\",\" close=\")\">#{i}</foreach></script>")
+    fun listByIds(@Param("ids") ids: List<Long>): List<MemberDO>
 }
 
 interface MembersAssociationsMapper {

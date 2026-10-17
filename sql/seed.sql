@@ -271,3 +271,55 @@ INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_co
   (25, 24, '转账凭证', 'offline_payment.lists', 'actived'),
   (26, 24, '凭证审核', 'offline_payment.check', 'actived');
 INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES (1, 24), (1, 25), (1, 26);
+
+-- ===== M1-3 追加：营销中心权限 + 券限领 + 演示营销位（追加于末尾，不回改上文） =====
+-- 满减满折的"看/改/审"三条码分立：能配活动的人不该自己批自己（reviewed 才参与算价）。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (27, 0,  '营销中心',   'promotions',               'catalog'),
+  (28, 27, '优惠券列表', 'promotions.coupon.lists',  'actived'),
+  (29, 27, '优惠券编辑', 'promotions.coupon.update', 'actived'),
+  (30, 27, '后台发券',   'promotions.coupon.send',   'actived'),
+  (31, 27, '活动列表',   'promotions.marketing.lists',   'actived'),
+  (32, 27, '活动编辑',   'promotions.marketing.update',  'actived'),
+  (33, 27, '活动审核',   'promotions.marketing.check',   'actived'),
+  (34, 27, '秒杀列表',   'promotions.seckill.lists',   'actived'),
+  (35, 27, '秒杀编辑',   'promotions.seckill.update',  'actived'),
+  (36, 27, '拼团列表',   'promotions.groups.lists',    'actived'),
+  (37, 27, '拼团编辑',   'promotions.groups.update',   'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 27), (1, 28), (1, 29), (1, 30), (1, 31), (1, 32), (1, 33), (1, 34), (1, 35), (1, 36), (1, 37);
+
+-- 券模板补列取值：老那张"满100减20"限领 2 张；再加一张无门槛 10 元券（领后 30 天有效，走 valid_days 分支）
+UPDATE promotions_coupon SET get_limit = 2, instruction = '满100减20，每人限领2张' WHERE coupon_id = 1;
+INSERT IGNORE INTO promotions_coupon
+  (coupon_id, company_id, coupon_type, coupon_name, discount_fee, min_order_fee, total_num, send_num,
+   valid_type, begin_time, end_time, valid_days, get_limit, status)
+VALUES (2, 1, 'cash', '新人10元无门槛券', 1000, 0, 500, 0, 'days', 0, 0, 30, 1, TRUE);
+
+-- 演示营销位一律做成"不在窗内"的两态：一条已结束、一条未开始。
+-- 原因不是省事：满减活动是**全局算价因子**，一条在窗内的全场满减会把 m05/m06/m07/m11/m12
+-- 冒烟脚本里所有金额断言改掉。演示要的活动由后台 MK-A1/A6 现场配（那本身就是被测路径），跑完即清。
+INSERT IGNORE INTO promotions_marketing_activity
+  (marketing_id, company_id, marketing_type, marketing_name, start_time, end_time,
+   use_bound, condition_type, condition_value, canjoin_repeat, free_postage, promotion_tag, check_status, status)
+VALUES
+  (1, 1, 'full_minus',    '双11 全场满100减20（已结束）', 1609459200, 1640966400,
+      0, 'totalfee', '[{"full":"100.00","minus":"20.00"},{"full":"200.00","minus":"50.00"}]',
+      FALSE, FALSE, '满减', 'reviewed', TRUE),
+  (2, 1, 'full_discount', '全场满100打9折（未开始）', 4102444800, 4102531200,
+      0, 'totalfee', '[{"full":"100.00","discount":"90"}]',
+      TRUE, TRUE, '满减', 'reviewed', TRUE);
+
+-- 秒杀与拼团的演示行同样放在"已结束"，避免与既有金额断言相撞
+INSERT IGNORE INTO promotions_seckill_activity
+  (seckill_id, company_id, activity_name, activity_start_time, activity_end_time,
+   distributor_id, seckill_type, limit_money, validity_period, disabled)
+VALUES (1, 1, '每日坚果 秒杀（已结束）', 1609459200, 1640966400, '1', 'normal', 0, 10, FALSE);
+INSERT IGNORE INTO promotions_seckill_rel_goods
+  (id, seckill_id, item_id, item_title, activity_price, activity_store, sales_store, limit_num)
+VALUES (1, 1, 3, '每日坚果礼盒', 5900, 100, 100, 2);
+
+INSERT IGNORE INTO promotion_groups_activity
+  (groups_activity_id, company_id, act_name, goods_id, act_price, person_num, store,
+   limit_buy_num, limit_time, begin_time, end_time, robot, disabled)
+VALUES (1, 1, '每日坚果 2人拼团（已结束）', 3, 6900, 2, 100, 1, 24, 1609459200, 1640966400, FALSE, FALSE);

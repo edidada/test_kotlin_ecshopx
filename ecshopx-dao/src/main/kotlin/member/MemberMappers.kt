@@ -39,6 +39,13 @@ interface MembersInfoMapper {
     @Select("SELECT * FROM members_info WHERE user_id = #{userId}")
     fun findByUserId(@Param("userId") userId: Long): MemberInfoDO?
 
+    /** 批量昵称/头像（券领取记录 CP-A7、团成员 GP-F3 用，一次回捞防 N+1） */
+    @Select(
+        "<script>SELECT user_id, username, name, avatar FROM members_info WHERE user_id IN" +
+            "<foreach collection=\"ids\" item=\"i\" open=\"(\" separator=\",\" close=\")\">#{i}</foreach></script>",
+    )
+    fun listByUserIds(@Param("ids") ids: List<Long>): List<MemberInfoDO>
+
     /**
      * upsert：资料表可能没有行（wxapp 静默注册的会员），有则改。
      * H2 `MODE=MySQL` 与 MySQL 都支持 ON DUPLICATE KEY UPDATE，主键 user_id 即冲突键。

@@ -11,6 +11,10 @@ enum class SeqName(val dbValue: String, val prefix: String) {
     AFTERSALES_NO("aftersales_no", "AS"),
     /** 储值充值单（PAY-4），出参 order_id 即形如 CZyyMMddHHmmssNNNN */
     RECHARGE_NO("recharge_no", "CZ"),
+    /** 拼团团号（M1-3 GP-F/下单开团），D29：代替 PHP 的 Redis 拼串 */
+    GROUP_TEAM_ID("group_team_id", "GT"),
+    /** 券码（M1-3 CP-F2 领取时发号，uk_coupon_code 唯一索引兜底） */
+    COUPON_CODE("coupon_code", "C"),
 }
 
 /** 订单主状态（大写态，与 PHP order_status/pay_status 字符串枚举一致，概要设计 §3） */

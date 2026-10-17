@@ -1291,3 +1291,55 @@ ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS memo VARCHAR(300);
 -- 补单作业对已关闭但没向渠道发过关单的支付单逐轮发 close，成功或渠道答"已支付/不存在"都置 1 停止重试
 -- （后两者都无需再关：已支付的钱由回调/补单走结清，不存在的单本来就关不掉）。
 ALTER TABLE trade ADD COLUMN IF NOT EXISTS channel_closed TINYINT NOT NULL DEFAULT 0;
+
+-- ===== M1-3 营销域（券/满减满折/秒杀/拼团）补列（追加于末尾，不回改上文）=====
+
+-- 券模板：每人限领张数（0=不限）。源系统的 get_limit 在 kaquan_discount_cards，本表原先没带。
+ALTER TABLE promotions_coupon ADD COLUMN IF NOT EXISTS get_limit INT NOT NULL DEFAULT 0;
+ALTER TABLE promotions_coupon ADD COLUMN IF NOT EXISTS instruction VARCHAR(255);
+
+-- 券实例快照：领取那一刻把面额/门槛/名称冻结进来。
+-- 后台改券（CP-A4）不回溯已发出的券——否则"满100减20"改成"满100减5"会把
+-- 用户手里已经领到的券当面作废，历史单对账也讲不清当时抵了多少。源系统 kaquan_user_discount 同样冗余四列。
+ALTER TABLE promotions_coupon_user ADD COLUMN IF NOT EXISTS coupon_name VARCHAR(128);
+ALTER TABLE promotions_coupon_user ADD COLUMN IF NOT EXISTS coupon_type VARCHAR(16);
+ALTER TABLE promotions_coupon_user ADD COLUMN IF NOT EXISTS discount_fee BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE promotions_coupon_user ADD COLUMN IF NOT EXISTS min_order_fee BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE promotions_coupon_user ADD COLUMN IF NOT EXISTS lock_time BIGINT NOT NULL DEFAULT 0;
+-- receive=自领 / send=后台发券（CP-A8），退券与统计要分得开这两种来源
+ALTER TABLE promotions_coupon_user ADD COLUMN IF NOT EXISTS source VARCHAR(16) NOT NULL DEFAULT 'receive';
+-- 券码是下单入参（coupon_code），必须全局唯一才能定位到"哪一张券"
+CREATE UNIQUE INDEX IF NOT EXISTS uk_coupon_code ON promotions_coupon_user(coupon_code);
+
+-- 秒杀：Redis 库存池改 DB 三列（D24）。available = activity_store - sales_store - hold_store，
+-- hold_store 是"下单未付占用"，结清时 hold→sales，取消/超时释放 hold，三条都是条件更新。
+ALTER TABLE promotions_seckill_rel_goods ADD COLUMN IF NOT EXISTS hold_store BIGINT NOT NULL DEFAULT 0;
+-- 一场次一商品只一行：补唯一键，配置台重复提交同一 SKU 是覆盖不是插第二行
+CREATE UNIQUE INDEX IF NOT EXISTS uk_seckill_goods ON promotions_seckill_rel_goods(seckill_id, item_id);
+
+-- 拼团：虚拟成团开关（源系统 robot 列）。成团失败自动退是主路径，机器人凑团只是运营兜底选项。
+ALTER TABLE promotion_groups_activity ADD COLUMN IF NOT EXISTS robot BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE promotion_groups_activity ADD COLUMN IF NOT EXISTS instruction VARCHAR(255);
+-- 成员行的"已付"位：下单即写行（未付不占成团人数），结清才置真 —— 
+-- 成团判定只数已付成员，与 PHP 用 disabled 列表达同一件事，取布尔直白命名。
+ALTER TABLE promotion_groups_team_member ADD COLUMN IF NOT EXISTS paid BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE promotion_groups_team_member ADD COLUMN IF NOT EXISTS user_nick VARCHAR(128);
+ALTER TABLE promotion_groups_team ADD COLUMN IF NOT EXISTS robot_num INT NOT NULL DEFAULT 0;
+-- 一人一团一名额（与源系统"同一会员同一活动只允许一笔待成团单"同口径）：
+-- 唯一键把"同一用户并发参两次团"钉死在数据库层，比服务层先查后插可靠。
+-- 机器人行因此不能共用一个 user_id=0（第二行就撞键），改为负数递编号（-1、-2…），
+-- 出参仍按源系统口径报"虚拟成员"。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_team_member ON promotion_groups_team_member(team_id, user_id);
+
+-- 拼团单挂团号：PHP 写在 orders 扩展表里，本系统主表直接落一列（订单详情/参团列表都要读它）。
+ALTER TABLE orders_normal_orders ADD COLUMN IF NOT EXISTS team_id VARCHAR(100);
+
+-- 优惠快照表启用（M0 建了表没人写）：每笔优惠落一行，退款/对账按它复现"当时抵了多少"。
+-- 券抵扣落两列（activity_id 只到"哪个活动"，说不清是哪张券），满减/秒杀沿用既有列。
+ALTER TABLE orders_rel_promotions ADD COLUMN IF NOT EXISTS coupon_id BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE orders_rel_promotions ADD COLUMN IF NOT EXISTS coupon_code VARCHAR(64);
+CREATE INDEX IF NOT EXISTS idx_relpro_coupon ON orders_rel_promotions(coupon_id);
+
+-- 团号与券码发号器（D29：team_id = "GT" + 号段值，唯一索引 uk_team 兜底；券码同构）
+INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('group_team_id', 0);
+INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('coupon_code', 0);
