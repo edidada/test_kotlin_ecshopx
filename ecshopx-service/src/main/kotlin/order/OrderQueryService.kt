@@ -97,7 +97,8 @@ class OrderQueryService(
             }
             5 -> f["orderStatus"] = OrderStatus.NOTPAY
             6 -> {
-                f["payStatus"] = PayStatus.PAYED
+                // 与 ORDER-8 的 pending_delivery 同一口径：只认单头态 + 未发齐，不认 pay_status，
+                // 否则退款中的单会「角标算它、页签查不到」（见 OrdersMapper.countByUser 注释）
                 f["orderStatusIn"] = listOf(OrderStatus.PAYED, OrderStatus.PACKING)
                 f["notDelivered"] = true
             }

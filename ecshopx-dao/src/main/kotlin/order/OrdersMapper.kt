@@ -160,10 +160,14 @@ interface OrdersMapper {
     /**
      * ORDER-8 角标：一次条件聚合（口径与 docs/04 §2.4 的状态映射一致）。
      * 别名用下划线式，靠 map-underscore-to-camel-case 映射——H2 会把大写别名整段小写，驼峰别名会丢。
+     *
+     * `pending_delivery` 一律按 **order_status** 判，不带 `pay_status='PAYED'`：M1-1 之后全额退款单
+     * 的 `pay_status` 会变成 `REFUND`/`REFUND_PART` 而 `order_status` 仍是 `PAYED`（源系统不改单头态），
+     * 用 pay_status 判会让这些单从六个桶里同时消失，直接破掉 C43 的「求和恒等 total」。
      */
     @Select("SELECT " +
         "COALESCE(SUM(CASE WHEN order_status = 'NOTPAY' THEN 1 ELSE 0 END), 0) AS notpay, " +
-        "COALESCE(SUM(CASE WHEN pay_status = 'PAYED' AND delivery_status IN ('PENDING','PART_DONE','PACKED') THEN 1 ELSE 0 END), 0) AS pending_delivery, " +
+        "COALESCE(SUM(CASE WHEN order_status IN ('PAYED','PACKING') AND delivery_status IN ('PENDING','PART_DONE','PACKED') THEN 1 ELSE 0 END), 0) AS pending_delivery, " +
         "COALESCE(SUM(CASE WHEN order_status = 'WAIT_BUYER_CONFIRM' THEN 1 ELSE 0 END), 0) AS pending_receive, " +
         "COALESCE(SUM(CASE WHEN order_status = 'DONE' THEN 1 ELSE 0 END), 0) AS done, " +
         "COALESCE(SUM(CASE WHEN order_status = 'DONE' AND is_rate = FALSE THEN 1 ELSE 0 END), 0) AS evaluation, " +
@@ -184,6 +188,47 @@ interface OrdersMapper {
         "WHERE order_status = 'NOTPAY' AND pay_status = 'NOTPAY' AND auto_cancel_time IS NOT NULL AND auto_cancel_time < #{now} " +
         "ORDER BY order_id LIMIT #{limit}")
     fun listTimeout(@Param("now") now: Long, @Param("limit") limit: Int): List<Long>
+
+    /**
+     * M1-1 售后可用件数镜像扣减（CAS，按"读到的值 → 算出的值"整值替换）。
+     *
+     * 权威口径不在这一列，而在 `aftersales` 表的占用合计（见 AftersalesMapper.applied）；
+     * 这一列只是源系统留下的冗余计数，因此每次迁移都**重算后整值写回**，
+     * 并且带上 `= #{expect}` 条件：抢输的一方得到 0 行，重读重算即可，不会写脏。
+     */
+    @Update("UPDATE orders_normal_orders SET left_aftersales_num = #{to}, updated = #{updated} " +
+        "WHERE order_id = #{orderId} AND left_aftersales_num = #{expect}")
+    fun casLeftAftersalesNum(
+        @Param("orderId") orderId: Long,
+        @Param("expect") expect: Int,
+        @Param("to") to: Int,
+        @Param("updated") updated: Long,
+    ): Int
+
+    /**
+     * 历史订单的可用件数补种：M0 建单时该列恒为 0（那时还没有售后域），
+     * 首笔售后按订单明细总件数补一次；`= 0` 条件让并发补种写成同一个值，无害。
+     */
+    @Update("UPDATE orders_normal_orders SET left_aftersales_num = #{num}, updated = #{updated} " +
+        "WHERE order_id = #{orderId} AND left_aftersales_num = 0")
+    fun backfillLeftAftersalesNum(
+        @Param("orderId") orderId: Long,
+        @Param("num") num: Int,
+        @Param("updated") updated: Long,
+    ): Int
+
+    /**
+     * 佣金/返利冲销（docs/05 M1-1 工作项"佣金冲销事件"）：退款成功后按退款占比回减，
+     * GREATEST 兜住不为负——冲销是事件，不改历史成交额本身。
+     */
+    @Update("UPDATE orders_normal_orders SET commission_fee = GREATEST(commission_fee - #{commissionFee}, 0), " +
+        "total_rebate = GREATEST(total_rebate - #{rebate}, 0), updated = #{updated} WHERE order_id = #{orderId}")
+    fun reverseCommission(
+        @Param("orderId") orderId: Long,
+        @Param("commissionFee") commissionFee: Long,
+        @Param("rebate") rebate: Long,
+        @Param("updated") updated: Long,
+    ): Int
 }
 
 /** orders_associations：按单号路由 + 跨类列表查询（状态由 OrdersMapper.syncAssoc 维护） */
@@ -314,4 +359,40 @@ interface OrderItemsMapper {
     /** 取消：逐行回写取消件数（delivery_status 保持原样，售后态属 M1-1） */
     @Update("UPDATE orders_normal_orders_items SET cancel_item_num = #{num}, updated = #{updated} WHERE id = #{id}")
     fun markCancelled(@Param("id") id: Long, @Param("num") num: Int, @Param("updated") updated: Long): Int
+
+    // ===== M1-1 售后写回（订单行是售后的落点，主表状态迁移都要同步到这里）=====
+
+    /** 售后状态回写：值取 ItemAftersalesStatus 字符串枚举（与主表整数码不同名同义） */
+    @Update("UPDATE orders_normal_orders_items SET aftersales_status = #{aftersalesStatus}, updated = #{updated} " +
+        "WHERE id = #{id}")
+    fun setAftersalesStatus(
+        @Param("id") id: Long,
+        @Param("aftersalesStatus") aftersalesStatus: String,
+        @Param("updated") updated: Long,
+    ): Int
+
+    /**
+     * 行级已退金额累加（守恒不变式的行侧）：
+     * `AND refunded_fee + ? <= total_fee` 由数据库兜底，影响 0 行 = 这一行要退超了。
+     */
+    @Update("UPDATE orders_normal_orders_items SET refunded_fee = refunded_fee + #{fee}, aftersales_status = #{aftersalesStatus}, " +
+        "updated = #{updated} WHERE id = #{id} AND refunded_fee + #{fee} <= total_fee")
+    fun addRefundedFee(
+        @Param("id") id: Long,
+        @Param("fee") fee: Long,
+        @Param("aftersalesStatus") aftersalesStatus: String,
+        @Param("updated") updated: Long,
+    ): Int
+
+    /** 单笔订单行读取（申请校验用：件数/金额/当前售后态） */
+    @Select("SELECT $COLS FROM orders_normal_orders_items WHERE id = #{id}")
+    fun findById(@Param("id") id: Long): OrderItemDO?
+
+    /** 行是否已退完：退款成功计数（全部行退完 ⇒ 订单转 CANCEL 的判据） */
+    @Select("SELECT COUNT(*) FROM orders_normal_orders_items WHERE order_id = #{orderId} " +
+        "AND aftersales_status = 'REFUND_SUCCESS'")
+    fun countRefundSuccess(@Param("orderId") orderId: Long): Int
+
+    @Select("SELECT COUNT(*) FROM orders_normal_orders_items WHERE order_id = #{orderId}")
+    fun countByOrder(@Param("orderId") orderId: Long): Int
 }

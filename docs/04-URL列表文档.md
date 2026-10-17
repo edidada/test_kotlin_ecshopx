@@ -366,3 +366,94 @@ is_check_store // 是否做库存校验提示
 
 结论：§2 的 P0 编号中除 SUP-3（店铺分销域，P1 已登记）外全部交付并有测试覆盖；M0 的 H5 主链路
 「登录→逛→加购→预览→下单→支付→发货→收货→个人中心」在实跑与 MockMvc 两条腿上都已闭环。
+
+## 11. P1 端点规格 —— 售后域（M1-1 开发前补齐，追加于 §10 之后，不回改上文）
+
+源系统售后面极大（后台 12 条 + 会员面 9 条 + 店务端 6 条 + ERP 反向驱动 + 4 类导出/提醒/原因配置）。
+M1-1 只交付**交易闭环必需的 17 条**，其余按下表"归属"列延后；换货与导出属 M2。
+
+编号：会员面 `AF-F1..7`，后台 `AF-A1..10`。金额一律分；`aftersales_status`/`progress` 用源系统整数码（见 §11.4）。
+
+### 11.1 会员面（前缀 `/api/h5app/wxapp`，鉴权=会员 JWT，链=frontChain）
+
+| # | 方法 | URL | 说明 | 关键入参 | 出参（`data`） |
+|---|---|---|---|---|---|
+| AF-F1 | POST | `/aftersales` | 申请售后 | `order_id`(Y,16位串)、`item_id`(Y,订单行内)、`num`(Y,1..可退件数)、`aftersales_type`(Y：`ONLY_REFUND`/`REFUND_GOODS`)、`reason`、`description`、`refund_fee`(N，缺省=按件分摊值)、`return_type`(`logistics`/`offline`)、`contact`/`mobile`(return_type=offline 时 Y) | `{aftersales_bn, aftersales_status, progress, refund_fee, refund_point, num, item_name, can_apply:1}` |
+| AF-F2 | GET | `/aftersales` | 我的售后列表 | `page`,`pageSize`(Y)、`aftersales_status`(N,整数精确)、`aftersales_type`(N) | `{total_count, list[]}`，行见 §11.3 |
+| AF-F3 | GET | `/aftersales/{aftersales_bn}` | 售后详情 | 路径参 | §11.3 行 + `detail[]`、`refund_info{}`、`order_info{}`(仅本单行摘要)、`status_msg`、`progress_msg`、`sendback_data{}` |
+| AF-F4 | POST | `/aftersales/sendback` | 回寄物流填报 | `aftersales_bn`(Y)、`corp_code`(Y,6..30)、`logi_no`(Y) | `{aftersales_bn, aftersales_status, progress:2}` |
+| AF-F5 | POST | `/aftersales/close` | 撤销申请 | `aftersales_bn`(Y)、`memo`(N) | `{aftersales_bn, aftersales_status:4, progress:7}` |
+| AF-F6 | GET | `/aftersales/item/price` | 单件可退额 | `order_id`(Y)、`item_id`(Y) | `{price: Long}`（= `floor(行 total_fee / 行 num)`，不含运费） |
+| AF-F7 | GET | `/aftersales/reason/list` | 申请原因字典 | — | `{list: string[]}`（源系统存 redis；本项目存 `sys_config` 键 `aftersales.reason`，缺省回落四条内置文案） |
+
+### 11.2 后台（前缀 `/api`，鉴权=运营 JWT + `@RequiresResource`，写路径 `@Audited`）
+
+| # | 方法 | URL | 权限码 | 说明 | 关键入参 |
+|---|---|---|---|---|---|
+| AF-A1 | GET | `/aftersales` | `aftersales.lists` | 售后列表分页 | `page`,`pageSize`；筛选 `aftersales_bn`/`order_id`/`aftersales_status`/`aftersales_type`/`mobile`/`start_time`/`end_time` |
+| AF-A2 | GET | `/aftersales/{aftersales_bn}` | `aftersales.detail` | 详情（含 `buttons` 可执行动作） | — |
+| AF-A3 | POST | `/aftersales/review` | `aftersales.review` | 审核 | `aftersales_bn`(Y)、`is_approved`(Y,1/0)、`refuse_reason`(required_if 0)、`refund_fee`/`refund_point`(N，缺省回填申请值) |
+| AF-A4 | POST | `/aftersales/refundCheck` | `aftersales.refund_check` | 退款确认（终局） | `aftersales_bn`(Y)、`check_refund`(Y,1/0)、`refund_fee`(required_if 1，≤申请额)、`refunds_memo`(required_if 0) |
+| AF-A5 | PUT | `/aftersales/remark` | `aftersales.update` | 商家备注 | `aftersales_bn`(Y)、`memo`(Y,≤150) |
+| AF-A6 | POST | `/aftersales/apply` | `aftersales.apply` | 代客申请 | 同 AF-F1 + `user_id` 从订单带出；`ONLY_REFUND` 当场审核通过 |
+| AF-A7 | POST | `/aftersales/sendback` | `aftersales.update` | 代填回寄 | 同 AF-F4 |
+| AF-A8 | GET | `/refund` | `refund.lists` | 退款单列表 | `page`,`pageSize`；筛选 `refund_status`/`refund_type`/`order_id`/`refund_bn`/时间区间 |
+| AF-A9 | GET | `/refund/detail/{refund_bn}` | `refund.detail` | 退款单详情 | — |
+| AF-A10 | POST | `/refund/offline` | `refund.offline` | 线下打款登记（银行七字段→直接 SUCCESS） | `refund_bn`(Y)、`payee_name`/`bank_name`/`bank_account`/`bank_branch`/`bank_province`/`bank_city`/`memo` |
+
+延后归属：导出（`logExport`/`financialExport`）、提醒配置（`remind`）、店务端 6 条（M1-4 员工端链）、ERP 反向驱动（M2）、换货发出 `sendConfirm`（M2）、原因配置写接口（M1-4 一并做读+写）。
+
+### 11.3 出参行字段（列表与详情共用）
+
+`aftersales_bn`(串), `order_id`(串), `item_id`, `item_name`, `item_bn`, `pic`, `num`, `refund_fee`, `refund_point`,
+`aftersales_type`, `aftersales_status`, `progress`, `status_msg`, `progress_msg`, `reason`, `description`,
+`refuse_reason`, `memo`, `evidence_pic`(数组), `return_type`, `contact`, `mobile`(掩码), `freight`,
+`company_id`, `user_id`, `distributor_id`, `created`, `updated`, `sendback_data`(对象或 null)。
+详情另加 `detail[]`（`aftersales_detail` 行：`detail_id, item_id, item_name, pic, num, refunded_num, refund_fee, aftersales_status, progress`）、
+`refund_info`（`aftersales_refund` 行或 null：`refund_bn, refund_status, refund_type, refund_channel, refund_fee, refunded_fee, trade_id, pay_type, refund_id, refund_success_time`）、
+`order_info`（`order_id, order_status, pay_status, total_fee, pay_fee, item_fee, freight_fee`）。
+
+### 11.4 状态与进度码（照抄源系统整数码，不做重命名）
+
+`aftersales_status`：0=待处理 1=处理中 2=已处理 3=已驳回 4=已撤销（明细另有 5=审核中）。
+`progress`：0=等待商家处理 1=接受申请待回寄 2=消费者已回寄 8=商家确认收货待退款 9=退款处理中 3=已驳回 4=已处理 7=已撤销 6=退款完成 5=退款驳回。
+`aftersales_type`：`ONLY_REFUND` 仅退款 / `REFUND_GOODS` 退货退款（M1-1 实现两类；`EXCHANGING_GOODS` 换货在 AF-F1/AF-A6 一律 501「换货流程属 M2」，与 D5/D6 同口径）。
+`refund_status`：`READY` → `AUDIT_SUCCESS` → `SUCCESS`；异常态 `REFUSE`（驳回）/`CANCEL`（撤销）/`CHANGE`（渠道退款失败，留痕不抛错）。
+
+### 11.5 与源系统的差异（D 系列续编）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D7 | **一售后单=一订单行 N 件**，不采用 `shopApplyByNum` 的"一件一单"拆单 | 拆单是为 ERP 逐件入库，本项目 `refunded_num` 按申请件数整体入库；守恒口径不变（`Σrefund_fee ≤ 行 total_fee`） |
+| D8 | 申请原因存 `sys_config`（`aftersales.reason`）而非 redis | M1 无 redis 依赖；AF-F7 读不到时回落内置四条 |
+| D9 | 手机号 `contact/mobile` 明文列 + 出参掩码，不做 `fixedencrypt` 落库 | 加密存储属数据合规专项（M2），列宽已按密文预留 |
+| D10 | 售后**不改** `trade.trade_state`（只累加 `trade.refunded_fee`） | 与源系统一致：售后单退成功不把支付单改成 REFUND，售前取消才走 `REFUND_PROCESS/REFUND_SUCCESS` |
+
+## 12. 实现期语义补充（M1-1 售后域落地时确认，追加于 §11 之后，不回改上文）
+
+§11 是开发前规格，落地时以下口径被实测钉死或改写，编号续 C83 之后。验收：`AftersalesEndToEndTest` + `tools/m11_smoke.py`（见 docs/05 §6 M1-1 记录）。
+
+| # | 条目 | 实现口径 |
+|---|---|---|
+| C84 | 申请准入 | `pay_status ∈ {PAYED, REFUND_PART}` 才能发起；`NOTPAY/CANCEL` → 422「订单未支付，不能申请售后」。**REFUND_PART 必须放行**——部分退款后剩余件数还要能继续退，这一条是门槛用例的前置；整单退完（`REFUND`）不再放行也无妨，件数闸门本身就会 422 |
+| C85 | `left_aftersales_num` 只重算不增量 | 权威口径在 `aftersales.occupiedNum`（占额度态 `aftersales_status IN (0,5,1,2)` 的 `SUM(num)`），这一列只是镜像：每次状态迁移按 `Σ行件数 − 占用件数` **整值重算后 CAS 写回**，读到 0 的历史单走 `backfill`。绝不做 `+1/-1`，否则一次并发就把镜像跑飞 |
+| C86 | `orders.pay_status` 按金额守恒判定 | 退款成功后取 `SUM(成功退款 refund_fee + refund_point)`，`≥ pay_fee` → `REFUND`，否则 `REFUND_PART`。**不看售后行数也不看行 `aftersales_status`**：一行退完就变 `REFUND_SUCCESS`，用行数判会把"两行退了一行"误判成整单退完 |
+| C87 | READY 不占额度 | `refund_status=READY` 只是"待财务确认"，`AF-A9` 的 `trade_can_refund` 仍等于实付、`order_refunded_fee` 仍为 0；生成退款单 ≠ 退钱 |
+| C88 | 额度占用点在 AF-A4 | `trade.refunded_fee` 只在退款确认时累加，AF-A10 登记只推状态不再累加。两道闸门写在 SQL 的 `WHERE` 里（`refunded_fee + ? ≤ pay_fee`、行 `refunded_fee + ? ≤ total_fee`），影响 0 行 → 422 + 整笔回滚，退款单留在 `READY` 等重试（e2e 第 10 例改窄额度各撞一次并断言回到原位） |
+| C89 | 渠道失败不抛错 | 通道返回失败 → 事务整体回滚，随后单独记一条 `CHANGE` 留痕并回 200，让运营看得见"退失败"而不是接到 500 后反复点 |
+| C90 | AF-A10 登记的条件更新 | 七字段 `UPDATE … WHERE refund_status='AUDIT_SUCCESS'`，0 行即 422「退款单状态已变更」；备注分两路写：售后单记流程（`线下打款完成`），退款单记登记原文（`memo` 不被收尾覆盖），两边语义不互相污染 |
+| C91 | 守门顺序 | 状态守门**先于**参数校验：非 `AUDIT_SUCCESS` 的单即使缺 `bank_account` 也是 422 而不是 400。HTTP 侧造不出 `AUDIT_SUCCESS`（mock 渠道当场成功），因此冒烟只验 `refund_bn` 格式 400 / 404 / 422，登记成功分支由 e2e 第 17 例用 SQL 把支付单标成 `offline_pay` 走真实 deferred 路径覆盖 |
+| C92 | 面鉴权矩阵 | 会员令牌打后台面、后台令牌打会员面都是 401；`viewer` 缺权限码 403；别人的售后单在会员面按 **404** 处理（不泄露存在性）；非数字 `aftersales_bn`/`refund_bn` 一律 404，`toLongOrNull()` 兜底不进 SQL 层（避免 MyBatis 反射异常变 500） |
+| C93 | 明细与主表同步 | `aftersales_detail` 的 `aftersales_status/progress` 由同一条 `transit` 批量迁移，命中 0 行即视为数据不一致并回滚（e2e 第 19 例审计"主表与明细永远同步"） |
+| C94 | ORDER-8 分桶口径修正（M1-1 引出） | `pending_delivery` 改按**单头态**判：`order_status IN ('PAYED','PACKING') AND delivery_status IN ('PENDING','PART_DONE','PACKED')`，ORDER-4 的 `status=6` 页签同步去掉 `pay_status='PAYED'`。原因：退款只改 `pay_status`（D10/§3），`order_status` 保持 `PAYED`，旧口径让退款中的单从六个桶里同时消失，直接破掉 C43 的「分桶互斥且求和恒等 `total`」。e2e 第 20 例把这条钉成回归用例 |
+
+### 12.1 与源系统的差异续编（D 系列，追加于 §11.5 之后）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D11 | **不新增"确认收货"端点**：对 `progress=2`（消费者已回寄）的单再调一次 AF-A3 即等价于商家确认收货 | 源系统 `confirmReceive` 独立接口 + 独立权限码；本项目审核只有两条出口（同意/驳回），确认收货就是"同意"的第二步，状态机少一条箭头、鉴权少一个点，`refunded_num` 按申请件数整体入库 |
+| D12 | 退款单只在进入 `progress=8`（待退款）时生成 | 退货退款在待回寄（1）阶段生成退款单没有意义，驳回还要作废一行；"未审先退"的记录噪音直接消除。AF-F3/AF-A2 的 `refund_info` 在该阶段回 `null`，前端据此判断是否显示退款区块 |
+| D13 | 额度占用点在退款确认而非审核同意 | 与 D10 同源：`trade.refunded_fee` 是"真退出去的钱"，审核通过不等于钱动了。`AF-A9` 的 `trade_can_refund` 因此在 READY 阶段仍是全额 |
+| D14 | 渠道退款失败回 200 + `CHANGE` 留痕 | 源系统抛 `ResourceException` 后无落库痕迹，运营端看不到失败原因；本项目失败也是状态，必须可见 |
+| D15 | 售后不改 `order_status`，只在 `pay_status` 与行 `aftersales_status` 上标注 | 保持与源系统一致，代价是页签/角标必须按单头态分桶（见 C94），否则退款单在买家侧"消失" |
+| D16 | 佣金与返利在同一事务内按行货款占比冲销 | `commission_fee`/`total_rebate` 只减不借（负数封顶 0）；源系统在支付回调里异步冲销，本项目放进退款事务，保证守恒审计读到的永远是已收敛状态（e2e 第 10 例逐笔断言 900/600 递减到 0/0） |

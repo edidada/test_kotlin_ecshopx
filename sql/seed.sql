@@ -238,3 +238,27 @@ INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VA
 INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VALUES
   (0, 'site.member_center_copy', '登录后查看专属价', 0);
 
+-- ===== M1-1 追加：售后/退款权限码与售后配置（追加于末尾，不回改上文） =====
+-- 权限分两组的理由：能同意退货（aftersales.review）不该天然具备"把钱退出去"的能力
+-- （aftersales.refund_check），线下打款登记（refund.offline）再单列一条 —— 源系统的审核岗/财务岗分立。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (13, 0,  '售后管理',  'aftersales',              'catalog'),
+  (14, 13, '售后列表',  'aftersales.lists',        'actived'),
+  (15, 13, '售后详情',  'aftersales.detail',       'actived'),
+  (16, 13, '售后审核',  'aftersales.review',       'actived'),
+  (17, 13, '退款确认',  'aftersales.refund_check', 'actived'),
+  (18, 13, '售后编辑',  'aftersales.update',       'actived'),
+  (19, 13, '代客申请',  'aftersales.apply',        'actived'),
+  (20, 0,  '退款管理',  'refund',                  'catalog'),
+  (21, 20, '退款列表',  'refund.lists',            'actived'),
+  (22, 20, '退款详情',  'refund.detail',           'actived'),
+  (23, 20, '线下打款',  'refund.offline',          'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 13), (1, 14), (1, 15), (1, 16), (1, 17), (1, 18), (1, 19), (1, 20), (1, 21), (1, 22), (1, 23);
+
+-- 售后原因字典（D8：源系统存 redis，本项目读 sys_config，读不到回落服务层内置四条）
+-- 回寄期限：商家同意后买家寄回的时限（天），超时由 AftersalesService.autoRefuse 关闭
+INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VALUES
+  (1, 'aftersales.reason', '["质量问题","商品与描述不符","不想要了","其他原因"]', 0),
+  (1, 'aftersales.return_days', '7', 0);
+

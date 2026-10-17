@@ -1268,3 +1268,20 @@ INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('aftersales_n
 -- 订单表落一列实付：结清时由 PayService 写入，未付款恒 0。
 -- 渠道侧金额仍以 trade.pay_fee 为准，这里只是列表/详情的读视图，避免每次都对 trade 做 join。
 ALTER TABLE orders_normal_orders ADD COLUMN IF NOT EXISTS pay_fee BIGINT NOT NULL DEFAULT 0;
+
+-- ===== M1-1 售后域补列（追加于末尾，不回改上文）=====
+-- 回寄物流与超时自动驳回倒计时：源系统 sendback_data 是 JSON 串（corp_code/logi_no/填报人/时间），
+-- auto_refuse_time 是"商家审核通过后要求买家寄回的截止秒"，0=不限时（沿用 PHP 语义）。
+ALTER TABLE aftersales ADD COLUMN IF NOT EXISTS sendback_data CLOB;
+ALTER TABLE aftersales ADD COLUMN IF NOT EXISTS auto_refuse_time BIGINT NOT NULL DEFAULT 0;
+-- 主表冗余商品图：§11.3 行字段含 pic，列表页只查主表（明细表有 pic，但列表按行取要 join 会退化成一串子查询）
+ALTER TABLE aftersales ADD COLUMN IF NOT EXISTS pic VARCHAR(512);
+
+-- 线下打款登记（AF-A10）：银行七字段落退款单本身，源系统同表同列语义
+ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS payee_name VARCHAR(128);
+ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS bank_name VARCHAR(128);
+ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS bank_account VARCHAR(64);
+ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS bank_branch VARCHAR(128);
+ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS bank_province VARCHAR(64);
+ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS bank_city VARCHAR(64);
+ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS memo VARCHAR(300);

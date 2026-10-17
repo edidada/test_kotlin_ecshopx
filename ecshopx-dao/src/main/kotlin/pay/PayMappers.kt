@@ -86,6 +86,22 @@ interface TradeMapper {
 
     @Update("UPDATE trade SET inital_response = #{body}, updated = #{updated} WHERE trade_id = #{tradeId}")
     fun saveResponse(@Param("tradeId") tradeId: String, @Param("body") body: String?, @Param("updated") updated: Long): Int
+
+    /**
+     * 退款取原支付单：只认 SUCCESS（CLOSED/NOTPAY 上没有实付，退不了）。
+     * 一单多笔支付时取最后结清的那笔，transaction_id 就是原路退的凭据。
+     */
+    @Select("SELECT * FROM trade WHERE order_id = #{orderId} AND trade_state = 'SUCCESS' ORDER BY updated DESC LIMIT 1")
+    fun findSuccessByOrder(@Param("orderId") orderId: String): TradeDO?
+
+    /**
+     * 支付单累计退款（守恒不变式的支付侧，docs/04 §11 D10）：
+     *  - **不改 trade_state**（源系统售后只累加 refunded_fee，交易状态归订单域管）
+     *  - `AND refunded_fee + ? <= pay_fee` 由数据库兜底，影响 0 行 = 这笔试图退超实付
+     */
+    @Update("UPDATE trade SET refunded_fee = refunded_fee + #{fee}, updated = #{updated} " +
+        "WHERE trade_id = #{tradeId} AND refunded_fee + #{fee} <= pay_fee")
+    fun addRefundedFee(@Param("tradeId") tradeId: String, @Param("fee") fee: Long, @Param("updated") updated: Long): Int
 }
 
 /** point_member + point_member_log：积分账户（动账留痕，before/after 便于对账） */
@@ -137,6 +153,14 @@ interface PointMapper {
     @Insert("INSERT INTO point_member_log(company_id, user_id, order_id, change_point, before_point, after_point, remark, created) " +
         "VALUES(#{companyId}, #{userId}, #{orderId}, #{changePoint}, #{beforePoint}, #{afterPoint}, #{remark}, #{created})")
     fun insertLog(log: PointLogDO): Int
+
+    /**
+     * 退积分（M1-1）：只回补余额，**不动 total_point**。
+     * total_point 是"累计获得"口径，退款回补不是获得，照抄源系统。
+     */
+    @Update("UPDATE point_member SET point = point + #{point}, updated = #{updated} " +
+        "WHERE company_id = #{companyId} AND user_id = #{userId}")
+    fun refund(@Param("companyId") companyId: Long, @Param("userId") userId: Long, @Param("point") point: Long, @Param("updated") updated: Long): Int
 
     @Select("SELECT COUNT(*) FROM point_member_log WHERE order_id = #{orderId}")
     fun countLogByOrder(@Param("orderId") orderId: String): Int
@@ -219,11 +243,31 @@ interface DepositMapper {
         "#{beforeBalance}, #{afterBalance}, #{status}, #{created}, #{updated})")
     fun insertTrade(t: DepositTradeDO): Int
 
+    /**
+     * 退回储值（M1-1）：本金/赠金**分栏**回补——消费时按什么比例扣的就按什么比例退，
+     * 赠金不能退成本金（否则等于白送充值赠金）。
+     */
+    @Update("UPDATE user_deposit SET deposit_amount = deposit_amount + #{principal}, gift_amount = gift_amount + #{gift}, " +
+        "updated = #{updated} WHERE id = #{id}")
+    fun refund(
+        @Param("id") id: Long,
+        @Param("principal") principal: Long,
+        @Param("gift") gift: Long,
+        @Param("updated") updated: Long,
+    ): Int
+
     @Update("UPDATE deposit_trade SET status = #{status}, updated = #{updated} WHERE trade_id = #{tradeId}")
     fun updateTradeStatus(@Param("tradeId") tradeId: String, @Param("status") status: String, @Param("updated") updated: Long): Int
 
     @Select("SELECT * FROM deposit_trade WHERE trade_id = #{tradeId}")
     fun findTrade(@Param("tradeId") tradeId: String): DepositTradeDO?
+
+    /**
+     * 这笔订单的余额消费留痕（退款按"本金/赠金"原比例回补的唯一依据）。
+     * 表没有自增列，主键是业务单号，故按 created 取最近一笔。
+     */
+    @Select("SELECT * FROM deposit_trade WHERE rel_id = #{orderId} AND trade_type = 'consume' ORDER BY created DESC LIMIT 1")
+    fun findConsumeByOrder(@Param("orderId") orderId: String): DepositTradeDO?
 
     @Select("SELECT * FROM deposit_recharge_rule WHERE company_id = #{companyId} AND status = 1 ORDER BY recharge_amount")
     fun listRules(@Param("companyId") companyId: Long): List<RechargeRuleDO>
