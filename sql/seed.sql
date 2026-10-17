@@ -262,3 +262,12 @@ INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VA
   (1, 'aftersales.reason', '["质量问题","商品与描述不符","不想要了","其他原因"]', 0),
   (1, 'aftersales.return_days', '7', 0);
 
+
+-- ===== M1-2 追加：线下转账审核流权限（追加于末尾，不回改上文） =====
+-- 与售后退款同样的岗位分立逻辑：看凭证（offline_payment.lists）与把钱结清（offline_payment.check）
+-- 是两条权限码，审核通过等于"承认钱已到账"，不该默认发给所有后台角色。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (24, 0,  '线下转账', 'offline_payment',       'catalog'),
+  (25, 24, '转账凭证', 'offline_payment.lists', 'actived'),
+  (26, 24, '凭证审核', 'offline_payment.check', 'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES (1, 24), (1, 25), (1, 26);

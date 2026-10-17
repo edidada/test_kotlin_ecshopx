@@ -238,6 +238,15 @@ class RefundService(
         if (r.refundStatus != RefundStatus.AUDIT_SUCCESS) {
             throw BizException(ErrorCode.BIZ, "只有待打款的退款单能登记银行信息：${statusMsg(r.refundStatus)}")
         }
+        // M1-2：真实渠道的"已受理待回执"同样停在 AUDIT_SUCCESS，但它等的是渠道回调，不是人工打款。
+        // 只认原支付渠道是 offline_pay 的单——否则一笔微信退款会被登记成"线下已打款"，钱退两次。
+        val originTrade = trades.findById(r.tradeId)
+        if (originTrade?.payType != "offline_pay") {
+            throw BizException(
+                ErrorCode.BIZ,
+                "本单不是线下转账退款，无需人工登记：渠道 ${originTrade?.payType ?: "(未知支付单)"} 的退款由渠道回执推进",
+            )
+        }
         val payee = form.payeeName?.takeIf { it.isNotBlank() }
             ?: throw BizException(ErrorCode.VALIDATION, "payee_name 不能为空", mapOf("payee_name" to listOf("不能为空")))
         val account = form.bankAccount?.takeIf { it.isNotBlank() }
@@ -268,6 +277,89 @@ class RefundService(
         }
         val done = refunds.findByBn(bn, companyId) ?: r
         return row(done)
+    }
+
+    // ===================== PAY-5 渠道退款回执（docs/05 §M1-2） =====================
+
+    /**
+     * 真实渠道异步退款的收尾：`PROCESSING` 的单由 `REFUND.SUCCESS` 回执推进到 `SUCCESS`。
+     *
+     * 三条口径：
+     *  1. **回执只认渠道验签后的报文**（调用方是 PayService.notifyV3，验签不过根本到不了这里）；
+     *  2. **幂等靠同一张 CAS**：从 `AUDIT_SUCCESS` 出发推 `SUCCESS`，重复回执 0 行 → 报"状态已变更"，
+     *     整体回滚，所以佣金不会二次冲销、订单 pay_status 不会二次重算；
+     *  3. **额度不在这里动**（AF-A4 已占），回执失败（ABNORMAL/CLOSED）只把退款单标 `CHANGE` 留痕、
+     *     **额度保持占用**——钱在渠道侧已经挂账，回收额度等于允许买家重复申请，宁可少退不可多退；
+     *     微信侧的异常退款 API 属 M2，这里交人工跟进。
+     */
+    fun confirmByCallback(
+        companyId: Long,
+        outRefundNo: String,
+        refundId: String?,
+        succeeded: Boolean,
+    ): Map<String, Any?> {
+        val bn = outRefundNo.toLongOrNull()
+            ?: return linkedMapOf("settled" to false, "message" to "退款单号非法：$outRefundNo")
+        val r = refunds.findByBn(bn, companyId)
+            ?: return linkedMapOf("settled" to false, "message" to "退款单不存在：$bn")
+        if (r.refundStatus == RefundStatus.SUCCESS) {
+            return linkedMapOf("settled" to true, "idempotent" to true, "refund_bn" to bn.toString())
+        }
+        if (r.refundStatus != RefundStatus.AUDIT_SUCCESS) {
+            return linkedMapOf(
+                "settled" to false,
+                "refund_bn" to bn.toString(),
+                "message" to "退款单不在待回执状态：${statusMsg(r.refundStatus)}",
+            )
+        }
+        val a = aftersales.findByBn(r.aftersalesBn, companyId)
+            ?: return linkedMapOf("settled" to false, "message" to "售后单不存在：${r.aftersalesBn}")
+        val now = TimeSec.now()
+
+        if (!succeeded) {
+            db.transactional {
+                val p = AftersalesRefundMapper.RefundTransitParam().apply {
+                    this.bn = bn
+                    this.companyId = r.companyId
+                    fromStatus = RefundStatus.AUDIT_SUCCESS
+                    toStatus = RefundStatus.CHANGE
+                    this.refundId = refundId
+                    memo = "渠道回执退款失败（$refundId），额度仍占用，需人工用异常退款处理"
+                    updated = now
+                }
+                refunds.transit(p)
+                transitAftersales(a, AftersalesStatus.PROCESSING, AftersalesProgress.REFUND_PROCESSING, now,
+                    memo = "渠道回执退款失败，需人工处理")
+                log(a.orderId, "system", "refund_change", "退款单 $bn 渠道回执失败：退款号 $refundId")
+                true
+            }
+            return linkedMapOf(
+                "settled" to false,
+                "refund_bn" to bn.toString(),
+                "refund_status" to RefundStatus.CHANGE,
+                "message" to "渠道回执退款失败，需人工处理",
+            )
+        }
+
+        val o = orders.findById(a.orderId)
+            ?: return linkedMapOf("settled" to false, "message" to "订单不存在：${a.orderId}")
+        val itemRow = orderItems.listByOrder(a.orderId).firstOrNull { it.itemId == a.itemId }
+            ?: return linkedMapOf("settled" to false, "message" to "订单明细不存在")
+        db.transactional {
+            finalizeSuccess(a, bn, r.refundFee, r.refundPoint, refundId ?: r.refundId, now,
+                memo = "渠道退款回执：退款已原路返回")
+            reverseCommission(o, itemRow, r.refundFee, r.refundPoint, now)
+            log(a.orderId, "system", "refund_success",
+                "退款单 $bn 收到渠道退款回执：现金 ${r.refundFee} 分 / 积分 ${r.refundPoint} 分")
+            true
+        }
+        return linkedMapOf(
+            "settled" to true,
+            "refund_bn" to bn.toString(),
+            "refund_status" to RefundStatus.SUCCESS,
+            "refunded_fee" to r.refundFee,
+            "refunded_point" to r.refundPoint,
+        )
     }
 
     // ===================== AF-A8 / AF-A9 查询 =====================
@@ -366,6 +458,34 @@ class RefundService(
                     "refund_id" to outcome.refundId,
                     "refunded_fee" to fee,
                     "refunded_point" to point,
+                )
+            }
+            outcome.pendingCallback -> {
+                // 真实微信退款常见的中间态：渠道已受理、钱还没到，退款单原地停在 AUDIT_SUCCESS。
+                // 与 deferred 的差别只有一条：**推进者是渠道回执（PAY-5 REFUND.SUCCESS），不是 AF-A10 的人工登记**，
+                // 所以这里把 channel 留在 original，offline() 据此拒绝人工打款登记（防止双退）。
+                val t = AftersalesRefundMapper.RefundTransitParam().apply {
+                    bn = r.refundBn
+                    companyId = r.companyId
+                    fromStatus = RefundStatus.AUDIT_SUCCESS
+                    toStatus = RefundStatus.AUDIT_SUCCESS
+                    channel = RefundChannel.ORIGINAL
+                    refundId = outcome.refundId
+                    memo = outcome.message ?: "渠道已受理，等待退款回执"
+                    updated = now
+                }
+                refunds.transit(t)
+                transitAftersales(a, AftersalesStatus.PROCESSING, AftersalesProgress.REFUND_PROCESSING, now,
+                    memo = outcome.message ?: "渠道已受理，等待退款回执")
+                log(o.orderId, "seller", "refund_pending", "退款单 ${r.refundBn} 渠道已受理：${outcome.message}")
+                linkedMapOf(
+                    "refund_bn" to r.refundBn.toString(),
+                    "refund_status" to RefundStatus.AUDIT_SUCCESS,
+                    "settled" to false,
+                    "deferred" to true,
+                    "pending_callback" to true,
+                    "refund_id" to outcome.refundId,
+                    "message" to (outcome.message ?: "渠道已受理，等待退款回执"),
                 )
             }
             outcome.deferred -> {

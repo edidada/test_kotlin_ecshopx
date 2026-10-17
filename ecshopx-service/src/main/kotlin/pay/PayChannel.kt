@@ -49,12 +49,15 @@ class RefundRequest(
  * 退款结果。三态而不是布尔：
  *  - `settled` 渠道当场退成功；
  *  - `deferred` 渠道退不了但也不算失败（线下转账要人工打款），退款单停在 AUDIT_SUCCESS 等登记；
- *  - 两者皆假 = 渠道失败，退款单落 CHANGE 留痕，**不抛错**（源系统一致，避免"售后页面 500 但钱已退"）。
+ *  - `pendingCallback` 渠道已受理但要等异步回执（真实微信退款返回 `PROCESSING` 就是这一类），
+ *    退款单同样停在 AUDIT_SUCCESS，推进者是渠道回调而不是 AF-A10 的人工登记；
+ *  - 三者皆假 = 渠道失败，退款单落 CHANGE 留痕，**不抛错**（源系统一致，避免"售后页面 500 但钱已退"）。
  */
 class RefundOutcome(
     val settled: Boolean,
     val refundId: String? = null,
     val deferred: Boolean = false,
+    val pendingCallback: Boolean = false,
     val message: String? = null,
 )
 
@@ -66,6 +69,45 @@ interface PayChannel {
 
     /** 原路退（docs/05 §M1-1 "退款执行接 PayChannel.refund"） */
     fun refund(req: RefundRequest): RefundOutcome
+
+    /**
+     * 查单（docs/05 §M1-2）：返回 `trade_state/transaction_id/total_fee/success_time`。
+     * 只有外部渠道有"渠道侧的钱"可查，本地渠道（积分/余额/线下）没有，默认 null = 不参与补单。
+     */
+    fun queryTrade(tradeId: String): Map<String, Any?>? = null
+
+    /** 关单：超时关单时同步把渠道侧预支付单关掉，避免"订单已关、二维码还能付款"。默认 no-op */
+    fun closeTrade(tradeId: String): Boolean = false
+
+    /**
+     * PAY-5 v3 回调解析（docs/05 §M1-2）：把渠道的**原始报文**换成 PayService 认识的扁平参数
+     * （`out_trade_no` / `total_fee` / `trade_state` / `transaction_id`，退款回执再加 `out_refund_no`）。
+     *
+     * 验签与解密必须在这里做——只有渠道自己知道用什么密钥、拼什么待签串；PayService 只信任
+     * "能返回非 null 的报文已经通过渠道验签"。默认实现返回 null = 该渠道不接 v3 JSON 回调
+     * （mock/point/deposit/offline 都走不到这里），控制器据此回 FAIL，绝不拿未验签的报文去结清。
+     */
+    fun parseNotification(headers: Map<String, String>, body: String): Map<String, String>? = null
+
+    /**
+     * v2/表单回调的**验签**（支付宝异步通知就是 form-urlencoded + `sign`）。
+     * 默认实现原样返回 = 不校验，这是 M0-7 mock 渠道的既有行为（开发环境直接 curl 造回调）；
+     * 真渠道必须覆盖它，验不过返回 null，控制器据此回 FAIL——**没验签的报文一律不动账**。
+     */
+    fun parseFormNotification(params: Map<String, String>): Map<String, String>? = params
+
+    /**
+     * 表单回调的**应答体**（M1-2）。
+     *
+     * "处理成功"这件事各家表达不一样：微信 v2 要一段 `<xml><return_code>SUCCESS`，
+     * 支付宝只看响应文本是不是 `success`（不是就按固定间隔重发到当天为止）。
+     * 把应答格式写死在控制器里，支付宝就会对每一笔已结清的订单无限重试，
+     * 而日志里看不出任何错——所以这条必须由渠道自己说。默认是微信 v2 的 XML 口径
+     * （`message` 只进 `return_msg`，渠道不看，运维看）。
+     */
+    fun formNotificationAck(success: Boolean, message: String): String =
+        "<xml><return_code><![CDATA[${if (success) "SUCCESS" else "FAIL"}]]></return_code>" +
+            "<return_msg><![CDATA[${message.replace("]]>", "]]]]><![CDATA[>")}]]></return_msg></xml>"
 }
 
 /** 积分汇率：M0 固定 1 积分 = 1 分（PHP `score_for_money` 的比例换算属 M1 营销配置） */
@@ -89,8 +131,9 @@ object MockJsApiParams {
     )
 }
 
-/** wxpay（mock 渠道）：只出参数，等 PAY-5 回调结清 */
+/** wxpay（mock 渠道）：只出参数，等 PAY-5 回调结清。`ecx.pay.active-channel-profile=mock` 时生效（缺省） */
 @Component
+@PayChannelProfile("mock")
 class WxPayMockChannel(private val configs: SysConfigMapper) : PayChannel {
     override val payType = "wxpay"
 
@@ -106,6 +149,12 @@ class WxPayMockChannel(private val configs: SysConfigMapper) : PayChannel {
      */
     override fun refund(req: RefundRequest): RefundOutcome =
         RefundOutcome(settled = true, refundId = "MOCKREF${req.refundBn}")
+
+    /**
+     * 关单（mock）：假渠道没有"渠道侧那张还活着的二维码"，本地 `CLOSED` 就是终态，
+     * 直接答成功让补单作业把 `channel_closed` 置 1，免得 mock 环境攒一堆反复重扫的行。
+     */
+    override fun closeTrade(tradeId: String): Boolean = true
 }
 
 /**
@@ -291,7 +340,12 @@ class OfflineChannel(private val offs: OfflinePaymentMapper) : PayChannel {
     )
 }
 
-/** 渠道注册表：pay_type → 实现。未实现的类型（alipaymini/adapay/paypal…）一律 501，与 D2/D5 口径一致 */
+/**
+ * 渠道注册表：pay_type → 实现。未实现的类型（adapay/paypal…）一律 501，与 D2/D5 口径一致。
+ *
+ * `supported`（= PAY-1 的 `pay_types`）按固定优先级排：真渠道被 profile 换上来时只是**同一位置的同一 key**，
+ * 顺序不随 bean 注册顺序漂移——前端支付页按这个数组渲染渠道列表，顺序变了就是契约漂移。
+ */
 @Component
 class PayChannelRegistry(channels: List<PayChannel>) {
     private val byType = channels.associateBy { it.payType }
@@ -303,5 +357,10 @@ class PayChannelRegistry(channels: List<PayChannel>) {
             mapOf("pay_type" to listOf("未实现的渠道")),
         )
 
-    val supported: List<String> get() = listOf("wxpay", "point", "deposit", "offline_pay")
+    /** 已被 profile 启用的渠道；未启用的真渠道根本不会出现在这里 */
+    val supported: List<String> get() = byType.keys.sortedBy { PAY_TYPE_ORDER.indexOf(it).let { i -> if (i < 0) Int.MAX_VALUE else i } }
+
+    private companion object {
+        val PAY_TYPE_ORDER = listOf("wxpay", "alipay", "point", "deposit", "offline_pay")
+    }
 }

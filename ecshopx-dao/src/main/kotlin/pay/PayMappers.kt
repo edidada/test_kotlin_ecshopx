@@ -39,6 +39,8 @@ class TradeDO : Stampable {
     var initalRequest: String? = null
     var initalResponse: String? = null
     var isSettled: Boolean = false
+    /** M1-2：本地已 CLOSED 的支付单是否已向渠道发过关单（0 待发 / 1 已确认，1 之后不再重试） */
+    var channelClosed: Int = 0
     override var created: Long = 0
     override var updated: Long = 0
 }
@@ -102,6 +104,46 @@ interface TradeMapper {
     @Update("UPDATE trade SET refunded_fee = refunded_fee + #{fee}, updated = #{updated} " +
         "WHERE trade_id = #{tradeId} AND refunded_fee + #{fee} <= pay_fee")
     fun addRefundedFee(@Param("tradeId") tradeId: String, @Param("fee") fee: Long, @Param("updated") updated: Long): Int
+
+    /**
+     * 补单作业扫描（docs/05 §M1-2 查单）：本地仍 `NOTPAY`、但已经"过了回调窗口"的外部渠道支付单。
+     * 只扫有渠道可查的类型（wxpay/alipay），本地渠道（point/deposit/offline_pay）没有"渠道侧的钱"，
+     * 扫它们只会白白打渠道接口；`created <= #{beforeSec}` 给回调留出正常到达的时间。
+     */
+    @Select("<script>SELECT * FROM trade WHERE trade_state = 'NOTPAY' AND created &lt;= #{beforeSec} " +
+        "AND pay_type IN <foreach item='t' collection='payTypes' open='(' separator=',' close=')'>#{t}</foreach> " +
+        "ORDER BY created LIMIT #{limit}</script>")
+    fun listStaleNotpay(
+        @Param("beforeSec") beforeSec: Long,
+        @Param("payTypes") payTypes: List<String>,
+        @Param("limit") limit: Int,
+    ): List<TradeDO>
+
+    /**
+     * 待向渠道关单的支付单（M1-2 补单作业第二条腿）。
+     *
+     * 只看**本地**状态：订单关闭时 `closeByOrder` 已经把 `trade_state` 收掉，
+     * 所以"订单已取消 + 渠道仍 NOTPAY"这种条件在库里永远凑不出来 ——
+     * 真正没收敛的是"渠道侧那张预支付单还活着"，它由 `channel_closed` 这一位记着。
+     * `updated <= #{beforeSec}` 同样是宽限期：刚关掉就发 close，会和同一轮里正在到达的回调抢行。
+     */
+    @Select("<script>SELECT * FROM trade WHERE trade_state = 'CLOSED' AND channel_closed = 0 " +
+        "AND updated &lt;= #{beforeSec} " +
+        "AND pay_type IN <foreach item='t' collection='payTypes' open='(' separator=',' close=')'>#{t}</foreach> " +
+        "ORDER BY updated LIMIT #{limit}</script>")
+    fun listPendingChannelClose(
+        @Param("beforeSec") beforeSec: Long,
+        @Param("payTypes") payTypes: List<String>,
+        @Param("limit") limit: Int,
+    ): List<TradeDO>
+
+    /**
+     * 关单确认（CAS）：只从 `channel_closed=0` 出发。
+     * 影响 0 行 = 并发的另一轮已经确认过，本轮什么都不用做。
+     */
+    @Update("UPDATE trade SET channel_closed = 1, updated = #{updated} " +
+        "WHERE trade_id = #{tradeId} AND channel_closed = 0")
+    fun markChannelClosed(@Param("tradeId") tradeId: String, @Param("updated") updated: Long): Int
 }
 
 /** point_member + point_member_log：积分账户（动账留痕，before/after 便于对账） */
@@ -273,7 +315,7 @@ interface DepositMapper {
     fun listRules(@Param("companyId") companyId: Long): List<RechargeRuleDO>
 }
 
-/** offline_payment：线下转账凭证，提交后订单仍待付款，等后台审核（审核动作属 M1-4） */
+/** offline_payment：线下转账凭证。提交后订单仍待付款，`check_status=1` 由后台审核结清（SUP-6，M1-2 落地） */
 class OfflinePaymentDO : Stampable {
     var id: Long = 0
     var orderId: Long = 0
@@ -285,6 +327,8 @@ class OfflinePaymentDO : Stampable {
     var paySn: String? = null
     var voucherPic: String? = null
     var transferRemark: String? = null
+    /** 审核人（M1-2 审核流写入；提交凭证时为 null） */
+    var operatorName: String? = null
     var remark: String? = null
     override var created: Long = 0
     override var updated: Long = 0
@@ -304,4 +348,43 @@ interface OfflinePaymentMapper {
 
     @Select("SELECT COUNT(*) FROM offline_payment WHERE order_id = #{orderId} AND check_status = 0")
     fun countPending(@Param("orderId") orderId: Long): Int
+
+    @Select("SELECT * FROM offline_payment WHERE id = #{id} AND company_id = #{companyId}")
+    fun findById(@Param("id") id: Long, @Param("companyId") companyId: Long): OfflinePaymentDO?
+
+    /**
+     * SUP-6 审核列表：`f` 支持 `checkStatus`（0/1/2，null=全部）与 `orderId`。
+     * 别名/列名一律走 `SELECT *` + map-underscore-to-camel-case，和 aftersales 族同一口径。
+     */
+    @Select("<script>SELECT * FROM offline_payment WHERE company_id = #{f.companyId}" +
+        "<if test=\"f.checkStatus != null\"> AND check_status = #{f.checkStatus}</if>" +
+        "<if test=\"f.orderId != null\"> AND order_id = #{f.orderId}</if>" +
+        " ORDER BY id DESC LIMIT #{limit} OFFSET #{offset}</script>")
+    fun page(
+        @Param("f") f: Map<String, Any?>,
+        @Param("offset") offset: Long,
+        @Param("limit") limit: Int,
+    ): List<OfflinePaymentDO>
+
+    @Select("<script>SELECT COUNT(*) FROM offline_payment WHERE company_id = #{f.companyId}" +
+        "<if test=\"f.checkStatus != null\"> AND check_status = #{f.checkStatus}</if>" +
+        "<if test=\"f.orderId != null\"> AND order_id = #{f.orderId}</if></script>")
+    fun count(@Param("f") f: Map<String, Any?>): Long
+
+    /**
+     * 审核动作（CAS）：只从 `check_status=0` 出发，重复点"通过"第二次拿 0 行，
+     * 所以"审核通过 + 结清订单"不会被执行两遍——结清本身还有 trade 的 NOTPAY CAS 兜底。
+     */
+    @Update("UPDATE offline_payment SET check_status = #{toStatus}, pay_fee = #{payFee}, remark = #{remark}, " +
+        "operator_name = #{operatorName}, updated = #{updated} " +
+        "WHERE id = #{id} AND company_id = #{companyId} AND check_status = 0")
+    fun audit(
+        @Param("id") id: Long,
+        @Param("companyId") companyId: Long,
+        @Param("toStatus") toStatus: Int,
+        @Param("payFee") payFee: Long,
+        @Param("remark") remark: String?,
+        @Param("operatorName") operatorName: String?,
+        @Param("updated") updated: Long,
+    ): Int
 }

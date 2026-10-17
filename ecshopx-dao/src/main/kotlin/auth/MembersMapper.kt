@@ -44,6 +44,24 @@ interface MembersAssociationsMapper {
     @Select("SELECT * FROM members_associations WHERE open_id = #{openId} AND user_type = 'wechat' LIMIT 1")
     fun findByOpenId(@Param("openId") openId: String): AssocDO?
 
+    /**
+     * 微信支付 v3 JSAPI 下单必需 `payer.openid`（docs/05 §M1-2）：按租户+会员反查微信绑定。
+     * `LIMIT 1` 是刻意的——历史脏数据里同一会员可能有多条 wechat 关联，取到的那条就是当次支付用的那条，
+     * 渠道侧不会因此错账（openid 只决定"钱从谁的钱包出"）。
+     */
+    @Select("SELECT open_id FROM members_associations WHERE company_id = #{companyId} AND user_id = #{userId} " +
+        "AND user_type = 'wechat' ORDER BY id DESC LIMIT 1")
+    fun findOpenIdByUser(@Param("companyId") companyId: Long, @Param("userId") userId: Long): String?
+
+    /**
+     * 支付宝 `trade.create` 必需 `buyer_id`（2088 开头的支付宝 userId，不是登录号），口径与微信 openid 完全一致：
+     * **先按租户+会员反查绑定，查不到才允许用应用级兜底值**——两条真渠道共用"绝不无主支付"这条不变量。
+     * `user_type = 'alipay'` 的行由支付宝授权登录写入（属 M2 开放能力），沙箱与本地可由运营先导入。
+     */
+    @Select("SELECT open_id FROM members_associations WHERE company_id = #{companyId} AND user_id = #{userId} " +
+        "AND user_type = 'alipay' ORDER BY id DESC LIMIT 1")
+    fun findAlipayUserIdByUser(@Param("companyId") companyId: Long, @Param("userId") userId: Long): String?
+
     @Insert("INSERT INTO members_associations(user_id, company_id, unionid, open_id, user_type) " +
         "VALUES(#{userId}, #{companyId}, #{unionid}, #{openId}, 'wechat')")
     @Options(useGeneratedKeys = true, keyProperty = "id")

@@ -49,6 +49,33 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-aop</artifactId>
         </dependency>
+        <!-- M1-2 真实渠道：微信支付 v3 官方 SDK（JSAPI 下单/查单/关单/退款 + 回调解密验签） -->
+        <dependency>
+            <groupId>com.github.wechatpay-apiv3</groupId>
+            <artifactId>wechatpay-java</artifactId>
+        </dependency>
+        <!-- 微信 SDK 只把 okhttp 声明成 runtime 作用域，但本地仿真要在编译期写 host 改写 Interceptor -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>okhttp</artifactId>
+        </dependency>
+        <!-- M1-2 真实渠道：支付宝开放平台 SDK（沙箱 profile 用，签名/验签走 RSA2） -->
+        <dependency>
+            <groupId>com.alipay.sdk</groupId>
+            <artifactId>alipay-sdk-java</artifactId>
+            <exclusions>
+                <!-- SDK 自带 okhttp 3.12，与微信支付 SDK 的 okhttp 4.x 冲突；统一由 okhttp3 4.x 提供 -->
+                <exclusion>
+                    <groupId>com.squareup.okhttp3</groupId>
+                    <artifactId>okhttp</artifactId>
+                </exclusion>
+                <!-- 支付宝 SDK 把 junit 4 声明成 compile 作用域，绝不能带进生产包 -->
+                <exclusion>
+                    <groupId>junit</groupId>
+                    <artifactId>junit</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>

@@ -522,7 +522,16 @@ interface AftersalesRefundMapper {
         var refundTime: Long? = null
         var refundSuccessTime: Long? = null
         var channel: String? = null
+        /**
+         * `memo` 列是 `VARCHAR(300)`。写进去的内容有相当一部分是**渠道原话**
+         * （`Invalid json response body[{...整段报文...}]` 这类），长度完全不由我们决定；
+         * 一旦超长，MySQL/H2 直接报错，于是"退款状态推进"整笔失败回滚——渠道那边钱已经动了，
+         * 我方却因为一句备注写不下去而停在原地。备注是可丢信息，状态推进不可丢，所以在入口截断。
+         */
         var memo: String? = null
+            set(value) {
+                field = value?.take(300)
+            }
         var updated: Long = 0
     }
 }

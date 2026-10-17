@@ -1285,3 +1285,9 @@ ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS bank_branch VARCHAR(128);
 ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS bank_province VARCHAR(64);
 ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS bank_city VARCHAR(64);
 ALTER TABLE aftersales_refund ADD COLUMN IF NOT EXISTS memo VARCHAR(300);
+
+-- ===== M1-2 真实渠道：渠道侧关单确认位（追加于末尾，不回改上文）=====
+-- 本地把支付单收掉（trade_state='CLOSED'）只是我方状态：微信/支付宝那边那张二维码在超时窗口内还能付款。
+-- 补单作业对已关闭但没向渠道发过关单的支付单逐轮发 close，成功或渠道答"已支付/不存在"都置 1 停止重试
+-- （后两者都无需再关：已支付的钱由回调/补单走结清，不存在的单本来就关不掉）。
+ALTER TABLE trade ADD COLUMN IF NOT EXISTS channel_closed TINYINT NOT NULL DEFAULT 0;

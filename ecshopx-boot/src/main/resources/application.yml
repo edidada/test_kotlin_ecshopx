@@ -41,6 +41,33 @@ management:
 ecx:
   compat:
     force-ok-status: false
+  pay:
+    # M1-2 渠道 profile：mock（缺省，M0 假渠道，测试与冒烟脚本口径不变）| wechatpay | alipay | 逗号叠加
+    # 真渠道要在这里改，不在代码里改：换 profile 就换实现，PayChannelRegistry 只注册被启用的渠道
+    active-channel-profile: ${ECX_PAY_PROFILE:mock}
+    wxpay:
+      # 全部留空 = 未配置；配了 profile=wechatpay 却缺项，第一次下单会报"配置不全"而不是启动失败
+      mch-id: ${ECX_WX_MCH_ID:}
+      app-id: ${ECX_WX_APP_ID:}
+      api-v3-key: ${ECX_WX_API_V3_KEY:}
+      # 私钥与证书：内联 PEM（配置中心下发）或文件路径二选一，路径优先读文件
+      private-key: ${ECX_WX_PRIVATE_KEY:}
+      private-key-path: ${ECX_WX_PRIVATE_KEY_PATH:}
+      certificate-serial: ${ECX_WX_CERT_SERIAL:}
+      platform-certificate: ${ECX_WX_PLATFORM_CERT:}
+      platform-certificate-path: ${ECX_WX_PLATFORM_CERT_PATH:}
+      # 回调地址要公网可达；本地仿真/企业网关用 base-url 覆盖 SDK 的固定域名（路径与签名不变）
+      notify-url: ${ECX_WX_NOTIFY_URL:http://127.0.0.1:18080/api/notify/wxpay}
+      refund-notify-url: ${ECX_WX_REFUND_NOTIFY_URL:}
+      base-url: ${ECX_WX_BASE_URL:}
+      # 演示与仿真兜底 openid：仅在会员没绑微信（members_associations 无行）时生效，生产必须留空
+      fallback-open-id: ${ECX_WX_FALLBACK_OPEN_ID:}
+    alipay:
+      server-url: ${ECX_ALIPAY_SERVER_URL:https://openapi.alipay.com/gateway.do}
+      app-id: ${ECX_ALIPAY_APP_ID:}
+      private-key: ${ECX_ALIPAY_PRIVATE_KEY:}
+      alipay-public-key: ${ECX_ALIPAY_PUBLIC_KEY:}
+      notify-url: ${ECX_ALIPAY_NOTIFY_URL:http://127.0.0.1:18080/api/notify/alipay}
   seq:
     node: 1
     step: 100

@@ -39,6 +39,7 @@ class PayService(
     private val flow: OrderFlowService,
     private val query: OrderQueryService,
     private val registry: PayChannelRegistry,
+    private val refunds: com.ecshopx.kotlin.service.aftersales.RefundService,
     private val seq: SeqGenerator,
     private val db: Db,
     private val mapper: ObjectMapper,
@@ -249,7 +250,101 @@ class PayService(
         }
     }
 
-    class NotifyResult(val success: Boolean, val message: String)
+    /**
+     * 回调应答。`formAck` 非空时控制器**原样回给它**：应答格式是渠道的事（微信 v2 要 XML、
+     * 支付宝只看 `success` 文本），由渠道在 [PayChannel.formNotificationAck] 里给出；
+     * 空（内部调用、v3 面）则退回控制器自己的 XML 口径。
+     */
+    data class NotifyResult(val success: Boolean, val message: String, val formAck: String? = null)
+
+    /**
+     * PAY-5 表单/XML 回调（v2 与支付宝异步通知）。和 [notifyV3] 一样的分工：**验签归渠道，结清归这里**。
+     *
+     * M0-7 时这条面直接拿表单参数就结清（mock 渠道没有签名可验）；M1-2 接了真渠道后必须先过
+     * `parseFormNotification`——mock 的默认实现是原样返回，所以老行为、老冒烟脚本一字不改，
+     * 而支付宝这类真渠道会在验签失败时返回 null，这里回 FAIL、不动账。
+     */
+    fun notifyForm(channel: String?, params: Map<String, String>): NotifyResult {
+        val name = channel ?: "wxpay"
+        val ch = runCatching { registry.get(name) }.getOrNull()
+            ?: return NotifyResult(false, "未知回调渠道：$name")
+        val normalized = runCatching { ch.parseFormNotification(params) }.getOrNull()
+            ?: return NotifyResult(false, "回调验签失败", ch.formNotificationAck(false, "回调验签失败"))
+        val res = notify(normalized + ("channel" to (params["channel"] ?: name)))
+        return res.copy(formAck = ch.formNotificationAck(res.success, res.message))
+    }
+
+    /**
+     * PAY-5 v3 回调（docs/05 §M1-2）：**验签解密在渠道，结清与幂等在这里**。
+     *
+     * 与 [notify] 的关系是"同一个动作的两种到达方式"：v3 报文先经渠道换成同一套扁平参数，
+     * 再走原来的 trade CAS 结清，所以重复通知、乱序通知、金额不符的应答口径与 M0-7 完全一致。
+     * 渠道没实现 `parseNotification`（mock/本地渠道）或验签失败一律返回 null → 回 FAIL，
+     * 绝不用没验过签的报文动账。
+     */
+    fun notifyV3(channel: String?, headers: Map<String, String>, body: String): NotifyResult {
+        // `/api/notify/wxpay` 是字面映射，没有 {channel} 路径变量 → channel 为空，默认口径同 [notifyForm]
+        val name = channel ?: "wxpay"
+        val ch = runCatching { registry.get(name) }
+            .getOrElse { return NotifyResult(false, "未知回调渠道：$name") }
+        val params = runCatching { ch.parseNotification(headers, body) }.getOrNull()
+            ?: return NotifyResult(false, "回调验签或解密失败")
+
+        if (params["resource_type"] == "refund") return notifyRefund(params)
+        return notify(params)
+    }
+
+    /**
+     * 退款回执（`REFUND.SUCCESS` / `REFUND.ABNORMAL` / `REFUND.CLOSED`）：
+     * 售后退款单由 `RefundService.confirmByCallback` 收尾，订单侧不再动 `trade_state`。
+     * 找不到支付单时不报错——退款回执可能对应一笔本地没有记录的单（人工在商户平台直接退），
+     * 应答成功让渠道停止重试，问题留给对账。
+     */
+    private fun notifyRefund(params: Map<String, String>): NotifyResult {
+        val outTradeNo = params["out_trade_no"].orEmpty()
+        val outRefundNo = params["out_refund_no"].orEmpty()
+        if (outRefundNo.isBlank()) return NotifyResult(false, "退款回执缺少 out_refund_no")
+        // 处理中（非 SUCCESS/ABNORMAL/CLOSED 的 refund_status）不是终局：不动退款单，
+        // 也不回 FAIL（渠道没有"处理中"重试语义），等下一条终局回执
+        if (params["trade_state"] == "REFUND_PROCESSING") {
+            return NotifyResult(true, "OK（退款处理中，等待终局回执）")
+        }
+        val companyId = trades.findById(outTradeNo)?.companyId
+            ?: return NotifyResult(true, "OK（本地无这笔支付单，回执不再重试）")
+        val res = runCatching {
+            refunds.confirmByCallback(companyId, outRefundNo, params["transaction_id"], params["trade_state"] == "REFUND")
+        }.getOrElse { return NotifyResult(false, "退款回执处理异常：${it::class.simpleName}") }
+        // 退成功要 ACK；退失败/异常（PAYERROR → 退款单落 CHANGE）同样要 ACK——这是终局结论，
+        // 重试只会一直撞同一个结论。只有本地处理不了（异常、状态不匹配）才回 FAIL 让渠道重试
+        return NotifyResult(
+            success = res["settled"] == true || params["trade_state"] == "PAYERROR",
+            message = (res["message"] as? String) ?: "OK",
+        )
+    }
+
+    /**
+     * SUP-6 线下转账审核通过后的结清（M1-2）：与渠道回调同一条路（trade NOTPAY CAS + markPaid + 积分入账），
+     * 差别只在"钱是柜台点收的，没有渠道回执"，所以实付额由审核人填写、支付单号用凭证表自己的 `pay_sn`。
+     *
+     * 幂等有两层：调用方 `OfflineAuditService` 先对 `offline_payment.check_status` 做 0→1 的 CAS，
+     * 这里再对 `trade` 做 NOTPAY→SUCCESS 的 CAS，两个都拿到行才算结清。
+     */
+    fun settleByOffline(orderId: Long, paySn: String?, payFee: Long, remark: String?): Map<String, Any?> =
+        db.transactional {
+            val t = paySn?.let { trades.findById(it) } ?: trades.findActiveByOrder(orderId.toString())
+                ?: throw BizException(ErrorCode.BIZ, "订单没有待付支付单，无法按线下转账结清")
+            if (t.tradeState == TradeState.SUCCESS) throw BizException(ErrorCode.BIZ, "支付单已结清，请勿重复审核")
+            if (trades.settle(t.tradeId, payFee, "offline_pay", "OFFLINE$t.tradeId", TimeSec.now()) == 0) {
+                throw BizException(ErrorCode.BIZ, "支付单状态已变更，请刷新后重试")
+            }
+            if (!flow.markPaid(orderId, "offline_pay", "offline_pay",
+                    logText = "线下转账审核通过，实付 $payFee 分${remark?.takeIf { it.isNotBlank() }?.let { "（$it）" } ?: ""}",
+                    payFee = payFee)) {
+                throw BizException(ErrorCode.BIZ, "订单状态已变更，请刷新后重试")
+            }
+            accruePoints(orders.findById(orderId) ?: throw BizException(ErrorCode.NOT_FOUND, "订单不存在"))
+            linkedMapOf("order_id" to orderId.toString(), "trade_id" to t.tradeId, "trade_state" to TradeState.SUCCESS)
+        } ?: throw BizException(ErrorCode.BIZ, "线下转账结清失败")
 
     /** 复用同一订单的未付支付单，换渠道时也只保留一笔 NOTPAY（历史笔由 closeByOrder 收掉） */
     private fun ensureTrade(o: com.ecshopx.kotlin.dao.order.NormalOrderDO, payType: String): TradeDO {

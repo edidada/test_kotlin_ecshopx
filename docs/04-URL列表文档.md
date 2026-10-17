@@ -457,3 +457,47 @@ M1-1 只交付**交易闭环必需的 17 条**，其余按下表"归属"列延�
 | D14 | 渠道退款失败回 200 + `CHANGE` 留痕 | 源系统抛 `ResourceException` 后无落库痕迹，运营端看不到失败原因；本项目失败也是状态，必须可见 |
 | D15 | 售后不改 `order_status`，只在 `pay_status` 与行 `aftersales_status` 上标注 | 保持与源系统一致，代价是页签/角标必须按单头态分桶（见 C94），否则退款单在买家侧"消失" |
 | D16 | 佣金与返利在同一事务内按行货款占比冲销 | `commission_fee`/`total_rebate` 只减不借（负数封顶 0）；源系统在支付回调里异步冲销，本项目放进退款事务，保证守恒审计读到的永远是已收敛状态（e2e 第 10 例逐笔断言 900/600 递减到 0/0） |
+
+## 13. 实现期语义补充（M1-2 真实渠道接入落地时确认，追加于 §12 之后，不回改上文）
+
+M1-2 接进两条真渠道（微信支付 v3、支付宝）与线下转账审核面。以下口径由实测钉死，验收证据：`WxPayV3SimulationTest` + `AliPaySimulationTest`（各 8 例，本地仿真网关真签真验）+ `tools/m12_smoke.py`（58 项，默认 mock profile 的契约回归）。
+
+### 13.1 本轮新增/改写的端点
+
+| # | 方法 | URL | 说明 |
+|---|---|---|---|
+| PAY-5 | POST | `/api/notify/wxpay` | 同一条映射现在**同时**接微信 v2（form/XML 报文）与 v3（JSON + `Wechatpay-*` 头），按报文内容分流 |
+| PAY-5b | POST | `/api/notify/alipay`（webhook 组，匿名放行） | 支付宝异步通知：form-urlencoded，应答体是**纯文本** `success`/`failure`（非 data 包络、非 XML） |
+| SUP-6a | GET | `/api/offline-payments`（后台，`offline_payment.lists`） | 转账凭证待审列表：`check_status`（0 待审/1 已审/2 已拒）与 `order_id` 均可筛，分页 |
+| SUP-6b | POST | `/api/offline-payments/check`（后台，`offline_payment.check`，`@Audited`） | 审核：`check_status=1` 通过并结清、`=2` 驳回。**唯一把钱收进来的入口** |
+
+不单开凭证详情端点：列表行已含 `voucher_pic/pay_sn/transfer_remark/operator_name` 全字段，`?order_id=` 就是钻取，详情只是同一份数据的第二次读。
+
+### 13.2 实现期口径（C 系列续编，追加于 §12 之后）
+
+| # | 条目 | 实现口径 |
+|---|---|---|
+| C95 | 回调映射只注册一条 | `/api/notify/wxpay` 与 `/api/notify/{channel}` 合并在同一个 `@PostMapping`，**按报文内容分流**（`{` 前缀 = v3 JSON 信封，其余按表单/XML）。用 `consumes` 拆两条映射会炸：Spring 对**空 body** 的请求一律视为 `consumes` 匹配，`curl -X POST /api/notify/wxpay` 同时命中两条 → `IllegalStateException: Ambiguous handler methods` → 500，而 500 的应答体不是渠道认识的格式，渠道按"服务端故障"无限重试 |
+| C96 | 渠道未注册 = 从清单消失，不是报错 | `registry.supported` 驱动 PAY-1 的 `pay_types`；`ecx.pay.active-channel-profile` 没开 alipay 时它根本不出现在清单里，硬发起则 501「暂不支持该支付方式：alipay」。前端据此隐藏按钮，不需要额外的开关接口 |
+| C97 | 回调应答体由渠道决定，控制器只兜底 | `NotifyResult.formAck` 非空时**原样**回给渠道：微信 v2 = `<xml><return_code>`，支付宝 = 纯文本 `success`/`failure`（`text/plain`，判的是逐字节相等而非 contains），微信 v3 = HTTP 200/500 + `{"code","message"}`（手工拼，不经全局 Jackson 配置）。只有渠道没解析出来（未知渠道、异常兜底）才退回微信 v2 的 XML 口径 |
+| C98 | 进渠道验签的报文一个字节都不能改 | 渠道签名覆盖"收到的全部参数"（支付宝 V1 = 除 `sign`/`sign_type` 外按 key 升序拼 `k=v&`，微信 v2 的 MD5 同理）。控制器曾把路径变量 `channel` 塞进参数 map，结果**真通知永远验不过**、被支付宝按 4m/10m/… 无限重投。渠道身份现在作为独立入参传给 `notifyForm`，验签通过之后才补进结清参数 |
+| C99 | 支付宝应答验签的是"节点子串" | `JsonConverter.getSignSourceData` 用 `apiMethodName.replace('.','_')+"_response"` 定位（要求 `indexOf > 0`，应答必须以 `{` 开头），再按 `start = index + key.length + 2`、花括号配对截断，把**那段原文**交给 `SignChecker.check`。自造网关必须先拼好节点文本、对节点签名、最后套外壳，顺序反了必然验不过；同一 key 出现两次会被判"应答报文重复"直接抛错 |
+| C100 | 支付宝 SDK 4.39.x 的请求形态：公共参数在 query | `method`/`sign`/`app_id`/`timestamp` 挂在 URL query，POST body 里只有 `biz_content`，而待签串是**两处合并后的全参数**。网关或夹具只读 body 就既取不到 `method`、也验不过签名（本轮 6 例下单全挂在这一条上） |
+| C101 | `AlipayResponse.isSuccess()` 只看 `sub_code` | 本版本实现是 `StringUtils.isEmpty(subCode)`，`code=10000` 不参与判断。业务失败必须落 `sub_code`，成功节点里一个 `sub_*` 字段都不能有 |
+| C102 | 渠道状态必须归一化，判据才能只有一条 | 支付宝原话 `TRADE_SUCCESS/TRADE_FINISHED→SUCCESS`、`TRADE_CLOSED→CLOSED`、`WAIT_BUYER_PAY→NOTPAY`；回调与补单共用 `trade_state == "SUCCESS"` 一条判据。不归一化的后果是"报文完全正常、掉单永远补不上"——最难查的一种漏 |
+| C103 | 金额单位换算只活在渠道内部 | 支付宝全程「元、两位小数」字符串、微信全程「分」，本系统与 `trade` 一律整分，`fenToYuan/yuanToFen` 不在渠道外出现。回调金额**只做校验**，应付额永远取本地 `trade.total_fee`（M0-7 的不变式，接真渠道后继续成立） |
+| C104 | 补单两条腿与 `channel_closed` | 真渠道有本地造不出的两个单边态：掉单（钱在渠道扣了、回调没进来）与关单不彻底（本地 `CLOSED` 但渠道那张预支付单还活着，超时窗口内扫码照样付得出去）。`PayReconcileJob` 每 5 分钟只扫 `pay_type in (wxpay,alipay)`、带 120s 宽限：前者查到 `SUCCESS` 就**复用 `PayService.notify`**（CAS 幂等、金额核对、积分入账与回调一字不差，两套结清逻辑迟早会漂，这里只有一套）；后者向渠道发 close，渠道答"已支付/查无此单"也算终局，成功或终局才置 `channel_closed=1` 停止重试。答"已支付"的那笔不会丢钱——下一轮以 `SUCCESS` 落进第一条腿 |
+| C105 | 微信 v3 通知的新鲜度由应用判 | SDK 的 `NotificationParser` 不做时间窗校验，应用侧补 `Wechatpay-Timestamp` 超窗（±300s）即 FAIL。同一笔靠 CAS 结不清第二次，但退款回执等其他密文不该有被无限重放的余地 |
+| C106 | 未绑定一律拒发，不做"无主支付" | 微信 JSAPI 必需 `payer.openid`、支付宝 `trade.create` 必需 `buyer_id`（2088 开头的支付宝 userId，不是登录号），两条口径完全一致：先按租户+会员反查 `members_associations`（`user_type='wechat'/'alipay'`），查不到才允许应用级兜底值（`fallback-open-id`/`fallback-buyer-id`，生产必须留空），两个都没有 → 422「该会员未绑定…」 |
+| C107 | 退款一渠道一形态 | 支付宝 `trade.refund` **同步**给结果（`fund_change=Y` 当场 `SUCCESS`，没有"等回执"这一态）；微信 v3 的 `PROCESSING` 映射成 `RefundOutcome.pendingCallback`，退款单原地停在 `AUDIT_SUCCESS`，由 `REFUND.SUCCESS` 回执推到终态，而不是人工登记。`out_refund_no`/`out_request_no` 都用退款单号，渠道按它幂等，CAS 重放不会退两次 |
+| C108 | 线下审核复用同一条结清 CAS | `check_status` 的条件更新只从 0 出发（一凭证一结论，重复点"通过"422）；少收 422 并提示按应付全额结清；驳回只标凭证、订单原样留在待付款，不产生任何资金动作。审核通过走的正是回调那条 `trades.settle` CAS，所以"审核通过 + 重复通知"不会结两次 |
+
+### 13.3 与源系统的差异续编（D 系列，追加于 §12.1 之后）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D17 | 真渠道密钥只走应用配置，不进库、不进 `sys_config` | `ecx.pay.{wxpay,alipay}.*` 全部由环境变量/配置中心下发（内联 PEM 或文件路径二选一，路径优先）。M1-2 口径是**一套商户号服务一个租户**，多商户映射属 M2 开放能力，因此配置走应用级而不是租户级 |
+| D18 | 沙箱真单用本地仿真等价替代，并且明写没做完 | 商户号、密钥、公网回调地址在本地拿不到，于是自签双密钥（`ecshopx-boot/src/test/resources/sim/mockwx.p12`，两把 RSA-2048：`merchant`/`platform`）+ 本地假渠道服务器把"真签真验"补齐：SDK 用商户私钥真签请求，夹具用商户公钥真验；夹具用平台私钥真签应答与通知，SDK/渠道代码用平台公钥真验，伪造签名、改包、错 `app_id`、密钥填反、乱序与重复通知全部有对应用例。**剩下的真单验证仍是上线前 TODO**：微信商户平台与支付宝沙箱各跑一笔，验的是配置项与证书序列号，代码不会再改 |
+| D19 | 两个仿真夹具的传输层不一样，是渠道要求不是随手挑的 | 微信 `HttpHeaders` 区分大小写（`Wechatpay-Signature` 等），JDK 的 HTTP 实现会规范化头名让 SDK 取不到签名 → 微信夹具必须裸 `ServerSocket`；支付宝只验应答正文里的节点子串，头名无所谓 → 可以用 JDK `HttpServer`。SDK 域名来自不可改的 `HostName` 枚举，接缝是 `ecx.pay.wxpay.base-url`：OkHttp 拦截器只换 scheme+host+port，**路径与查询串原样保留**（签名覆盖的正是"方法+路径+查询串+body"），换沙箱网关零代码改动 |
+| D20 | 出参键位不做假统一 | 微信 JSAPI 仍回 `appId/timeStamp/nonceStr/package/signType/paySign` 六键（PAY-2 契约不变、前端零改动，`paySign` 由 SDK 用商户私钥真签，`MOCK-` 假签名在这个 profile 下不可能出现）；支付宝 `trade.create` 只创建交易、前端用 `my.tradePay({tradeNO})` 调起，因此如实回 `trade_no/out_trade_no/total_amount`。硬凑成同一套键位只会让前端两套逻辑都要写 if |
+| D21 | 冒烟脚本对"待付款残单"改用差值口径 | m07 断言「清理后本人无待付款残单 = 0」是**全局归零**，而回调失败/凭证驳回的单本该留在 `NOTPAY`。七脚本同库顺序跑（m04→m12）时，m11 刻意留一笔未支付单验「未付款不能申请售后」，m12 若照抄全局口径就会被前一脚本的在途单踩出假 FAIL。m12 因此进场先记基线、收口后断言**回到基线**，并把自己造的残单全部取消 |

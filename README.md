@@ -72,3 +72,15 @@ python tools/m04_smoke.py     # 实跑冒烟（服务需已在 18080）；m05..m
 设计：[01-架构设计](docs/01-架构设计文档.md) · [02-概要设计](docs/02-概要设计文档.md) ·
 [03-详细设计](docs/03-详细设计文档.md) · [04-URL 列表（wire 契约）](docs/04-URL列表文档.md) ·
 [05-开发步骤 M0/M1/M2](docs/05-开发步骤-M0M1M2-P0P1P2.md)
+
+## 支付渠道 profile（M1-2）
+
+`ecx.pay.active-channel-profile` 决定哪套渠道实现被注册成 bean，缺省 `mock`（M0 假渠道，回调与关单都由自己 curl 出来）。真渠道用环境变量开：
+
+```bash
+ECX_PAY_PROFILE=wechatpay,alipay java -jar ecshopx-boot/target/ecshopx-boot-0.1.0-SNAPSHOT.jar
+```
+
+密钥只从环境/配置中心下发，不进代码也不进库：微信 `ECX_WX_MCH_ID / ECX_WX_APP_ID / ECX_WX_API_V3_KEY / ECX_WX_PRIVATE_KEY(_PATH) / ECX_WX_CERT_SERIAL / ECX_WX_PLATFORM_CERT(_PATH) / ECX_WX_NOTIFY_URL`，支付宝 `ECX_ALIPAY_SERVER_URL / ECX_ALIPAY_APP_ID / ECX_ALIPAY_PRIVATE_KEY / ECX_ALIPAY_PUBLIC_KEY / ECX_ALIPAY_NOTIFY_URL`。没开真渠道时 `pay_types` 里就看不到它（PAY-1），硬发起是 501；配了 profile 却缺密钥，第一次下单报「配置不全」而不是启动失败。补单作业（掉单结清 + 渠道侧关单）默认 5 分钟一轮、只扫 `wxpay/alipay`，`ECX_PAY_PROFILE=mock` 时它也只做无操作。
+
+两条真渠道的"真签真验全链路"跑在本地仿真网关上：`mvn -B test -pl ecshopx-boot -Dtest=WxPayV3SimulationTest+AliPaySimulationTest -Dsurefire.failIfNoSpecifiedTests=false`（各 8 例，夹具 `ecshopx-boot/src/test/kotlin/Sim*PayServer.kt` + 自签密钥库 `src/test/resources/sim/mockwx.p12`）。微信商户平台与支付宝沙箱的**真单**验证仍待商户资质到位后执行，代码不再改。
