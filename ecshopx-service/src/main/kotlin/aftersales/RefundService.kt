@@ -64,6 +64,7 @@ class RefundService(
     private val orderLogs: OrderOperateLogMapper,
     private val trades: TradeMapper,
     private val registry: PayChannelRegistry,
+    private val commissions: com.ecshopx.kotlin.service.distribution.CommissionService,
     private val seq: SeqGenerator,
     private val db: Db,
 ) {
@@ -621,8 +622,13 @@ class RefundService(
     }
 
     /**
-     * 佣金/返利按退款占比冲销（docs/05 M1-1「佣金冲销事件」）：
+     * 佣金/返利按退款占比冲销（docs/05 M1-1「佣金冲销事件」+ docs/04 §18.5）：
      * 以**订单行**的成交额为分母，避免用整单金额摊到别家货上；GREATEST 由 SQL 兜住不为负。
+     *
+     * M1-4 起这一步是**两件事**：减订单头的 `total_rebate/commission_fee`（对账用的快照），
+     * 以及冲同一笔佣金在 `distribute_logs` 里的那条流水（店铺余额的账本）。
+     * 原来只减前者，于是"退完款的店还能把佣金提走"——两边必须用**同一个 `rebate` 数**，
+     * 否则快照与账本从这次退款之后就一直差着这一截。
      */
     private fun reverseCommission(o: NormalOrderDO, itemRow: OrderItemDO, fee: Long, point: Long, now: Long) {
         val amount = fee + point
@@ -630,6 +636,7 @@ class RefundService(
         val commission = itemRow.commissionFee * amount / itemRow.totalFee
         val rebate = itemRow.totalRebate * amount / itemRow.totalFee
         if (commission > 0L || rebate > 0L) orders.reverseCommission(o.orderId, commission, rebate, now)
+        if (rebate > 0L) commissions.reverse(o.orderId, itemRow.itemId, rebate, now)
     }
 
     /** 件数镜像重算：总件数 - 仍占额度的申请件数（退款拒绝/撤销后把额度还回去） */

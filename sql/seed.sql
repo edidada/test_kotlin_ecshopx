@@ -354,3 +354,29 @@ INSERT IGNORE INTO operators
   (operator_id, company_id, username, password, operator_type, distributor_ids, created, updated)
 VALUES (3, 1, 'distributor01', '$2a$10$XuQCFgc9Z1zSEoix6.8KlOfiSOOY3qZqW5m6Ib4raPxOPplc36ZPS', 'distributor', '[2]', 0, 0);
 INSERT IGNORE INTO operator_rel_roles (operator_id, role_id) VALUES (3, 2);
+
+-- ===== M1-4 第二批追加：佣金/提现权限码 + 结算延时配置 + 演示店铺在册负责人（追加于末尾，不回改上文） =====
+-- 四条码按"看钱 / 结算 / 收单 / 批单"四个岗分列（docs/04 §18.7）：
+--   distribution.logs 给店铺运营（他必须能看自己店的佣金流水），
+--   distribution.close 与 withdraw.* 只给平台侧 —— 结算和打款都不能由店里自己点。
+-- 45,46（salesman.*）与 51..53（pickup/writeoff）属第三批，这里不提前占位的名字，只按 §18.7 的编号落 47..50。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (47, 38, '佣金记录', 'distribution.logs',  'actived'),
+  (48, 38, '佣金结算', 'distribution.close', 'actived'),
+  (49, 38, '提现列表', 'withdraw.lists',     'actived'),
+  (50, 38, '提现审核', 'withdraw.check',     'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 47), (1, 48), (1, 49), (1, 50),
+  -- 店铺运营岗：只给"看自己店佣金"，结算/提现审核一条都不给（越权用例靠这四条码的缺配跑）
+  (2, 47);
+
+-- 佣金结算延时（天）：入账时写 plan_close_time = now + delay*86400，到期由 CommissionSettleJob/DL-A3 置已结算。
+-- 显式给 7 而不是留空回落默认，是为了让冒烟里"提现先被'余额不足'挡住、结算后才能提"这条链有稳定的观察点。
+INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VALUES
+  (1, 'commission.close_delay', '7', 0);
+
+-- 演示店铺「在册负责人」：会员 13800000001（user_id=1）是 demo 旗舰店（distributor_id=2）的老板。
+-- 本项目 distribution_distributor 没有归属人列（C152），CW-F1 判"这是不是你的店"只认这条行。
+INSERT IGNORE INTO distribution_distributor_salesman
+  (salesman_id, company_id, distributor_id, shop_id, user_id, mobile, salesman_name, role_id, is_valid, created, updated)
+VALUES (1, 1, 2, 0, 1, '13800000001', 'demo 旗舰店老板', 0, 'true', 0, 0);

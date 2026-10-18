@@ -40,6 +40,7 @@ class PayService(
     private val query: OrderQueryService,
     private val registry: PayChannelRegistry,
     private val refunds: com.ecshopx.kotlin.service.aftersales.RefundService,
+    private val commissions: com.ecshopx.kotlin.service.distribution.CommissionService,
     private val seq: SeqGenerator,
     private val db: Db,
     private val mapper: ObjectMapper,
@@ -107,6 +108,8 @@ class PayService(
                     throw BizException(ErrorCode.BIZ, "订单状态已变更，请刷新后重试")
                 }
                 accruePoints(o)
+                // §18.5：佣金入账与积分入账同位、同一条事务 —— 钱没进来就不该有佣金流水
+                accrueCommission(o)
             }
             out
         }
@@ -246,6 +249,7 @@ class PayService(
                     throw BizException(ErrorCode.BIZ, "订单状态已变更，回调稍后重试")
                 }
                 accruePoints(o)
+                accrueCommission(o)
                 trades.saveResponse(tradeId, mapper.writeValueAsString(params), TimeSec.now())
                 NotifyResult(true, "OK")
             } ?: NotifyResult(false, "内部错误")
@@ -346,7 +350,9 @@ class PayService(
                     payFee = payFee)) {
                 throw BizException(ErrorCode.BIZ, "订单状态已变更，请刷新后重试")
             }
-            accruePoints(orders.findById(orderId) ?: throw BizException(ErrorCode.NOT_FOUND, "订单不存在"))
+            val settled = orders.findById(orderId) ?: throw BizException(ErrorCode.NOT_FOUND, "订单不存在")
+            accruePoints(settled)
+            accrueCommission(settled)
             linkedMapOf("order_id" to orderId.toString(), "trade_id" to t.tradeId, "trade_state" to TradeState.SUCCESS)
         } ?: throw BizException(ErrorCode.BIZ, "线下转账结清失败")
 
@@ -374,6 +380,15 @@ class PayService(
         }
         trades.insert(t)
         return t
+    }
+
+    /**
+     * 佣金入账（§18.5 的三条硬口径都在 [CommissionService.accrue] 里）：
+     * 幂等判据是"这单有过流水就跳过"，所以回调重放、线下审核重复点通过都不会双计。
+     * 自营单与 0 佣金单自然不写行。
+     */
+    private fun accrueCommission(o: com.ecshopx.kotlin.dao.order.NormalOrderDO) {
+        commissions.accrue(o, TimeSec.now())
     }
 
     /** 支付成功才入账：赠送分（get_points）进积分账户并留痕，0 分不入账 */
