@@ -905,3 +905,31 @@ schema 末尾追加两条列（第三批落地时一次给全，MySQL/H2 同一�
 | D46 | 佣金按**行 rebate 快照**入账，不在结算时重算费率 | 源系统在回调里重读商品 `rebate`/`commission_ratio`，改一次费率就把历史单的佣金改掉。本项目下单时已把 `items.rebate × num` 落到 `orders_normal_items.total_rebate`，入账只读它（与"优惠快照后面会被改被删"同一族：C121）。`rate`（万分比平台服务费）只影响之后新单 |
 | D47 | 提现"打款"是 mock 回执，不接渠道代付 | CW-A3 只回账户型信息与 `paid_time`；bady/adapay/hfpay 三家渠道提现族（附录 15 条）属 M2-2「只做 `PayChannel` 实现位，不逐家联调」 |
 
+
+## 19. 实现期语义补充（M1-4 第一批：店铺档案 + 店铺商品双模落地时确认，追加于 §18 之后，不回改上文）
+
+交付面：`DS-A1..A8` / `DS-F1..F2` / `SI-A1..A4` / `SI-F1..F2` 十二条端点 + §18.3 数据权限（`operators.distributor_ids` → JWT → `DistributorScope`）+ §18.4 双模在**算价与扣库存两侧**的分流。新代码落位：`dao/distribution/{DistributionMappers,ShopItemMappers}.kt`、`service/distribution/{DistributorService,ShopItemService,StockPool}.kt`、`web-admin/controller/{DistributorAdminController,DistributorFrontController}.kt`。
+
+### 19.1 口径确认（C 系列续编）
+
+| # | 口径 | 实测依据 |
+|---|---|---|
+| C141 | **失效行的字段集与有效行同构**：`invalid_cart`/`invalid_items` 的行同样带 `store`（本店池现值）、`is_total_store`、`stock_source`、`origin_price`。购物车里"这家店卖 59、总部 89、本店池子已经空了"这件事只能由行自己说清，否则会员看到的是一条没有来由的失效记录 | `CartService.pendingView` 一处装配、两面共用；`DistributorEndToEndTest` 门槛① 用例先照出缺失（`缺失=[origin_price, stock_source]`），补齐后 `ContractDiff` 两面同键 |
+| C142 | **下单侧的失效原因与 ORDER-1 同源**：`OrderCreateService.reason()` 改为直接调 `CartService.invalidReason(p)`（原私有、现公开）。判序是 `商品不存在 → 该店铺已下架此商品 → 该店铺暂不可售 → 店铺库存不足/库存不足 → 商品已下架` | 实跑照出来的：加盟店把 `is_can_sale=false` 之后，总部池还满着 200，旧 `reason()` 那套三行 `when` 报「库存不足」，预览却写着「该店铺暂不可售」——与 §15 那条"拒券文案与判据必须同源"完全同族 |
+| C143 | **`price=0` 就是"跟随总部现价"**，不是"卖 0 元"：SI-A1/SI-A3 都不写 0 进 `price` 的判空分支，`ShopItemService` 出数一律 `shopPrice.takeIf { it > 0 } ?: items.price` | `m14_ds_smoke.py`「预清理后本店价回落总部现价」+ `price_store(shop=SHOP)` 收尾断言 `== 8900` |
+| C144 | **`is_total_store` 与 `is_show/is_can_sale` 是三件独立的事**：前者只决定扣哪个池，后两位只决定可售性。SI-A1 的 upsert 因此**只覆盖传进来的字段**（先读旧行合并再整行 UPDATE），"改个价"不会把上架位清零、"改池子归属"不会把库存抹掉 | 冒烟「SI-A1 重复挂品只覆盖传进来的字段（池子与两态位保留）」：第二次只传 `price=6900`，`store=30`/`is_show`/`is_can_sale` 原样 |
+| C145 | **数据权限越权有两面，语义不同**：列表面（`GET /api/distributors`、`/api/distributor/items`、`/api/orders`）越界=**过滤到 0 行**，因为 `distributor_id` 是查询参数、`DistributorScope.narrow` 取交集；资源引用面（`/distributors/info`、`/distributor/count/{id}`、`/api/orders/{id}`、`PUT /distributor/{id}`）越界=**404 而不是 403**，不给可枚举的信息 | 冒烟门槛② 七条：`distributor01` 列表只出 `{2}`、`?distributor_id=1` 回 `total_count=0`、店 1 的 info/count/items/PUT 全 404、别人家店单 404 而自己家店单 200 |
+| C146 | **权限码与数据权限是两条线**：`distributor.update`（改档案）过 != `distributor.review`/`distributor.status` 过。seed 的角色 2 只给 lists/update/items_lists/items_update，所以 `distributor01` 打审核与启停是 403，打 `payment-subject` 是 200 | 冒烟「有 update 码但没 review 码 → 403」+「运营开关另有一条码，同样 403」+「payment-subject 放行」 |
+| C147 | **`is_valid='closed'` 是终态**：DS-A6 只能从 `'true'/'false'` 进 `closed`（UPDATE 带 `AND is_valid = #{from}`），改回 `'true'` 一律 422「已关店，请走重新开店」。关店之后**档案仍可改**（善后要填联系电话），只有挂品被拦：`SI-A1` 对 `closed`/`false` 的店 422 | 冒烟「closed 是终态」+「关了店的店不许再挂品（422）」；e2e Order 6 同两条 |
+| C148 | **前台与后台读同一份列**：`DS-F1/F2`、`SI-F1`、`items_price_store?distributor_id=` 的准入判据都是 `is_valid='true' AND review_status=TRUE`，未营业的店对前台是 **404**（不是空列表、不是 403） | 冒烟「未过审/已关店的 B 不进前台」+「DS-F2 未营业的店对前台就是 404」 |
+| C149 | **`balance` 是纯派生数，不落列**：`Σ(is_close=TRUE 的 rebate) − Σ(status IN ('applied','confirmed','paid') 的 money)`。`paid` 也占（`commission_closed` 只增不减，已打款若不扣就能被反复提空）；`refused` 不占（钱从未离开余额，整个公式对拒绝申请可重算） | e2e Order 8：closed 5000 / open 3000 / applied+paid 占用 3000 / refused 不占 → `balance=2000`，`withdraw_in_flight=3000` |
+| C150 | **取消挂品不改历史**：`SI-A4` 只 `DELETE distribution_distributor_items`，`orders_normal_orders_items.distributor_id/is_total_store` 是当时的事实，删行之后回补仍按订单行走 | e2e Order 16 收尾：`shop_store` 归 0、`items.store` 未惊动、`COUNT(*) … items WHERE order_id=? AND distributor_id=2` 仍是 1 |
+
+### 19.2 与源系统的差异（D 系列续编）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D48 | **未挂品的行回落总部态，而不是判"该店不可售"** | 源系统 `DistributorItems` 查不到行就把商品从店铺列表里摘掉。本项目 `auto_sync_goods=1` 的常态就是"店里没有独立行"，判不可售会让加盟店一上架就整车失效、演示链当场死。缓解：回落的只有**价与池**，可售性仍由 `items.approve_status` 与总部池判；`stock_source` 因此显式回 `TOTAL`，前端要看得出这行读的是总部池 |
+| D49 | **扣减/回补收口到唯一 `StockPool.deduct/restore`**，四处原先各自调 `ItemsMapper.deductStock/restoreStock` 的调用点全部改走它 | §18.4 写"扣减与回补必须同一条腿对称"，代码里只有一种兑现方式：让扣和回补共用一个方法。原来四处分流，只要有一处忘了判 `is_total_store`，就会出现"店铺卖光了、总部库存纹丝不动"或"取消一单把总部池加两次"。调用方只带 `(店, 品, 件数, is_total_store)`，池子归属读**订单明细行**不回读挂品行（挂品行可能在两单之间被改被删，C150 同族） |
+| D50 | **列表派生数走"一次 GROUP BY 批量回捞"，不做逐行子查询** | `DS-A2` 的 `order_count/pay_fee/refund_fee/commission_fee/balance` 五条聚合各一条 SQL、按本页 `distributor_id` 集合 `IN` 查，与商品域 `ItemService.enrich` 同一条防 N+1 纪律。退款额不并进订单那条聚合：`orders_normal_orders` 没有 `refund_fee` 列，钱在 `trade.refunded_fee`，跨表 JOIN 要在 H2/MySQL 两种方言下各写一遍 `CAST(order_id AS CHAR)`，拆两条 GROUP BY 更便宜且不漂 |
+| D51 | **`distribution_distributor_items` 不实现 `Stampable`** | 本表按源系统 schema 原样沿用，**没有 `created/updated` 两列**；照抄 M0-4 记过的那条会给 `SeedDataLoader` 与 `INSERT` 一起报 `Column "created" not found` |
