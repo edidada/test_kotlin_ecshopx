@@ -140,6 +140,15 @@ class PriceContext(
     val coupon: CouponUserDO? = null,
     /** 给了券码但用不了的人话原因（券不存在/不属于本人/被别的单占用…） */
     val couponReason: String? = null,
+    /**
+     * 券在**算价当场**被拒的原因（状态/过期/门槛），由 `CouponRule` 写。
+     *
+     * 为什么要留在 ctx 上而不是等出参时重算：门槛比的是"会员折 + 满减之后、券与积分之前"的
+     * 组内应付（§14.5），而整条链跑完时这个数已经被积分又减掉一截了。重算出来的
+     * "当前 X 元"会把用户已经够得着的金额报成差得多的一大截（138.15 报成 69.08），
+     * 判据没错、文案骗人。当场记下来，两边读同一个数。
+     */
+    var couponReject: String? = null,
     /** 积分抵扣上限比例（`point.deduct.max_ratio`，百分比；0=不允许抵扣） */
     val pointRatio: Int = 0,
     /** 秒杀/拼团活动价（§14.5 order 15）：由 buildContext 预取，规则链按 (类型, 活动, 商品) 命中 */

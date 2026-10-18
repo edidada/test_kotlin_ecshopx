@@ -338,10 +338,30 @@ class OrderQueryService(
         "shop_name" to (shop?.name ?: platformName(o.companyId)),
     )
 
-    /** discount_info：把行上的活动明细聚合成订单级 [{type,rule,discount_fee}] */
+    /**
+     * discount_info：把行上的活动明细聚合成订单级 `[{type,rule,discount_fee}]`。
+     *
+     * 这里**不能**复用 [jsonList]：那个helper是给 `pics` 这类"字符串数组"用的（元素回 `String`），
+     * 而本列存的是对象数组。原先写成 `jsonList(...).mapNotNull { it as? Map }`，
+     * 字符串永远 cast 不成 Map → 这个字段在任何单据上都是空数组（实测：满减单 `discount_fee=3000`
+     * 而 `discount_info=[]`），折让构成从 HTTP 面整个消失。改成按对象数组解析。
+     */
     private fun discountInfo(rows: List<OrderItemDO>): List<Map<String, Any?>> =
-        rows.flatMap { i -> jsonList(i.discountInfo).mapNotNull { it as? Map<*, *> } }
+        rows.flatMap { i -> jsonMaps(i.discountInfo) }
             .map { linkedMapOf<String, Any?>("type" to it["type"], "rule" to it["rule"], "discount_fee" to it["discount_fee"]) }
+
+    /** 对象数组列 → `List<Map>`；不是数组或解析失败都回空集（脏行不许把整张详情带崩） */
+    private fun jsonMaps(raw: String?): List<Map<String, Any?>> {
+        if (raw.isNullOrBlank()) return emptyList()
+        val n = runCatching { mapper.readTree(raw) }.getOrNull() ?: return emptyList()
+        if (!n.isArray) return emptyList()
+        return n.mapNotNull { e ->
+            runCatching {
+                @Suppress("UNCHECKED_CAST")
+                mapper.convertValue(e, Map::class.java) as Map<String, Any?>
+            }.getOrNull()
+        }
+    }
 
     private fun fullItem(i: OrderItemDO, unitByItem: Map<Long, String>): Map<String, Any?> = linkedMapOf(
         "id" to i.id,

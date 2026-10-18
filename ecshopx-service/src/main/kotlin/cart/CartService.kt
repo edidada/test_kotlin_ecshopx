@@ -732,6 +732,10 @@ class CartService(
      * 归属问题在预取阶段就有结论；剩下那些（状态/过期/门槛）要等算价跑完才知道比的是哪个数，
      * 所以这里用**抵扣前的组内应付**再问一次 [CouponCheck]，与 CP-F4 的判据同源。
      *
+     * 优先读 [PriceContext.couponReject]：门槛那次判定是在"满减之后、积分之前"的应付上做的，
+     * 事后重算只能加回券抵扣、加不回积分，会把"当前金额"报小（138.15 报成 69.08）。
+     * 重算只留给规则没跑到的边角（多店铺、无应付、券实例没取到）。
+     *
      * 公开给下单侧复用（`OrderCreateService`）：预览说"这券能用"、下单却按不用券成交，
      * 是最难解释的一类分歧 —— 两处必须读同一个判据。
      */
@@ -741,9 +745,10 @@ class CartService(
         ctx.couponReason?.let { return it }
         val c = ctx.coupon ?: return "优惠券不存在"
         if (q.couponDiscount > 0) return null
+        ctx.couponReject?.let { return it }
         val g = ctx.activeGroups.singleOrNull()
             ?: return if (ctx.activeGroups.size > 1) "本单包含多个店铺，优惠券只支持单店铺结算" else "没有可抵扣的商品金额"
-        return CouponCheck.usable(c, g.cartTotalPrice + g.couponDiscount, ctx.now)
+        return CouponCheck.usable(c, g.cartTotalPrice + g.couponDiscount + g.pointFee, ctx.now)
     }
 
     companion object {

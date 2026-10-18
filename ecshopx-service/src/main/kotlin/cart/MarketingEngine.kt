@@ -274,7 +274,7 @@ class CouponRule : PriceRule {
         val c = ctx.coupon ?: return
         val g = ctx.activeGroups.singleOrNull() ?: return
         val payFee = g.cartTotalPrice
-        if (CouponCheck.usable(c, payFee, ctx.now) != null) return
+        CouponCheck.usable(c, payFee, ctx.now)?.let { ctx.couponReject = it; return }
         val deduct = CouponCheck.deductOf(c, payFee)
         val applied = spreadToLines(deduct, g.checkedLines) { l, share -> l.couponFee += share }
         if (applied <= 0) return
