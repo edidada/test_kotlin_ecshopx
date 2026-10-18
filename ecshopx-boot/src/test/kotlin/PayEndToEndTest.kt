@@ -225,15 +225,22 @@ class PayEndToEndTest {
         assertEquals(20000L - 8900 + 100, point(), "扣分 8900 后入账赠送 100")
         assertEquals("PAYED", orderCol(orderPoint, "pay_status"))
         val log = jdbc.queryForList(
-            "SELECT change_point, before_point, after_point, remark FROM point_member_log WHERE order_id = ?", orderPoint,
+            "SELECT change_point, before_point, after_point, remark FROM point_member_log " +
+                "WHERE order_id = ? ORDER BY id", orderPoint,
         )
-        assertEquals(1, log.size, "支付赠送积分必须留痕")
+        // M1-5 起这条腿补齐了：抵扣（-8900）与赠送（+100）各留一行，`Σ change_point` 才对得上余额。
+        // 本批之前这里断 1 行 —— 那时余额确实被扣了却没处可查，账实相符的恒等式在第一次纯积分兑换就断。
+        assertEquals(2, log.size, "抵扣与赠送各一条流水")
         assertEquals(
-            mapOf("change_point" to 100L, "before_point" to 11100L, "after_point" to 11200L, "remark" to "订单支付赠送积分"),
+            mapOf("change_point" to -8900L, "before_point" to 20000L, "after_point" to 11100L, "remark" to "积分支付抵扣"),
             log[0].filterKeys { it in setOf("change_point", "before_point", "after_point", "remark") },
         )
+        assertEquals(
+            mapOf("change_point" to 100L, "before_point" to 11100L, "after_point" to 11200L, "remark" to "订单支付赠送积分"),
+            log[1].filterKeys { it in setOf("change_point", "before_point", "after_point", "remark") },
+        )
         // 纯积分兑换结清：赠送分不回扣，取消也不退积分（退款属 M1）
-        assertEquals(1, jdbc.queryForObject("SELECT COUNT(*) FROM point_member_log WHERE order_id = ?", Int::class.java, orderPoint))
+        assertEquals(2, jdbc.queryForObject("SELECT COUNT(*) FROM point_member_log WHERE order_id = ?", Int::class.java, orderPoint))
     }
 
     @Test @Order(6) fun `余额积分不足与非法渠道`() {
