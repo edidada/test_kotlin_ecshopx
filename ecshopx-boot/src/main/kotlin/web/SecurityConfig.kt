@@ -43,6 +43,11 @@ class SecurityConfig(
                     "/api/h5app/vcode",
                     "/api/h5app/wxapp/goods/items",
                     "/api/h5app/wxapp/goods/items/*",
+                    // M1-4：进店与看店铺商品是匿名行为（DS-F1/F2、SI-F1/F2 标 * 的那四条）
+                    "/api/h5app/wxapp/distributors",
+                    "/api/h5app/wxapp/distributors/*",
+                    "/api/h5app/wxapp/goods/shopitems",
+                    "/api/h5app/wxapp/goods/items_price_store/*",
                 ).permitAll()
                     .anyRequest().authenticated()
             }
@@ -62,7 +67,7 @@ class SecurityConfig(
                 it.requestMatchers("/api/operator/login", "/api/ping", "/api/notify/**").permitAll()
                     .anyRequest().authenticated()
             }
-            .addFilterBefore(JwtOperatorFilter(jwt, operators), UsernamePasswordAuthenticationFilter::class.java)
+            .addFilterBefore(JwtOperatorFilter(jwt, operators, mapper), UsernamePasswordAuthenticationFilter::class.java)
             .exceptionHandling {
                 it.authenticationEntryPoint { _, res, _ -> write(res, 401, "Unauthenticated.") }
                     .accessDeniedHandler { _, res, _ -> write(res, 403, "无权访问该资源") }

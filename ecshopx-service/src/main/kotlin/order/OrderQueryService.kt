@@ -19,6 +19,7 @@ import com.ecshopx.kotlin.dao.paging.PageHelper
 import com.ecshopx.kotlin.dao.tenant.CompanyMapper
 import com.ecshopx.kotlin.dao.tenant.DistributorShopMapper
 import com.ecshopx.kotlin.dao.tenant.ShopProfileDO
+import com.ecshopx.kotlin.service.distribution.DistributorScope
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
 
@@ -45,9 +46,16 @@ class OrderQueryService(
     /**
      * ORDER-4 / 后台列表。
      * @param userId 前台必填（只查自己），后台传 null 查全租户
+     * @param scope M1-4 数据权限：分销商账号只看自己名下的单（§18.8）
      */
-    fun list(raw: Map<String, String>, companyId: Long, userId: Long?): Map<String, Any?> {
+    fun list(
+        raw: Map<String, String>,
+        companyId: Long,
+        userId: Long?,
+        scope: DistributorScope = DistributorScope.ALL,
+    ): Map<String, Any?> {
         val f = filters(raw, companyId, userId)
+        applyDistributorScope(f, scope)
         val pq = PageQuery.of(raw["page"]?.toIntOrNull(), raw["pageSize"]?.toIntOrNull() ?: raw["page_size"]?.toIntOrNull())
         val page = PageHelper.paginate(
             pq,
@@ -56,6 +64,20 @@ class OrderQueryService(
             map = { rows -> decorate(rows) },
         )
         return linkedMapOf("total_count" to page.total_count, "list" to page.list)
+    }
+
+    /**
+     * 数据权限收窄（§18.8）：admin 型不动；分销商账号把请求里的显式店过滤成"请求 ∩ 授权"，
+     * 交集为空时用 [-1] 占位（`IN (-1)` 合法且自然 0 行，比拼出 `IN ()` 稳妥）。
+     *
+     * 列表面越界是**过滤到 0 行**而不是 404 —— 这里 distributor_id 是查询条件不是资源引用；
+     * 资源引用面（[detail]、店铺档案）才按 404 处理。
+     */
+    private fun applyDistributorScope(f: MutableMap<String, Any?>, scope: DistributorScope) {
+        if (scope.unrestricted) return
+        val requested = (f["distributorId"] as? Long)?.let { listOf(it) }
+        f["distributorId"] = null
+        f["distributorIds"] = scope.narrow(requested)
     }
 
     /** 查询字典归一化：状态别名、status 数字口径、时间范围（秒） */
@@ -194,9 +216,15 @@ class OrderQueryService(
     )
 
     /** ORDER-5 详情 */
-    fun detail(orderId: Long, userId: Long?): Map<String, Any?> {
+    fun detail(
+        orderId: Long,
+        userId: Long?,
+        scope: DistributorScope = DistributorScope.ALL,
+    ): Map<String, Any?> {
         val o = orders.findById(orderId) ?: throw BizException(ErrorCode.NOT_FOUND, "订单不存在")
         if (userId != null && o.userId != userId) throw BizException(ErrorCode.NO_PERM, "无权访问该资源")
+        // 详情是资源引用面：越界的单对分销商账号一律"不存在"（§18.8，404 而不是 403）
+        if (!scope.allows(o.distributorId)) throw BizException(ErrorCode.NOT_FOUND, "订单不存在")
         val rows = orderItems.listByOrder(orderId)
         val shop = shopProfiles(o.companyId, listOf(o.shopId))[o.shopId]
         val unitByItem = itemUnits(rows.map { it.itemId })

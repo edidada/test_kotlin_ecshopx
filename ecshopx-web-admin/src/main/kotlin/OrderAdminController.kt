@@ -8,6 +8,7 @@ import com.ecshopx.kotlin.common.domain.TimeSec
 import com.ecshopx.kotlin.common.security.RequiresResource
 import com.ecshopx.kotlin.service.auth.Principal
 import com.ecshopx.kotlin.service.auth.TenantContext
+import com.ecshopx.kotlin.service.distribution.DistributorScope
 import com.ecshopx.kotlin.service.order.OrderDeliveryForm
 import com.ecshopx.kotlin.service.order.OrderQueryService
 import com.ecshopx.kotlin.service.order.OrderRemarkForm
@@ -24,7 +25,9 @@ import org.springframework.web.bind.annotation.RestController
  * ORDER-9 后台订单族（docs/04 §2.4）：列表 / 详情 / 备注 / 发货。
  *
  * 详情复用前台装配但传 userId=null → 附带 operate_logs 与包裹内明细（卖家视角全量）。
- * 店铺数据权限（distributor_id 越权过滤）按计划属 M1-4，这里只按请求参数筛。
+ *
+ * M1-4 起补上店铺数据权限：查询面把 `distributor_id` 筛成「请求 ∩ 授权」（越界即 0 行），
+ * 详情面是资源引用，越界的单直接 404（§18.8）。admin 型账号 scope=ALL，行为不变。
  */
 @RestController
 class OrderAdminController(
@@ -37,12 +40,16 @@ class OrderAdminController(
     fun list(
         @RequestParam raw: Map<String, String>,
         @AuthenticationPrincipal p: Principal?,
-    ): ApiResponse<Map<String, Any?>> = ApiResponse.ok(query.list(raw, companyId(p), userId = null))
+    ): ApiResponse<Map<String, Any?>> =
+        ApiResponse.ok(query.list(raw, companyId(p), userId = null, scope = DistributorScope.ofPrincipal(p)))
 
     @RequiresResource("orders.lists")
     @GetMapping("/api/orders/{order_id}")
-    fun detail(@PathVariable("order_id") orderId: String): ApiResponse<Map<String, Any?>> =
-        ApiResponse.ok(query.detail(id(orderId), userId = null))
+    fun detail(
+        @PathVariable("order_id") orderId: String,
+        @AuthenticationPrincipal p: Principal?,
+    ): ApiResponse<Map<String, Any?>> =
+        ApiResponse.ok(query.detail(id(orderId), userId = null, scope = DistributorScope.ofPrincipal(p)))
 
     @Audited(route = "orders.update")
     @RequiresResource("orders.update")

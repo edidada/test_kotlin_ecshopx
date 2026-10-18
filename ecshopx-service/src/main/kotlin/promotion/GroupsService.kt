@@ -26,6 +26,7 @@ import com.ecshopx.kotlin.service.aftersales.AftersalesApplyForm
 import com.ecshopx.kotlin.service.aftersales.AftersalesRefundCheckForm
 import com.ecshopx.kotlin.service.aftersales.AftersalesService
 import com.ecshopx.kotlin.service.aftersales.RefundService
+import com.ecshopx.kotlin.service.distribution.StockPool
 import com.ecshopx.kotlin.service.seq.SeqGenerator
 import com.ecshopx.kotlin.service.tx.Db
 import org.springframework.stereotype.Service
@@ -56,6 +57,7 @@ class GroupsService(
     private val orders: OrdersMapper,
     private val orderItems: OrderItemsMapper,
     private val goodsItems: ItemsMapper,
+    private val pool: StockPool,
     private val memberRepo: MembersMapper,
     private val aftersales: AftersalesService,
     private val refundService: RefundService,
@@ -549,7 +551,7 @@ class GroupsService(
                 AftersalesRefundCheckForm(aftersalesBn = bn, checkRefund = 1, refundsMemo = reason),
             )
         }
-        rows.forEach { r -> goodsItems.restoreStock(r.itemId, r.num, now) }
+        rows.forEach { r -> pool.restore(r.distributorId, r.itemId, r.num, r.isTotalStore, now) }
         acts.restoreStore(m.actId, o.companyId, rows.sumOf { it.num })
     }
 

@@ -28,6 +28,7 @@ import com.ecshopx.kotlin.dao.pay.PointLogDO
 import com.ecshopx.kotlin.dao.pay.PointMapper
 import com.ecshopx.kotlin.dao.promotion.RelPromotionMapper
 import com.ecshopx.kotlin.dao.promotion.SeckillGoodsMapper
+import com.ecshopx.kotlin.service.distribution.StockPool
 import com.ecshopx.kotlin.service.promotion.CouponService
 import com.ecshopx.kotlin.service.promotion.GroupsService
 import com.ecshopx.kotlin.service.tx.Db
@@ -61,6 +62,7 @@ class OrderFlowService(
     private val deliveries: OrderDeliveryMapper,
     private val deliveryItems: OrderDeliveryItemMapper,
     private val goodsItems: ItemsMapper,
+    private val pool: StockPool,
     private val configs: SysConfigMapper,
     private val trades: TradeMapper,
     private val rels: RelPromotionMapper,
@@ -341,7 +343,8 @@ class OrderFlowService(
         val rows = orderItems.listByOrder(o.orderId)
         val restored = rows.filter { it.cancelItemNum == 0 }
         restored.forEach { row ->
-            goodsItems.restoreStock(row.itemId, row.num - row.deliveryItemNum, now)
+            // 回补走 StockPool：扣的时候走哪条腿，回补就走哪条腿（§18.4 第②条）
+            pool.restore(row.distributorId, row.itemId, row.num - row.deliveryItemNum, row.isTotalStore, now)
             orderItems.markCancelled(row.id, (row.cancelItemNum + (row.num - row.deliveryItemNum)).toInt(), now)
         }
         // 活动池回退（D24/D25）：秒杀把下单时的占用放回池子，拼团退团并回补活动额度。

@@ -1347,3 +1347,8 @@ INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('coupon_code'
 -- 秒杀类型列放宽：本项目用**列值**表达类型（`normal` / `limited_time_sale`），
 -- 源系统的整数码 1/2 由服务层双写映射。`limited_time_sale` 17 个字符，建表时的 VARCHAR(16) 装不下。
 ALTER TABLE promotions_seckill_activity ALTER COLUMN seckill_type SET DATA TYPE VARCHAR(32);
+
+-- ===== M1-4 追加：店铺商品唯一键（追加于末尾，不回改上文） =====
+-- SI-A1 是"按 (店, 商品) upsert"，服务层先查后插；并发下两条同名挂品会各自成立，
+-- 于是同店同品出现两行、扣库存只命中其中一行 —— 唯一键把它钉在数据库层（与 uk_team 同思路）。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_distitems ON distribution_distributor_items(distributor_id, item_id);

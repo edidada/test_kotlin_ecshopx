@@ -11,6 +11,8 @@ import com.ecshopx.kotlin.dao.cart.CartItemView
 import com.ecshopx.kotlin.dao.cart.CartItemsMapper
 import com.ecshopx.kotlin.dao.cart.OrdersCartDO
 import com.ecshopx.kotlin.dao.cart.OrdersCartMapper
+import com.ecshopx.kotlin.dao.distribution.ShopItemDO
+import com.ecshopx.kotlin.dao.distribution.ShopItemMapper
 import com.ecshopx.kotlin.dao.goods.RelAttributesMapper
 import com.ecshopx.kotlin.dao.goods.ShippingTemplatesMapper
 import com.ecshopx.kotlin.dao.goods.SysConfigMapper
@@ -44,11 +46,15 @@ import java.math.BigDecimal
  *
  * M1-3 之后这里是**整条算价链唯一的取数点**：活动、券、积分余额、时间戳都在这里查完塞进
  * [PriceContext]，责任链节点因此可以保持纯函数（docs/04 §14.5）。
+ *
+ * M1-4 追加同一条纪律的第②腿：店铺挂品行（`distribution_distributor_items`）也在这里预取
+ * （§18.4），规则链继续不知道"店铺价"这回事 —— 它看到的 `price`/`store` 已经是生效值。
  */
 @Service
 class CartService(
     private val carts: OrdersCartMapper,
     private val cartItems: CartItemsMapper,
+    private val shopItems: ShopItemMapper,
     private val members: MembersMapper,
     private val grades: MembersGradeMapper,
     private val companies: CompanyMapper,
@@ -66,7 +72,13 @@ class CartService(
     private val mapper: ObjectMapper,
 ) {
 
-    /** 算价前的行：车内持久行与 fastbuy 临时行统一成这个形态 */
+    /**
+     * 算价前的行：车内持久行与 fastbuy 临时行统一成这个形态。
+     *
+     * `shop` 是本店的挂品行（`distribution_distributor_items`），**null=这家店没挂这个品**：
+     * 按 §18.4 回落总部态（价、池子、可售位全用 `items`），不判不可售 —— 这条与源系统不同，
+     * 记在 docs/04 §19（严格执行"未挂品不进购物车"会让 seed 形态的整条购物链当场死）。
+     */
     class Pending(
         val cartId: Long,
         val userId: Long,
@@ -84,7 +96,38 @@ class CartService(
         val plusBuy: Boolean,
         val item: CartItemView?,
     ) {
-        val valid: Boolean get() = item != null && item.approveStatus == "onsale" && item.store > 0
+        /**
+         * 本店挂品行（`distribution_distributor_items`），由 [attachShopRows] 一次批量挂上。
+         *
+         * null = 这家店没挂这个品，按 §18.4 **回落总部态**。这条与源系统不同（源系统判不可售），
+         * 差异与理由记在 docs/04 §19。
+         */
+        var shop: ShopItemDO? = null
+
+        /** 生效价：挂品行给了 `price>0` 就用店铺价，否则跟随总部现价（§18.4 第一行） */
+        val effPrice: Long get() = shop?.price?.takeIf { it > 0 } ?: (item?.price ?: 0)
+
+        /** 库存池（§18.4 第二行）：`is_total_store=FALSE` 才是店铺池，其余都看总部池 */
+        val effStore: Long
+            get() {
+                val s = shop
+                return if (s != null && !s.isTotalStore) s.store else (item?.store ?: 0)
+            }
+
+        val stockSource: String
+            get() {
+                val s = shop
+                return if (s != null && !s.isTotalStore) StockSource.SHOP else StockSource.TOTAL
+            }
+
+        /** 店铺下架/停售位：没挂品就是总部在架态 */
+        val shopSalable: Boolean
+            get() {
+                val s = shop
+                return s == null || (s.isShow && s.isCanSale)
+            }
+
+        val valid: Boolean get() = item != null && item.approveStatus == "onsale" && shopSalable && effStore > 0
     }
 
     /** 一次算价的全部结果：CART-2、ORDER-1、M0-6 下单共用 */
@@ -137,7 +180,7 @@ class CartService(
 
         /** 参与算价的行（勾选与未勾选都在，未勾选金额不计入合计） */
         val pricedLines: List<PriceLine> get() = ctx.lines
-        val checkStore: Boolean get() = valid.any { it.checked && (it.item?.store ?: 0) < it.num }
+        val checkStore: Boolean get() = valid.any { it.checked && it.effStore < it.num }
 
         fun profile(shopId: Long): ShopProfileDO =
             shopById[shopId] ?: ShopProfileDO().apply {
@@ -219,10 +262,14 @@ class CartService(
                 shopType = p.shopType, activityType = p.activityType, activityId = p.activityId,
                 itemType = it.itemType, itemCategory = it.itemCategory, type = it.type,
                 goodsId = it.goodsId, parentId = it.defaultItemId, pics = it.pics, brief = it.brief,
-                marketPrice = it.marketPrice, store = it.store, approveStatus = it.approveStatus,
+                marketPrice = it.marketPrice, store = p.effStore, approveStatus = it.approveStatus,
                 templatesId = it.templatesId, weight = it.weight, volume = it.volume,
-                specDesc = null, snapshotPrice = p.snapshotPrice, price = it.price, num = p.num,
+                specDesc = null, snapshotPrice = p.snapshotPrice, price = p.effPrice, num = p.num,
                 checked = p.checked, plusBuy = p.plusBuy,
+                // §18.4 的两条腿都在这里定稿：店铺价进 price，池子归属进 stockSource
+                stockSource = p.stockSource,
+                isTotalStore = p.shop?.isTotalStore ?: true,
+                hqPrice = it.price,
             )
         }
         val (coupon, couponReason) = couponOf(companyId, userId, couponCode)
@@ -311,13 +358,29 @@ class CartService(
         val rows = carts.listByUser(companyId, userId, shopId)
         if (rows.isEmpty()) return emptyList()
         val itemById = loadItems(rows.map { it.itemId })
-        return rows.map {
+        val pendings = rows.map {
             Pending(
                 it.cartId, userId, companyId, it.itemId, it.itemName, it.shopId, it.shopType ?: "shop",
                 it.activityType, it.activityId, it.itemsId, it.price, it.num, it.isChecked, it.isPlusBuy,
                 itemById[it.itemId],
             )
         }
+        attachShopRows(pendings)
+        return pendings
+    }
+
+    /**
+     * 挂品行批量预取（§18.4 的第①条硬约束：只在 `buildContext` 这条取数链上查一次）。
+     *
+     * 一次 `IN (店) × IN (品)` 拿全，不按行查 —— 多店铺混合购物车最怕的就是 N+1；
+     * 命中不到的行留在 Map 外面，由 [Pending.shop] 的 null 分支回落总部态。
+     */
+    private fun attachShopRows(rows: List<Pending>) {
+        val shopIds = rows.map { it.shopId }.filter { it > 0 }.distinct()
+        if (shopIds.isEmpty()) return
+        val byKey = shopItems.listForPrice(shopIds, rows.map { it.itemId }.distinct())
+            .associateBy { it.distributorId to it.itemId }
+        rows.forEach { it.shop = byKey[it.shopId to it.itemId] }
     }
 
     /**
@@ -336,7 +399,7 @@ class CartService(
         val list = entries.filter { (it.itemId ?: 0) > 0 }
         if (list.isEmpty()) return emptyList()
         val itemById = loadItems(list.map { it.itemId!! })
-        return list.map { e ->
+        val pendings = list.map { e ->
             val item = itemById[e.itemId!!]
             val shopId = item?.distributorId ?: 0
             Pending(
@@ -345,6 +408,8 @@ class CartService(
                 item?.price ?: 0, e.num ?: 1, true, false, item,
             )
         }
+        attachShopRows(pendings)
+        return pendings
     }
 
     private fun loadItems(ids: List<Long>): Map<Long, CartItemView> =
@@ -531,7 +596,8 @@ class CartService(
             "items_id" to splitIds(p.itemsId),
             "item_name" to (it?.itemName ?: p.itemName),
             "pics" to jsonList(it?.pics ?: p.item?.pics),
-            "price" to (it?.price ?: 0L),
+            // 失效行也给**生效态**（店铺价/店铺池），会员才看得懂"这家店卖 59、库存 0"
+            "price" to p.effPrice,
             "num" to p.num,
             "is_checked" to p.checked,
             "is_plus_buy" to p.plusBuy,
@@ -540,7 +606,11 @@ class CartService(
             "coupon_fee" to 0L,
             "point_fee" to 0L,
             "total_fee" to 0L,
-            "store" to (it?.store ?: 0L),
+            "store" to p.effStore,
+            // §18.4 的两条腿在失效行同样要给：会员要能看懂"这家店卖 59、本店池子已经空了"
+            "is_total_store" to (p.shop?.isTotalStore ?: true),
+            "stock_source" to p.stockSource,
+            "origin_price" to (it?.price?.takeIf { v -> v > 0 } ?: p.effPrice),
             "market_price" to (it?.marketPrice ?: 0L),
             "brief" to it?.brief,
             "approve_status" to (it?.approveStatus ?: "off"),
@@ -580,6 +650,10 @@ class CartService(
             "point_fee" to l.pointFee,
             "total_fee" to l.totalFee,
             "store" to l.store,
+            // §18.4 的两条腿进成员面：这家店挂的是总部池还是自己的池，页面上要能说明白
+            "is_total_store" to l.isTotalStore,
+            "stock_source" to l.stockSource,
+            "origin_price" to (if (l.hqPrice > 0) l.hqPrice else l.price),
             "market_price" to l.marketPrice,
             "brief" to l.brief,
             "approve_status" to l.approveStatus,
@@ -689,9 +763,10 @@ class CartService(
                     "item_fee" to l.itemFee, "total_fee" to l.totalFee,
                     "discount_fee" to l.discountFee, "member_discount" to l.memberDiscount,
                     "activity_price_fee" to l.activityPriceFee,
-                    "origin_price" to (l.activityOffer?.originPrice ?: l.price),
+                    "origin_price" to (l.activityOffer?.originPrice ?: (if (l.hqPrice > 0) l.hqPrice else l.price)),
                     "coupon_fee" to l.couponFee, "point_fee" to l.pointFee,
                     "cart_id" to l.cartId, "is_checked" to l.checked, "store" to l.store,
+                    "is_total_store" to l.isTotalStore, "stock_source" to l.stockSource,
                     "activity_type" to l.activityType, "activity_id" to l.activityId,
                     "item_spec_desc" to q.specDescById[l.itemId], "approve_status" to l.approveStatus,
                 )
@@ -721,10 +796,25 @@ class CartService(
             emptyList()
         }
 
-    private fun invalidReason(p: Pending): String = when {
-        p.item == null -> "商品不存在"
-        p.item.store <= 0 -> "库存不足"
-        else -> "商品已下架"
+    /**
+     * 失效原因（§18.4 第三条）。
+     *
+     * 判序是有意的：**店铺自己的下架位排在总部库存之前**。会员在加盟店的车里看到"库存不足"，
+     * 而实际是这家店把商品下架了（总部池还满着），是最难解释的一类误导 ——
+     * 总部态的"下架"仍然报"商品已下架"，与 M0-5 的文案逐字不变。
+     *
+     * 公开给下单侧复用（`OrderCreateService`）：预览里写着"这家店暂不可售"、下单却报"库存不足"，
+     * 与券那条同源 —— 两处必须读同一个判据。
+     */
+    fun invalidReason(p: Pending): String {
+        val s = p.shop
+        return when {
+            p.item == null -> "商品不存在"
+            s != null && !s.isShow -> "该店铺已下架此商品"
+            s != null && !s.isCanSale -> "该店铺暂不可售"
+            p.effStore <= 0 -> if (p.stockSource == StockSource.SHOP) "店铺库存不足" else "库存不足"
+            else -> "商品已下架"
+        }
     }
 
     /**

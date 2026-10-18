@@ -323,3 +323,34 @@ INSERT IGNORE INTO promotion_groups_activity
   (groups_activity_id, company_id, act_name, goods_id, act_price, person_num, store,
    limit_buy_num, limit_time, begin_time, end_time, robot, disabled)
 VALUES (1, 1, '每日坚果 2人拼团（已结束）', 3, 6900, 2, 100, 1, 24, 1609459200, 1640966400, FALSE, FALSE);
+
+-- ===== M1-4 追加：店铺与分销域权限 + 演示店铺审核态 + 店铺运营账号（追加于末尾，不回改上文） =====
+-- 七条码分两组，不是把 CRUD 拆细好看：
+--   店铺档案侧「看/改/审/开关」四条分立 —— 能改档案的人不该能自己过审，能过审的也不该能关店（§18.7）；
+--   商品侧「列表/挂品」两条 —— 挂品改价是店铺运营的活，开店过审是平台招商的活，源系统也确实是两个岗。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (38, 0,  '店铺与分销', 'distributor',                'catalog'),
+  (39, 38, '店铺列表',   'distributor.lists',          'actived'),
+  (40, 38, '店铺编辑',   'distributor.update',         'actived'),
+  (41, 38, '店铺审核',   'distributor.review',         'actived'),
+  (42, 38, '运营开关',   'distributor.status',         'actived'),
+  (43, 38, '店铺商品',   'distributor.items_lists',    'actived'),
+  (44, 38, '商品挂店',   'distributor.items_update',   'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 38), (1, 39), (1, 40), (1, 41), (1, 42), (1, 43), (1, 44);
+
+-- 演示店铺落审核态：seed 建的店本来就是"平台已经开好的"，review_status 留在 FALSE 会让
+-- DS-F1/SI-F1 前台面一家都列不出来（前台只认 已审核+启用+营业 三筛齐全）。
+UPDATE distribution_distributor SET review_status = TRUE WHERE company_id = 1 AND distributor_id IN (1, 2);
+
+-- 店铺运营账号：distributor01 / shop123（BCrypt 真实哈希，cost=10，jshell spring-security-crypto 生成）
+-- operator_type 非 admin ⇒ 数据权限走 operators.distributor_ids（JSON 数组），只能看到 distributor_id=2 这家店；
+-- 角色故意不给 review/status，越权用例（§18.8 门槛②）里"能不能碰别家店"与"有没有审核权"是两条独立的线。
+INSERT IGNORE INTO roles (role_id, company_id, role_name, role_type, created, updated)
+VALUES (2, 1, '店铺运营', 'custom', 0, 0);
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (2, 5), (2, 38), (2, 39), (2, 40), (2, 43), (2, 44);
+INSERT IGNORE INTO operators
+  (operator_id, company_id, username, password, operator_type, distributor_ids, created, updated)
+VALUES (3, 1, 'distributor01', '$2a$10$XuQCFgc9Z1zSEoix6.8KlOfiSOOY3qZqW5m6Ib4raPxOPplc36ZPS', 'distributor', '[2]', 0, 0);
+INSERT IGNORE INTO operator_rel_roles (operator_id, role_id) VALUES (3, 2);

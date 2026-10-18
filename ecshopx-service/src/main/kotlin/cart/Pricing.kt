@@ -57,6 +57,23 @@ class PriceLine(
     /** 命中的活动（`activity_type` + `activity_id`），下单侧占池/开团要用它定位 */
     var activityOffer: ActivityOffer? = null,
     var activityInfo: List<Map<String, Any?>> = emptyList(),
+    /**
+     * 库存池（§18.4 的第②条腿）：`TOTAL` 扣 `items.store`，`SHOP` 扣
+     * `distribution_distributor_items.store`。下单与三条回补路径都只认这一列，
+     * **扣和回必须是同一条腿** —— 漏一条就是"店铺卖光了、总部库存纹丝不动"。
+     */
+    var stockSource: String = StockSource.TOTAL,
+    /** 挂品行是否共用总店库存（落 `orders_normal_items.is_total_store` 的判据） */
+    var isTotalStore: Boolean = true,
+    /**
+     * 总部现价（`items.price`）。
+     *
+     * 有两个用处：出参的 `origin_price` 要说清"店铺价是把价改成了多少"，
+     * 以及 [isLastPrice] 的比较基准 —— 店铺挂个特价不等于"商品变价了"，
+     * 拿生效价去比快照，购物车里每一行都会挂着"价格已变动"的红字。
+     * 0 = 未预取（属性测试里的裸行），此时回落到 [price] 比较，与 M0-5 的行为逐字一致。
+     */
+    var hqPrice: Long = 0,
 ) {
     /** 行小计（未减优惠） */
     val itemFee: Long get() = price * num
@@ -67,8 +84,19 @@ class PriceLine(
     /** 行应付 */
     val totalFee: Long get() = (itemFee - feeDeducted).coerceAtLeast(0L)
 
-    /** 加入后是否变价 */
-    val isLastPrice: Boolean get() = snapshotPrice != price
+    /** 加入后是否变价：比的是**总部现价**，不是店铺挂的价（见 [hqPrice]） */
+    val isLastPrice: Boolean get() = snapshotPrice != if (hqPrice > 0) hqPrice else price
+}
+
+/**
+ * 库存池的两个取值（docs/04 §18.4）。
+ *
+ * 用字符串而不是 Boolean：它要落进 `orders_normal_items.is_total_store`（源系统的列），
+ * 也要在出参里说清"这一行的库存是从哪个池子看的"，两种写法各留一处就够呛。
+ */
+object StockSource {
+    const val TOTAL = "TOTAL"
+    const val SHOP = "SHOP"
 }
 
 /** 一店一组（CART-2 的 valid_cart 元素） */

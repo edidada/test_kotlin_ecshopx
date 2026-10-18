@@ -25,6 +25,8 @@ import com.ecshopx.kotlin.dao.promotion.RelPromotionMapper
 import com.ecshopx.kotlin.dao.promotion.SeckillGoodsMapper
 import com.ecshopx.kotlin.service.cart.CartService
 import com.ecshopx.kotlin.service.cart.PriceLine
+import com.ecshopx.kotlin.service.cart.StockSource
+import com.ecshopx.kotlin.service.distribution.StockPool
 import com.ecshopx.kotlin.service.promotion.ActivityOffer
 import com.ecshopx.kotlin.service.promotion.CouponService
 import com.ecshopx.kotlin.service.promotion.GroupsService
@@ -66,6 +68,7 @@ class OrderCreateService(
     private val assoc: OrderAssocMapper,
     private val logs: OrderOperateLogMapper,
     private val goodsItems: ItemsMapper,
+    private val pool: StockPool,
     private val addresses: MembersAddressMapper,
     private val configs: SysConfigMapper,
     private val points: PointMapper,
@@ -253,12 +256,13 @@ class OrderCreateService(
         return groupsService.occupySeat(companyId, userId, act.id, form.teamId, orderId, lines.sumOf { it.num }, now).teamId
     }
 
-    /** 失效原因（与 CartService 的 valid 判定同口径：商品不存在 / 已下架 / 库存不足） */
-    private fun reason(p: CartService.Pending): String = when {
-        p.item == null -> "商品不存在"
-        p.item?.approveStatus != "onsale" -> "商品已下架"
-        else -> "库存不足"
-    }
+    /**
+     * 失效原因：与 ORDER-1 的 `invalid_items[].reason` 同一个判据（[CartService.invalidReason]）。
+     *
+     * 原来这里自己写了一套"下架/库存不足"三行 when，M1-4 加了店铺池子之后它会把
+     * "这家店停售了"报成"库存不足"（总部池还满着）—— 预览与下单两张脸就是这么来的。
+     */
+    private fun reason(p: CartService.Pending): String = carts.invalidReason(p)
 
     /**
      * 占用用户资产（M1-3）。**只在算价真的扣了钱时才占用**：
@@ -339,16 +343,17 @@ class OrderCreateService(
 
     private fun str(v: Any?): String? = v as? String
 
-    /** 同商品可能有多行（不同规格/加购），按商品聚合后一次 CAS，避免同物品重复扣 */
+    /**
+     * 扣库存（§18.4 第②条腿的下单侧）。
+     *
+     * 聚合键从 `itemId` 扩成 `(池子归属, 店, 商品)`：同一商品可以在这一单里既走总部池又走店铺池吗 ——
+     * 不能（一单一店），但**同一商品的多行**（不同规格/加购两次）必须合并成一次 CAS，
+     * 所以键里既要留 shopId 也要留 isTotalStore，两者在建单侧与明细行同源。
+     */
     private fun deductStock(lines: List<PriceLine>, now: Long) {
-        lines.groupBy { it.itemId }.forEach { (itemId, ls) ->
-            val num = ls.sumOf { it.num }
-            if (goodsItems.deductStock(itemId, num, now) == 0) {
-                throw BizException(
-                    ErrorCode.BIZ, "商品库存不足：${ls.first().itemName}",
-                    mapOf("item_id" to listOf("库存不足，请减少数量")),
-                )
-            }
+        lines.groupBy { Triple(it.stockSource, it.shopId, it.itemId) }.forEach { (k, ls) ->
+            val (_, shopId, itemId) = k
+            pool.deduct(shopId, itemId, ls.sumOf { it.num }, ls.first().isTotalStore, ls.first().itemName, now)
         }
     }
 
@@ -489,7 +494,10 @@ class OrderCreateService(
     ): OrderItemDO = OrderItemDO().apply {
         this.orderId = orderId; this.companyId = companyId; this.userId = userId
         goodsId = l.goodsId; itemId = l.itemId; itemBn = item?.itemBn
-        this.shopId = shopId; distributorId = item?.distributorId ?: shopId
+        // 明细行的 distributor_id 记的是**这行货从哪家店的池子出**（店铺池单），
+        // 而不是商品挂在谁名下 —— 回补只读这一列，两者不一致就会把别人的池子加回去
+        this.shopId = shopId
+        distributorId = if (l.stockSource == StockSource.SHOP) shopId else (item?.distributorId ?: shopId)
         actId = l.activityId
         itemName = l.itemName
         pic = jsonFirst(l.pics)
@@ -515,7 +523,8 @@ class OrderCreateService(
         itemSpecDesc = q.specDescById[l.itemId]
         taxRate = item?.taxRate?.toString()
         weight = item?.weight; volume = item?.volume
-        isTotalStore = true
+        // §18.4：这行货从哪个池子出，就按哪个池子记 —— 回补时只读明细行，不回读挂品行
+        isTotalStore = l.isTotalStore
     }
 
     /** pics 存的是 JSON 数组字符串，订单明细只留首图 */

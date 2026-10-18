@@ -46,6 +46,7 @@ interface OrdersMapper {
             <if test="f.orderClass != null">AND order_class = #{f.orderClass}</if>
             <if test="f.orderType != null">AND order_type = #{f.orderType}</if>
             <if test="f.distributorId != null">AND distributor_id = #{f.distributorId}</if>
+            <if test="f.distributorIds != null">AND distributor_id IN <foreach item="g" collection="f.distributorIds" open="(" separator="," close=")">#{g}</foreach></if>
             <if test="f.shopId != null">AND shop_id = #{f.shopId}</if>
             <if test="f.supplierId != null">AND supplier_id = #{f.supplierId}</if>
             <if test="f.salesmanId != null">AND salesman_id = #{f.salesmanId}</if>
