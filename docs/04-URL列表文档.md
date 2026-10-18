@@ -1024,3 +1024,88 @@ schema 末尾追加两条列（第三批落地时一次给全，MySQL/H2 同一�
 | D65 | **员工令牌只有 `salesman_id / distributor_id / company_id` 三 claim**（`Kind.SALESMAN`），不还原 PHP 的服务端会话（D44）；每个请求回查 `is_valid`。代价是每请求一次索引查询，换来"停用真的停用" | 源系统停用导购后旧会话仍活，本项目不继承。验证：冒烟「停用即刻关掉已有会话（D44）」 |
 | D66 | **`SO-E1` 复用 `ORDER-2` 那条建单入口**（给 `OrderForm` 开一个 `userId` 口子），不写第二条下单链：前台的 `user_id` 永远取自令牌，只有员工面才接受入参 `user_id`。两条链迟早要在算价、扣库存、佣金入账、留痕四个地方各漂一个版本 | 代价是 form 上多一个"只对员工有意义"的字段，注释里写明了谁能用。验证：e2e 用例 10 + 冒烟第 6 段整条 |
 | D67 | **岗侧聚合是新增的第二条 SQL**（`sumSalesman` 与岗侧占用），不是给店侧那条加可选参数（C176 的结构性理由）。看起来重复、审起来分得清 | 验证：e2e 用例 15 分别断两侧占用与余额；冒烟「岗的余额被自己的在途提现扣光」「`withdraw_occupying` 含岗侧申请」 |
+
+
+## 23. P1 端点规格 —— 积分 / 储值 / 评价 / 发票（M1-5 开发前补齐，追加于 §22 之后，不回改上文）
+
+盘点结论（本轮只读调研得出，不是推断）：**账已经有一半**。`point_member` / `point_member_log` / `user_deposit` / `deposit_trade` / `deposit_recharge_rule` 五张表与它们的 CAS、流水写入、充值结清（`PayService.settleRecharge`、`PointChannel`、`DepositChannel`）在 M0-7/M0-8 就落地了；`trade_rate`、`trade_rate_reply`、`orders_invoice`、`members_invoices` 四张表**只有表、代码零引用**（全仓 `.kt` 里搜不到这两个类名与这两个表名）。真正的缺口有四处，都已实测：
+
+1. 积分与储值**没有 HTTP 读口**——流水只写不查，会员看不到自己的积分，后台对账只能连库；
+2. `orders_normal_orders.get_points` **建单时从不赋值**（列在 INSERT 里，但全仓没有一处 `getPoints =`；`PayEndToEndTest` 是靠手写 `UPDATE ... SET get_points = 100` 才让 C54 那条断言跑绿的）。行侧反倒是算好的：建单时 `itemPoint = (item?.point ?: 0L) * num` 已落库。所以 C54「支付赠分入账」这条判据从未真跑通过——线上结清的订单赠分恒等于 0；
+3. `is_rate` **只有读没有写**（`OrdersMapper` 的分桶 SQL 在算 `DONE AND is_rate = FALSE`，但没有一个写口把它翻成 true），ORDER-8 的 `evaluation` 桶因此恒等于"已完成数"；`invoice_status` / `is_invoiced` 同样只读不写；
+4. 脱敏在六处各写了一遍（`MemberService.mask`、`CommissionService.mask`、`SalesmanService.mask`、`PickupLocationService.maskPhone`、`GroupsService.maskMobile`、`AftersalesService.mask`）——源系统那层 `datapass` 中间件在本项目没有对应物。
+
+### 23.1 前台（前缀 `/api/h5app/wxapp`，鉴权=会员 JWT；`user_id` 一律取自令牌）
+
+| ID | 方法 | 路径 | 说明 |
+|---|---|---|---|
+| PT-F1 | GET | `/point` | 我的积分总览：`{point, total_point, user_point, ratio, max_deduct_fee, enable}`（`ratio` 读 `sys_config.point.deduct.max_ratio`，与 ORDER-1 预览的 `max_point`/`limit_point` 同一口径 C117；`enable` 读 `pay.point.enable`） |
+| PT-F2 | GET | `/point_logs` | 积分流水分页（`page,pageSize,remark?`）：`{list[]{id,order_id,change_point,before_point,after_point,remark,created}, total_count}`；只出本人 |
+| PT-F3 | GET | `/point_rule` | 积分规则展示：`{enable, deduct_max_ratio, point_per_fen, get_by_item:true, text}`。**赠送没有全局倍率**——"这一行得几分"是商品自己标的 `items.point`（建单已按 `item_point` 落库），本条只把开关、抵扣上限与"1 积分 = 1 分"（`PayChannel.POINT_PER_FEN`）拼成文案，库里不存文案 |
+| CZ-F1 | GET | `/deposit` | 我的余额：`{deposit_amount, gift_amount, balance, total_recharge, enable}`；`balance = deposit_amount + gift_amount`（**赠金也是钱**，只在前端分栏显示）；`enable` 读 `pay.deposit.enable` |
+| CZ-F2 | GET | `/deposit_logs` | 储值流水分页（`trade_type?` recharge/consume/refund）：`{list[]{trade_id,trade_type,rel_id,amount,gift_amount,before_balance,after_balance,status,created}, total_count}`；`NOTPAY` 的 CZ 单也在内（他还在等支付） |
+| CZ-F3 | GET | `/deposit_rules` | 充值档位（读 `deposit_recharge_rule` 且 `status=1`，按 `recharge_amount` 升序）：`{list[]{id,rule_name,recharge_amount,gift_amount}}`；无档位时回 `[]`，前台自己决定要不要放开自定义金额 |
+| RATE-F1 | POST | `/order/rate` | 提交评价：`{order_id(Y), items[](Y)}`，`items[]` 每行 `{item_id(Y), star(Y 1..5), content, rate_pic[], anonymous}`；一单一提交、按行落 `trade_rate`，出 `{order_id, rate_count, is_rate:"true"}` |
+| RATE-F2 | GET | `/order/rate/list` | 评价列表：`item_id(Y)` 或 `distributor_id?`，`page,pageSize,star?,has_pic?`；出参含 `seller_reply{content,created}`（一行的最新商家回复），**匿名评价的行 `nickname` 回 `匿名用户`、`mobile` 不回** |
+| RATE-F3 | GET | `/order/rate/{rate_id}` | 评价详情：单行 + `replies[]{role,content,created}`（`role` 只有 `seller`/`buyer`，买家追评与商家回复同表共存，按 `created` 排序） |
+| RATE-F4 | GET | `/order/rate/my` | 我的评价（`page,pageSize`）；与 ORDER-4 的 `status=7` 待评价页签互为补集（页签数 + 本页行数 = 已完成单数） |
+| RATE-F5 | GET | `/order/rate/pending` | 待评价行清单：`{order_id, item_id, goods_id, goods_name, pics, spec_desc, num}`——评价要按行提交，前台必须先拿到"这一单还有哪几行没评"（**已完成但 `is_rate=false` 的行**，不是整单） |
+| INV-F1 | POST | `/order/invoice/apply` | 申请/修改发票：`{order_id(Y), invoices_id?, invoice_type(Y enterprise/individual), invoice_type_code?, company_title, tax_number?, email(Y), mobile?, remark?}`；带 `invoices_id` 时从抬头本带出抬头（只接受本人的，越权 404）；`pending` 态可反复改（**upsert，不是插新行**），`issued` 后改 → 422 |
+| INV-F2 | GET | `/order/invoice` | 我的申请列表（`status?`，分页）：`list[]{id,invoice_apply_bn,order_id,invoice_type,company_title,invoice_status,invoice_amount,create_time}` |
+| INV-F3 | GET | `/order/invoice/{id}` | 详情（含 `invoice_file_url`；非本人与不存在同样 404） |
+| INV-F4 | GET | `/member/invoices` | 抬头本列表（`members_invoices`，只出本人）：`list[]{invoices_id,invoices_type,name,telephone,tax_number,business_address,bank,bank_account,is_def}` |
+| INV-F5 | POST | `/member/invoice` | 新增/修改抬头：`invoices_id?` 有则改；`invoices_type=corporate` 必填 `tax_number`（`personal` 不填）；置 `is_def=true` 时把该会员其余行的 `is_def` 清零——**默认抬头只有一个**，两个 true 的前台没法选 |
+| INV-F6 | DELETE | `/member/invoice/{id}` | 删除抬头；被 `orders_invoice` 引用过的行**不删**（历史发票的抬头必须留得住），回 422 + `errors.invoices_id=["已被发票申请引用"]` |
+
+### 23.2 后台（前缀 `/api`，鉴权=运营 JWT + `@RequiresResource`，写路径 `@Audited`）
+
+| ID | 方法 | 路径 | 说明 |
+|---|---|---|---|
+| PT-A1 | GET | `/point/members` | 会员积分列表（`keyword?`/`page`/`pageSize`，datapass 掩码）：行 `{user_id, nickname, mobile_masked, point, total_point, updated}` + 卡头 `{total_point_sum, total_granted, total_used, member_count}` |
+| PT-A2 | POST | `/point/adjustment` | 后台调账：`{user_id(Y), change_point(Y ≠0，正负皆可), remark(Y)}`；写 `point_member_log` 并 CAS 加，**负数钳到 0**（不允许把账调成负），出 `{user_id, before_point, after_point, change_point}`；`remark` 必填的理由是这条是唯一"无订单来源"的动账口，对账脚本要靠它解释差额 |
+| PT-A3 | GET | `/point/logs` | 全量流水（`user_id?`/`order_id?`/`time_start_begin?`/`time_start_end?`）；`Σchange_point == point` 的对账口径以这一条 + PT-A1 为可跑面 |
+| PT-A4 | GET/PUT | `/member/point/rule` | 规则读写（落 `sys_config`，见 23.4）：GET 回当前值与默认值，PUT 校验区间后整组写回；`point.deduct.max_ratio` 越界（0..100 之外）→ 422 |
+| CZ-A1 | GET | `/deposit/trades` | 储值交易列表（`trade_type?`/`status?`/`user_id?`/时间段，datapass）+ `total_count` |
+| CZ-A2 | GET/POST/PUT/DELETE | `/deposit/recharge_rules`（列表）、`/deposit/recharge_rule`（新建）、`/deposit/recharge_rule/{id}`（改/删） | 档位 CRUD：`recharge_amount>0`、`gift_amount>=0`；删除不设守卫（档位是价目表不是账，历史 `deposit_trade` 已把当时金额写进自己那行） |
+| CZ-A3 | POST | `/deposit/recharge` | 后台代客充值：`{user_id(Y), amount(Y>0 分), gift_amount?, remark(Y)}`；**不走支付**，当场落一条 `deposit_trade(trade_type=recharge, status=SUCCESS)` 并入账，出 `{trade_id, deposit_amount, gift_amount, balance}` |
+| CZ-A4 | GET | `/deposit/count` | 储值总览：`{principal_sum, gift_sum, notpay_count, recharge_sum_7d}`（`principal_sum` 读 `user_deposit` 现值、`recharge_sum_7d` 读 `deposit_trade`，两个数各说一件事、不拿一个去减另一个） |
+| RATE-A1 | GET | `/comments` | 评价列表（`order_id?`/`item_id?`/`star?`/`is_reply?`/`distributor_id?`）：行带 `nickname/mobile_masked`、`shop_name`（JOIN）、`seller_reply` |
+| RATE-A2 | POST | `/comment/reply` | 商家回复：`{rate_id(Y), content(Y 非空)}` → `trade_rate_reply(role='seller')` + `trade_rate.is_reply=true`；**重复回复=覆盖最新**（口径 RATE-R4） |
+| RATE-A3 | PUT | `/comment/{rate_id}/disable` | 上下架：`disabled` 位翻转（源系统叫"屏蔽"）。**只影响 `RATE-F2` 的可见集，不删行、不改 `is_rate`**——评价撤回后订单仍算已评价，否则用户可以无限次重评 |
+| INV-A1 | GET | `/order/invoices` | 发票申请列表（`invoice_status?`/`order_id?`/`keyword?`，分页） |
+| INV-A2 | PUT | `/order/invoice/{id}` | 处理：`invoice_status` 迁 `pending → issued/rejected`，`issued` 必须带 `invoice_file_url` 或 `email`（二者皆空 → 422，"开了票但会员什么都收不到"不接受）；`rejected` 必须带 `remark` |
+| INV-A3 | GET | `/order/invoice/{id}` | 详情（后台看到未掩码的 `tax_number`/`email`，与列表面同一权限码，见 23.3 第 12 条 MASK-R1） |
+
+### 23.3 关键口径（开发前定死，避免实现期各写一套）
+
+1. **PT-R1 补 `get_points` 的建单写入，行侧不动 schema**：建单时 `getPoints = lines.sumOf { it.itemPoint }`（行表 `orders_normal_orders_items` 只有 `item_point`，没有 `get_points` 列；`OrderQueryService` 里那处行出参 `"get_points" to 0L` 是从契约里补出来的空位，本批保持不动并在出参注释里写明"行侧得分读 `item_point`"）。入账仍只在 `PayService` 的结清点（C54），`point_member_log.order_id` 是幂等判据（已有行就跳过），补单作业复用 `PayService.notify` 因此天然不双计（C104）。这条落地后 `PayEndToEndTest` 里那句手写 `UPDATE` 必须删掉——留着就是把"判据没跑通"伪装成"测试通过"。
+2. **PT-R2 抵扣、退款、回补三种"往回加"只动余额不动 `total_point`**（C120 的纪律在积分域之外同样成立）：`total_point` 只表示"获得过多少"，动它就等于动等级与榜单。
+3. **CZ-R1 赠金与本金在账上分列、在支付面上合并**：`DepositChannel` 扣款顺序固定"先赠金后本金"，`deposit_trade.amount` 记总动账、`gift_amount` 记其中赠金部分；后台代客充值（CZ-A3）走同一个充值入账腿，不开第二条入账路径。
+4. **RATE-R1 一单一提交、按行落、`is_rate` 用 CAS**：`UPDATE orders_normal_orders SET is_rate = true WHERE order_id = ? AND is_rate = false` 回 0 行就是重复提交 → 422「该订单已评价」。闸门顺序＝先认单（非本人 404）→ 再认状态（非 `DONE` 422）→ 再认 `items[]` 与订单行的对应关系（给了不在这一单里的 `item_id` → 422，**不静默丢弃**）→ 最后才 CAS。
+5. **RATE-R2 `star` 是唯一的必填数值**，`content` 可空（源系统允许空内容评价，本项目不收紧）；`rate_pic` 存 JSON 数组字符串（与 `items.pics` 同一惯例），出参用 `jsonList` 解析、脏值回空集而不是把整行带崩（C137 的教训）。
+6. **RATE-R3 匿名只在会员面对非本人隐藏身份**：`RATE-F2` 里 `anonymous=true` 的行对别人回 `匿名用户`、**对自己回真名**；`RATE-A1` 后台面永远不匿名（datapass 只掩码手机号，不隐藏"这是谁"）。
+7. **RATE-R4 商家回复一行一条最新**：`is_reply` 是"有没有回复过"的位，重复回复覆盖 `trade_rate_reply` 里 `role='seller'` 的那条（买家追评 `role='buyer'` 可多条）；`RATE-F2/F3` 的 `seller_reply` 读这一条。
+8. **INV-R1 一单一申请单**：`orders_invoice.order_id` 在源系统是"逗号分隔多订单"，本项目**收紧为单个订单号**并加 `uk_invoice_order(company_id, order_id)`——理由是发票要按单开票、`invoice_amount` 只能对着一个订单算。多单合开属 P2（放开时去掉 uk、`invoice_amount` 改按 `order_id` 列表求和）。`pending` 态 upsert，`issued/rejected` 是终态、改 → 422。
+9. **INV-R2 申请即置订单侧的位**：成功后 `orders.is_invoiced=true`、`invoice_status='pending'`、`orders.invoice` 存当时的申请快照（现有 CLOB 列）；后台 `INV-A2` 只回写 `invoice_status`，不回写快照——会员看到的"我申请时填了什么"必须是那一刻的内容。
+10. **INV-R3 两套抬头词表不合并，在 Service 层映射**：`members_invoices.invoices_type` 现值域是 `personal/corporate`，`orders_invoice.invoice_type` 是 `enterprise/individual`，两张表的列都已有语义（改值域等于迁移历史数据）。映射固定为 `corporate ↔ enterprise`、`personal ↔ individual`，**对外只暴露各自列的词表**（抬头本接口收 `personal/corporate`，申请接口收 `enterprise/individual`），文档与错误信息里不混用。
+11. **BUCKET-R1 `evaluation` 桶自此才真**：ORDER-8 的 `evaluation = DONE 且 is_rate=false`（C43 的不变量"分桶互斥且求和恒等 total"必须继续成立，e2e 与冒烟都断这条），评价写口落地的同一批要回归 `m07/m11/m13` 三脚本里的积分与角标断言。
+12. **MASK-R1 脱敏是渲染层的事，判据层永远用原值**：`datapass` 的裁定见 23.4 末条（MASK-R1）——后台列表默认掩码，只有拿到 `datapass.pass`（63）的账号看全值；掩码只作用于**出参字符串**，筛选、排序、对账一律读原列。六处手写掩码在本批收敛成 common 的一个 `Mask`（位数、`***` 位置、空值行为以 `MemberService.mask` 现状为准，回归由现有十四脚本承担）。
+
+### 23.4 数据与配置追加（写实现前先定形状，全部幂等）
+
+- `ALTER TABLE trade_rate ADD COLUMN IF NOT EXISTS distributor_id BIGINT NOT NULL DEFAULT 0` + `shop_id BIGINT NOT NULL DEFAULT 0`——评价必须能按店铺收窄（加盟体系里"这条差评是谁家的"是运营的第一筛），表原本只有 `goods_id/item_id`；落评价时从订单行的归属带下来，与 `distribute_logs.salesman_id` 同一条"归属在落单那刻定死"（C177）。
+- `ALTER TABLE trade_rate ADD COLUMN IF NOT EXISTS nickname VARCHAR(64)`（匿名与改名后仍能看到"当时那个名字"，出参位固定存在）。
+- `ALTER TABLE orders_invoice ADD COLUMN IF NOT EXISTS remark VARCHAR(255)`（后台处理备注，`rejected` 必填那条判据读它）。
+- 索引：`CREATE UNIQUE INDEX IF NOT EXISTS uk_invoice_order ON orders_invoice(company_id, order_id)`；`CREATE INDEX IF NOT EXISTS idx_rate_company_item ON trade_rate(company_id, item_id, created)`、`idx_rate_order ON trade_rate(company_id, order_id)`。**注意 `idx_rate_item(item_id, star)` 已存在**，新索引必须另起名，别指望 `IF NOT EXISTS` 帮你改同名索引。
+- 主键名以库为准，实现期别按惯例猜：`trade_rate.rate_id`、`trade_rate_reply.reply_id`、`orders_invoice.id`、`members_invoices.invoices_id`、`point_member.id`、`deposit_trade.trade_id`（字符串号）。时间列同样分两族：`trade_rate`/`point_member_log` 用 `created`，`orders_invoice` 用 `create_time`/`update_time`。
+- 发号：`SeqName`（common/domain/Enums.kt，现 8 个位）追加 `INVOICE_APPLY_BN("invoice_apply_bn", "FP")`，schema 同批补一行 `INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('invoice_apply_bn', 0)`。单号形状**沿用 `RECHARGE_NO` 那条**（前缀 + 时间 + 号段尾），不另造一种——`ziti_code` 那种"取末 6 位"是取货码专用的短码，别照搬到申请单号上。schema 必须 `INSERT IGNORE`：缺行时 `SeqGenerator` 抛的是 500（C166 记过）。
+- `sys_config` 追加（seed 的 `INSERT IGNORE`，值用现库的 `'1'/'0'` 词表，不要写成 `true`）：新增 `deposit.recharge.point.rate`=`0`（充值送积分倍数，默认关）、`invoice.enable`=`1`、`invoice.types`=`["02"]`（默认只开普票）。**已有三键不动、不另起同义键**：`pay.point.enable`、`pay.deposit.enable`、`point.deduct.max_ratio`（现值 50）。
+- 权限码从 **54** 起（seed 现最大 `resource_id` = 53）：`54 point.lists`、`55 point.update`（含 PT-A2/PT-A4）、`56 deposit.lists`、`57 deposit.rule.update`、`58 deposit.recharge`、`59 rate.lists`、`60 rate.reply`、`61 invoice.lists`、`62 invoice.update`、`63 datapass.pass`。role 1（超级管理员）全配；role 2（店铺运营，`distributor01`，现配 6 条码）只加 `54/56/59/61` 四个看数码 + `60 rate.reply`（本店单可回复），**不配** `55/57/58/62/63`——调账、改档位、代客充值、开票、看全值都是平台权力（与 D57/C167 同一条划分）。
+- `datapass.pass`（63）是本项目对源系统 `datapass` 中间件的裁定：它**不参与归属判定**，只决定同一行的敏感列出全值还是掩码值；`operator_type=admin` 默认穿透（独立部署形态），其余类型未配 63 一律掩码。归属仍然只由 `distributor_ids` 与数据权限那套判（C145/C146/C167 不因本条改变）。
+
+### 23.5 门槛用例（进 e2e 与冒烟，任一条红就不算交付）
+
+1. **账实相符（docs/05 §72 的门槛）**：对起始余额已知的会员，`Σ point_member_log.change_point == point_member.point` 恒成立；`Σ(成功动账) == user_deposit.deposit_amount + gift_amount` 恒成立。四段动作各测一次：结清得积分、下单抵扣、取消回补、退款扣回；储值测充值、消费、代客充值、退款。**同一份判据写成 e2e 用例与 `tools/m15_reconcile_smoke.py` 的对账段**（实跑面读 HTTP，内存面读 SQL）。
+2. **赠分这条要能被证伪**：结清一单后断 `point_member.point` 增加额 == 该单 `Σ item_point`，且**脚本里不许出现手写 `UPDATE ... get_points`**——本批的交付物之一就是让 C54 在没有 SQL 补丁的情况下自己跑通。
+3. **越权与状态闸门**：A 会员给 B 会员的单提交评价 → **404**（不是 403，不给"这一单存在"）；对 `NOTPAY`/未完成的单提交 → 422；二次提交 → 422 且库里行数不变；店铺运营账号（role 2）在 `RATE-A1` 上只出 `distributor_id=本店` 的行、`RATE-A2` 回别人店的评 → **404**；`point.update`/`deposit.recharge` 对 role 2 一律 403（权限码判在归属之前，C167）；未配 `datapass.pass` 的账号看 PT-A1/CZ-A1/RATE-A1 的手机号是掩码、配了的是原值——**同一行、两个账号、两个出参**。
+4. **抬头与发票的形状**：`personal` 抬头不填 `tax_number` 也能过、`corporate` 不填 → 422；两个抬头同时 `is_def=true` 测不出（写入即清零其余），断库里 `SUM(is_def)=1`；`issued` 后再 `INV-F1` 改 → 422；同一 `order_id` 二次申请 → 走 upsert 而非插行（断 `COUNT(*)=1`）；被引用过的抬头 `INV-F6` → 422。
