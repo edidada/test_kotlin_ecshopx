@@ -103,4 +103,8 @@ ECX_PAY_PROFILE=wechatpay,alipay java -jar ecshopx-boot/target/ecshopx-boot-0.1.
 
 实跑：`tools/m13_skgrp_smoke.py`（69 项）覆盖 SK-A1..A7/SK-F1..F2 + GP-A1..A6/GP-F1..F4 + 活动单算价，同样**可重复跑**（进场按 `SG<时间戳>` 停用上一轮残档、待付款残单按基线差值断言、收口停用本案场次并断言全场折让回 0）。注意它只验 HTTP 面，机器人与结算在冒烟里靠"活动窗口 + 强制结束"驱动，不等 `@Scheduled`。
 
+#58 把这条链**当矩阵跑穿**了：五档开关全组合（e2e 16 格、实跑 32 格 = 两套等级 × 16 格），每格的期望值由一个独立手写的算术模型给出（不复用责任链），逐格断言四件事——逐级基数（券的门槛比的是**满减之后、积分之前**的应付）、四个账各自独立（`discount_fee == 会员折 + 满减`、`goods_discount == 满减`、`member_discount == 会员折`、活动让利只走 `activity_price_fee`）、守恒式（`Σ行应付 + 运费 == 单应付`、三类抵扣逐行守恒、行应付不为负）、`discount_info[]` 的 `type` 序列 == 链路顺序。并发面用真线程压临界区：12 路挤 2 人团只坐满 2 席、20 路抢 5 份额度只成 5 团、12 单抢 3 件池子只占 3 件，成团 CAS 十路并发只有一路推得动门。口径见 docs/04 §17（C133..C140 + D39..D41）。
+
+实跑：`tools/m13_matrix_smoke.py`（68 项）与两个 e2e 门槛用例分工明确——用例管**口径**，脚本管**起得来的服务**（真 HTTP、真令牌、真 CAS）。它不能连库，所以等级靠**两个会员分别登录**（普通会员 / 金卡）来切、积分余额每格从 `user_point` 实时读，满减开关只能靠"建 + 审 / 删"两次调用切（编辑必打回重审）。同样**可重复跑**：并发三段用 `ThreadPoolExecutor` + `threading.Barrier` 同瞬起跑，取消后断言席位、额度、池子三者全部回位，收口回到 seed 态。
+
 Windows + Git Bash 里指定本地仓库要写正斜杠：`mvn -B -Dmaven.repo.local=D:/develops/maven/mavenrepository …`。反斜杠会被 shell 剥掉，在工程根目录建出一个 `developsmavenmavenrepository/` 假仓库，症状是"依赖反复重下"或离线跑缺一堆 boot 作用域 jar。
