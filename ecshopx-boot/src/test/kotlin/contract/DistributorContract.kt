@@ -25,8 +25,8 @@ object DistributorContract {
         "is_ziti", "is_delivery", "province", "city", "address", "mobile",
     )
 
-    /** DS-F2 店铺主页 */
-    val SHOP_FRONT_DETAIL = SHOP_FRONT_ROW + setOf("introduce", "item_count")
+    /** DS-F2 店铺主页（第三批起带 `pickup_locations[]`：§18.1 那条要求，非自提店给空数组） */
+    val SHOP_FRONT_DETAIL = SHOP_FRONT_ROW + setOf("introduce", "item_count", "pickup_locations")
 
     /** DS-A8 店铺统计（§18.5 余额公式的七个组成数） */
     val SHOP_STATS = setOf(
