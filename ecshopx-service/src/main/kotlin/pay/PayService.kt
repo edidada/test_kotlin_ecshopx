@@ -184,6 +184,52 @@ class PayService(
         )
     }
 
+    /**
+     * CZ-A3 后台代客充值（docs/04 §23.2，M1-5）：**不走支付渠道**，当场落账。
+     *
+     * 形状是"先按会员充值（[recharge]）同一套字段落一条 NOTPAY 的 CZ 单，再走 [settleRecharge] 那条腿"，
+     * 而不是在这里自己 `UPDATE user_deposit` —— `CZ-R1` 明确"代客充值复用充值入账腿，不开第二条入账路径"：
+     * 充值要同时动本金、赠金、累计充值三个数，抄一遍就有两处会漂；
+     * 结清那条腿里的 `updateTradeStatus` CAS 还顺带保证了重试不会双计。
+     *
+     * `gift` 由后台直接给（会员面 [recharge] 的赠金来自档位），因此这里不查 `deposit_recharge_rule`。
+     */
+    fun rechargeByOperator(
+        userId: Long,
+        companyId: Long,
+        amount: Long,
+        gift: Long,
+        remark: String?,
+    ): Map<String, Any?> {
+        val acc = deposits.find(companyId, userId)
+        val before = (acc?.depositAmount ?: 0L) + (acc?.giftAmount ?: 0L)
+        val tradeId = seq.nextBn(SeqName.RECHARGE_NO)
+        db.transactional {
+            deposits.insertTrade(DepositTradeDO().apply {
+                this.tradeId = tradeId
+                this.companyId = companyId
+                this.userId = userId
+                tradeType = "recharge"
+                relId = tradeId
+                this.amount = amount
+                giftAmount = gift
+                beforeBalance = before
+                afterBalance = before + amount + gift
+                status = TradeState.NOTPAY
+                this.remark = remark
+                created = TimeSec.now()
+                updated = TimeSec.now()
+            })
+        }
+        val settled = settleRecharge(userId, companyId, tradeId)
+        return linkedMapOf(
+            "trade_id" to tradeId, "order_id" to tradeId, "user_id" to userId,
+            "amount" to amount, "gift_amount" to gift, "remark" to remark,
+            "trade_state" to TradeState.SUCCESS,
+            "deposit" to settled["deposit"],
+        )
+    }
+
     /** 充值单结清：金额进本金、档位进赠金，同时把 deposit_trade 状态 CAS 成 SUCCESS */
     private fun settleRecharge(userId: Long, companyId: Long, tradeId: String): Map<String, Any?> {
         val t = deposits.findTrade(tradeId) ?: throw BizException(ErrorCode.NOT_FOUND, "充值单不存在")

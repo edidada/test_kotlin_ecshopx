@@ -30,4 +30,45 @@ object Mask {
         val m = v?.takeIf { it.isNotBlank() } ?: return v
         return if (m.length < 7) m else "${m.take(3)}${"*".repeat(m.length - 7)}${m.takeLast(4)}"
     }
+
+    /**
+     * 纳税人识别号（M1-5 `INV-A1`/`INV-A3`，MASK-R1 同一判据）。
+     *
+     * 留前 4 位（登记管理局区划 + 机构类别，运营看一眼就知道是哪家地税管辖的）
+     * 与后 3 位（校验位前的尾段，用来对上一张纸质发票），中间等长打星。
+     * 短于 8 位不是合法识别号（15/18/20 位三族），这种脏值整体打星——
+     * **不把"我认不出格式"当成"可以不掩"**。
+     */
+    fun taxNo(v: String?): String? {
+        val m = v?.takeIf { it.isNotBlank() } ?: return v
+        if (m.length < 8) return "*".repeat(m.length)
+        return "${m.take(4)}${"*".repeat(m.length - 7)}${m.takeLast(3)}"
+    }
+
+    /**
+     * 邮箱：只掩本地部分（`@` 之前），域名整留——运营要靠域名判断是不是公司邮箱。
+     *
+     * 本地部分留首字符、其余等长打星（`zhangsan@ex.com → z*******@ex.com`）。
+     * 单字符本地部分（`a@ex.com`）没有可掩的位数，原样返回；
+     * 没有 `@`（历史脏数据）整体打星，同 [taxNo] 那条"认不出格式也要掩"。
+     */
+    fun email(v: String?): String? {
+        val m = v?.takeIf { it.isNotBlank() } ?: return v
+        val at = m.indexOf('@')
+        if (at <= 0) return "*".repeat(m.length)
+        val local = m.substring(0, at)
+        if (local.length == 1) return m
+        return "${local.take(1)}${"*".repeat(local.length - 1)}${m.substring(at)}"
+    }
+
+    /**
+     * 抬头名（企业名）：只留前 2 位与末 1 位，中间打星。
+     *
+     * 名称不像税号那样有可校验的形状，`上海某某贸易有限公司` 的中间部分才是"哪家客户"的信息量所在。
+     */
+    fun title(v: String?): String? {
+        val m = v?.takeIf { it.isNotBlank() } ?: return v
+        if (m.length <= 3) return "*".repeat(m.length)
+        return "${m.take(2)}${"*".repeat(m.length - 3)}${m.takeLast(1)}"
+    }
 }

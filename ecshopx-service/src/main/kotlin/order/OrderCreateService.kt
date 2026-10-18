@@ -21,6 +21,7 @@ import com.ecshopx.kotlin.dao.order.OrderItemsMapper
 import com.ecshopx.kotlin.dao.order.OrderOperateLogDO
 import com.ecshopx.kotlin.dao.order.OrderOperateLogMapper
 import com.ecshopx.kotlin.dao.order.OrdersMapper
+import com.ecshopx.kotlin.dao.pay.PointLogDO
 import com.ecshopx.kotlin.dao.pay.PointMapper
 import com.ecshopx.kotlin.dao.promotion.RelPromotionDO
 import com.ecshopx.kotlin.dao.promotion.RelPromotionMapper
@@ -293,8 +294,27 @@ class OrderCreateService(
                 throw BizException(ErrorCode.BIZ, "优惠券已被其他订单占用，请重新结算", mapOf("coupon_code" to listOf("不可用")))
             }
         }
-        if (q.pointFee > 0 && points.deduct(ctx.companyId, userId, q.pointFee, now) == 0) {
-            throw BizException(ErrorCode.BIZ, "积分已变动，请重新结算", mapOf("use_point" to listOf("可用积分不足")))
+        if (q.pointFee > 0) {
+            if (points.deduct(ctx.companyId, userId, q.pointFee, now) == 0) {
+                throw BizException(ErrorCode.BIZ, "积分已变动，请重新结算", mapOf("use_point" to listOf("可用积分不足")))
+            }
+            // §23.5 门槛 1「账实相符」要求 `Σ point_member_log.change_point = point_member.point`，
+            // 所以扣减腿必须自己留一条负流水——只记回补不记扣减，恒等式在第一次抵现就断了。
+            // total_point 不动（PT-R2：抵扣不是"获得"），before/after 由扣后的余额反推。
+            val after = points.find(ctx.companyId, userId)?.point ?: 0L
+            points.insertLog(
+                PointLogDO().apply {
+                    // 形参 userId / orderId 与 DO 属性同名，必须 this. 指向 DO（少一个 this 就是给 val 形参赋值）
+                    companyId = ctx.companyId
+                    this.userId = userId
+                    this.orderId = orderId.toString()
+                    changePoint = -q.pointFee
+                    beforePoint = after + q.pointFee
+                    afterPoint = after
+                    remark = "订单积分抵现"
+                    created = now
+                },
+            )
         }
     }
 

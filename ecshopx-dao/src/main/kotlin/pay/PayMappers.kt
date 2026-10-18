@@ -1,8 +1,10 @@
 package com.ecshopx.kotlin.dao.pay
 
 import com.ecshopx.kotlin.dao.stamp.Stampable
+import org.apache.ibatis.annotations.Delete
 import org.apache.ibatis.annotations.Insert
 import org.apache.ibatis.annotations.Mapper
+import org.apache.ibatis.annotations.Options
 import org.apache.ibatis.annotations.Param
 import org.apache.ibatis.annotations.Select
 import org.apache.ibatis.annotations.Update
@@ -146,6 +148,46 @@ interface TradeMapper {
     fun markChannelClosed(@Param("tradeId") tradeId: String, @Param("updated") updated: Long): Int
 }
 
+/**
+ * 积分流水筛选字典（PT-F2 会员面 + PT-A3 后台面共用）。
+ *
+ * `remark` 用 LIKE 而不是等值：备注是给人读的中文（"订单支付赠送积分"、"后台调账"），
+ * 运营只会输入"调账"两个字，等值匹配等于这个筛选项没用。
+ * 时间列是 `created`（这一族用 created/updated，与 `orders_invoice` 的 create_time 不同名同义都别混）。
+ */
+private const val PT_LOG_WHERE = """
+    WHERE 1=1
+    <if test="f.companyId != null">AND l.company_id = #{f.companyId}</if>
+    <if test="f.userId != null">AND l.user_id = #{f.userId}</if>
+    <if test="f.orderId != null">AND l.order_id = #{f.orderId}</if>
+    <if test="f.remark != null">AND l.remark LIKE CONCAT('%', #{f.remark}, '%')</if>
+    <if test="f.positive == true">AND l.change_point &gt; 0</if>
+    <if test="f.negative == true">AND l.change_point &lt; 0</if>
+    <if test="f.createdStart != null">AND l.created &gt;= #{f.createdStart}</if>
+    <if test="f.createdEnd != null">AND l.created &lt;= #{f.createdEnd}</if>
+    <if test="f.distributorIds != null">AND EXISTS (SELECT 1 FROM orders_normal_orders oo
+        WHERE oo.user_id = l.user_id AND oo.distributor_id IN
+        <foreach item="g" collection="f.distributorIds" open="(" separator="," close=")">#{g}</foreach>)</if>
+"""
+
+/**
+ * 会员积分列表筛选（PT-A1）：`keyword` 打昵称与手机号两列，datapass 掩码只作用于出参。
+ *
+ * `distributorIds` 同 [DT_WHERE] 里那条：积分账户表没有店铺归属列，
+ * 受限账号按"在本店下过单"收窄，而不是因为没列就放行全场。
+ */
+private const val PT_ACCOUNT_WHERE = """
+    WHERE 1=1
+    <if test="f.companyId != null">AND p.company_id = #{f.companyId}</if>
+    <if test="f.userId != null">AND p.user_id = #{f.userId}</if>
+    <if test="f.keyword != null">AND (mi.username LIKE CONCAT('%', #{f.keyword}, '%')
+        OR m.mobile LIKE CONCAT('%', #{f.keyword}, '%'))</if>
+    <if test="f.onlyHasPoint == true">AND p.point &gt; 0</if>
+    <if test="f.distributorIds != null">AND EXISTS (SELECT 1 FROM orders_normal_orders oo
+        WHERE oo.user_id = p.user_id AND oo.distributor_id IN
+        <foreach item="g" collection="f.distributorIds" open="(" separator="," close=")">#{g}</foreach>)</if>
+"""
+
 /** point_member + point_member_log：积分账户（动账留痕，before/after 便于对账） */
 class PointAccountDO {
     var id: Long = 0
@@ -206,6 +248,139 @@ interface PointMapper {
 
     @Select("SELECT COUNT(*) FROM point_member_log WHERE order_id = #{orderId}")
     fun countLogByOrder(@Param("orderId") orderId: String): Int
+
+    // ===== M1-5 读口（docs/04 §23.1 PT-F1/F2、§23.2 PT-A1/A2/A3）=====
+
+    /**
+     * 积分流水分页（PT-F2 只传 userId，PT-A3 传 company/时间段）。
+     *
+     * 一张 `page`/`count` 同时服务会员面与后台面：会员面由服务层强制塞 `userId`，
+     * 后台面不塞。少写一条 SQL 的代价是零，多写一条的代价是两套筛选条件各漂移一次。
+     */
+    @Select(
+        "<script>SELECT l.id, l.company_id, l.user_id, l.order_id, l.change_point, l.before_point, l.after_point, " +
+            "l.remark, l.created, mi.username AS nickname, m.mobile AS mobile " +
+            "FROM point_member_log l " +
+            "LEFT JOIN members m ON m.user_id = l.user_id " +
+            "LEFT JOIN members_info mi ON mi.user_id = l.user_id" + PT_LOG_WHERE +
+            " ORDER BY l.id DESC LIMIT #{limit} OFFSET #{offset}</script>",
+    )
+    fun logPage(@Param("f") f: Map<String, Any?>, @Param("offset") offset: Long, @Param("limit") limit: Int): List<PointLogRow>
+
+    @Select("<script>SELECT COUNT(*) FROM point_member_log l" + PT_LOG_WHERE + "</script>")
+    fun logCount(@Param("f") f: Map<String, Any?>): Long
+
+    /**
+     * 会员积分列表（PT-A1）：账号表在 `point_member`，昵称手机号 join 会员两表。
+     *
+     * `LEFT JOIN` 是刻意的：注销会员的积分行也要出现在对账列表里，
+     * 不然"账上有钱但人没了"这一类差异会从后台视野里消失。
+     */
+    @Select(
+        "<script>SELECT p.id, p.company_id, p.user_id, p.point, p.total_point, p.updated, " +
+            "mi.username AS nickname, m.mobile AS mobile " +
+            "FROM point_member p " +
+            "LEFT JOIN members m ON m.user_id = p.user_id " +
+            "LEFT JOIN members_info mi ON mi.user_id = p.user_id" + PT_ACCOUNT_WHERE +
+            " ORDER BY p.point DESC, p.user_id LIMIT #{limit} OFFSET #{offset}</script>",
+    )
+    fun accountPage(@Param("f") f: Map<String, Any?>, @Param("offset") offset: Long, @Param("limit") limit: Int): List<PointAccountRow>
+
+    @Select("<script>SELECT COUNT(*) FROM point_member p " + PT_ACCOUNT_WHERE + "</script>")
+    fun accountCount(@Param("f") f: Map<String, Any?>): Long
+
+    /**
+     * PT-A1 的卡头三个"现值"：可用合计、累计获得合计、人数。
+     *
+     * 与 `accountPage`/`accountCount` 共用 [PT_ACCOUNT_WHERE]，所以店铺运营看到的卡头
+     * 与他列表里的行是**同一个集合** —— 全场合计配本店明细会让"总数比明细大"成为常态，
+     * 那是最容易让人怀疑账错了的组合。
+     */
+    @Select(
+        "<script>SELECT COALESCE(SUM(p.point), 0) AS point_sum, COALESCE(SUM(p.total_point), 0) AS granted_sum, " +
+            "COUNT(*) AS member_count FROM point_member p " +
+            "LEFT JOIN members m ON m.user_id = p.user_id " +
+            "LEFT JOIN members_info mi ON mi.user_id = p.user_id" + PT_ACCOUNT_WHERE + "</script>",
+    )
+    fun accountStats(@Param("f") f: Map<String, Any?>): PointStatsDO
+
+    /**
+     * PT-A1 卡头的"累计扣减"：取日志里负向动账的**绝对值**，不是 `total_point - point`。
+     *
+     * 后者把"回补"（退款/取消往回加、不动 total_point，见 [refund]）算没了，
+     * 两个口径在账对得上时相等，对不上的时候只有本条能暴露差额。
+     * 同样走 [PT_LOG_WHERE]（含 `distributorIds` 那条收窄），与上面一条配对。
+     *
+     * `AND l.change_point < 0` 写死在 SQL 里、不靠 `f.negative`：这一条的调用方是 PT-A1 的卡头，
+     * 它的筛选字典（`PointService.filter`）根本没有 `negative` 这一位 —— 挂在入参上等于没挂，
+     * 于是 `SUM(-change_point)` 会把正流水也一起翻成负数，实测把"扣了 21100"的账户回成 `-19000`
+     * （-19000 = -(100 + 20000 + 20000 - 21100)）。负向口径是这条 SQL 自己的语义，不是查询条件。
+     */
+    @Select(
+        "<script>SELECT COALESCE(SUM(-l.change_point), 0) FROM point_member_log l " +
+            "LEFT JOIN members m ON m.user_id = l.user_id " +
+            "LEFT JOIN members_info mi ON mi.user_id = l.user_id" + PT_LOG_WHERE +
+            " AND l.change_point &lt; 0</script>",
+    )
+    fun usedSum(@Param("f") f: Map<String, Any?>): Long
+
+    /** 单个会员的累计扣减（PT-F1 的 `user_point`）：与 [usedSum] 同一条负向口径，只是多一个 user_id */
+    @Select(
+        "SELECT COALESCE(SUM(-change_point), 0) FROM point_member_log " +
+            "WHERE company_id = #{companyId} AND user_id = #{userId} AND change_point < 0",
+    )
+    fun userUsedSum(@Param("companyId") companyId: Long, @Param("userId") userId: Long): Long
+
+    /**
+     * PT-A2 调账（CAS）：`point = #{to}` 由服务层算好（负数已钳到 0），
+     * `expect` 是服务层读到的原值 —— 期间有别的动账就回 0 行，让调用方重读重算，
+     * 而不是把两条并发动账合成一个看不出来的数。
+     *
+     * `granted` 单独传：正数调账算"获得"（动 total_point），负数与钳位不动它（PT-R2）。
+     */
+    @Update("UPDATE point_member SET point = #{to}, total_point = total_point + #{granted}, updated = #{updated} " +
+        "WHERE id = #{id} AND point = #{expect}")
+    fun casAdjust(
+        @Param("id") id: Long,
+        @Param("to") to: Long,
+        @Param("granted") granted: Long,
+        @Param("expect") expect: Long,
+        @Param("updated") updated: Long,
+    ): Int
+}
+
+/** PT-A1 列表行（账号 + 会员身份） */
+class PointAccountRow {
+    var id: Long = 0
+    var companyId: Long = 0
+    var userId: Long = 0
+    var point: Long = 0
+    var totalPoint: Long = 0
+    var updated: Long = 0
+    var nickname: String? = null
+    var mobile: String? = null
+}
+
+/** PT-A3 流水行（后台面多带会员昵称手机号；会员面用同一行，服务层不出这两个键） */
+class PointLogRow {
+    var id: Long = 0
+    var companyId: Long = 0
+    var userId: Long = 0
+    var orderId: String? = null
+    var changePoint: Long = 0
+    var beforePoint: Long = 0
+    var afterPoint: Long = 0
+    var remark: String? = null
+    var created: Long = 0
+    var nickname: String? = null
+    var mobile: String? = null
+}
+
+/** PT-A1 卡头（聚合结果必须落 DO：H2 小写化后驼峰别名会丢，见 OrdersMapper 同一课） */
+class PointStatsDO {
+    var pointSum: Long = 0
+    var grantedSum: Long = 0
+    var memberCount: Long = 0
 }
 
 /** user_deposit / deposit_trade / deposit_recharge_rule：储值余额（本金 + 赠金两栏） */
@@ -231,18 +406,51 @@ class DepositTradeDO : Stampable {
     var beforeBalance: Long = 0
     var afterBalance: Long = 0
     var status: String = TradeState.NOTPAY
+    /** 动账理由（CZ-A3 代客充值必填）：账上唯一"没有订单来源"的说明位 */
+    var remark: String? = null
     override var created: Long = 0
     override var updated: Long = 0
 }
 
-class RechargeRuleDO {
+class RechargeRuleDO : Stampable {
     var id: Long = 0
     var companyId: Long = 0
     var ruleName: String? = null
     var rechargeAmount: Long = 0
     var giftAmount: Long = 0
+    /** 1 上架 / 0 下架：CZ-F3 只出 1，CZ-A2 后台两态都出 */
     var status: Int = 1
+    override var created: Long = 0
+    override var updated: Long = 0
 }
+
+/**
+ * 储值流水筛选字典（CZ-F2 会员面 + CZ-A1 后台面共用）。
+ *
+ * 排序用 `created DESC, trade_id DESC`：表没有自增列（主键是业务单号），
+ * 同一秒内的多笔动账只靠 created 排不出稳定序，翻页会跳行 —— 带 trade_id 兜底才有全序。
+ *
+ * `distributorIds` 那条 EXISTS 是给店铺运营（role 2）收窄用的：
+ * `deposit_trade`/`user_deposit` 都没有店铺归属列（储值是平台资产），
+ * 但给了他 `deposit.lists` 不等于让他看到**全场**会员的余额与流水，
+ * 于是按"这个会员在本店下过单"收 —— 与 [PT_ACCOUNT_WHERE] 同一条口径，两处不各写一套。
+ */
+private const val DT_WHERE = """
+    WHERE 1=1
+    <if test="f.companyId != null">AND t.company_id = #{f.companyId}</if>
+    <if test="f.userId != null">AND t.user_id = #{f.userId}</if>
+    <if test="f.tradeType != null">AND t.trade_type = #{f.tradeType}</if>
+    <if test="f.status != null">AND t.status = #{f.status}</if>
+    <if test="f.relId != null">AND t.rel_id = #{f.relId}</if>
+    <if test="f.keyword != null">AND (mi.username LIKE CONCAT('%', #{f.keyword}, '%')
+        OR m.mobile LIKE CONCAT('%', #{f.keyword}, '%')
+        OR t.trade_id LIKE CONCAT('%', #{f.keyword}, '%'))</if>
+    <if test="f.createdStart != null">AND t.created &gt;= #{f.createdStart}</if>
+    <if test="f.createdEnd != null">AND t.created &lt;= #{f.createdEnd}</if>
+    <if test="f.distributorIds != null">AND EXISTS (SELECT 1 FROM orders_normal_orders oo
+        WHERE oo.user_id = t.user_id AND oo.distributor_id IN
+        <foreach item="g" collection="f.distributorIds" open="(" separator="," close=")">#{g}</foreach>)</if>
+"""
 
 @Mapper
 interface DepositMapper {
@@ -280,9 +488,9 @@ interface DepositMapper {
     ): Int
 
     @Insert("INSERT INTO deposit_trade(trade_id, company_id, user_id, trade_type, rel_id, amount, gift_amount, " +
-        "before_balance, after_balance, status, created, updated) " +
+        "before_balance, after_balance, status, remark, created, updated) " +
         "VALUES(#{tradeId}, #{companyId}, #{userId}, #{tradeType}, #{relId}, #{amount}, #{giftAmount}, " +
-        "#{beforeBalance}, #{afterBalance}, #{status}, #{created}, #{updated})")
+        "#{beforeBalance}, #{afterBalance}, #{status}, #{remark}, #{created}, #{updated})")
     fun insertTrade(t: DepositTradeDO): Int
 
     /**
@@ -313,6 +521,110 @@ interface DepositMapper {
 
     @Select("SELECT * FROM deposit_recharge_rule WHERE company_id = #{companyId} AND status = 1 ORDER BY recharge_amount")
     fun listRules(@Param("companyId") companyId: Long): List<RechargeRuleDO>
+
+    // ===== M1-5 读口与档位 CRUD（docs/04 §23.1 CZ-F1/F2/F3、§23.2 CZ-A1/A2/A4）=====
+
+    /**
+     * 储值流水分页（CZ-F2 会员面 + CZ-A1 后台面共用，同 PT 那一条的理由）。
+     *
+     * **`NOTPAY` 不过滤**：会员刚点充值、支付还没回来时，那条 CZ 单就是他"在等的那笔"，
+     * 列表里看不见只会让他再点一次（然后两笔 NOTPAY）。
+     */
+    @Select(
+        "<script>SELECT t.trade_id, t.company_id, t.user_id, t.trade_type, t.rel_id, t.amount, t.gift_amount, " +
+            "t.before_balance, t.after_balance, t.status, t.remark, t.created, t.updated, " +
+            "mi.username AS nickname, m.mobile AS mobile " +
+            "FROM deposit_trade t " +
+            "LEFT JOIN members m ON m.user_id = t.user_id " +
+            "LEFT JOIN members_info mi ON mi.user_id = t.user_id" + DT_WHERE +
+            " ORDER BY t.created DESC, t.trade_id DESC LIMIT #{limit} OFFSET #{offset}</script>",
+    )
+    fun tradePage(@Param("f") f: Map<String, Any?>, @Param("offset") offset: Long, @Param("limit") limit: Int): List<DepositTradeRow>
+
+    @Select("<script>SELECT COUNT(*) FROM deposit_trade t" + DT_WHERE + "</script>")
+    fun tradeCount(@Param("f") f: Map<String, Any?>): Long
+
+    /**
+     * CZ-A4 的两个"现值"：本金与赠金各一栏（`CZ-R1` 说它们在账上分列）。
+     *
+     * 与 `rechargeSumSince`、`notpayCount` **分成三条查**是刻意的：
+     * 一条 SQL 出四个数看着省，但 `user_deposit` 的现值与 `deposit_trade` 的历史
+     * 是两个时间轴，拼在一个 `<script>` 里迟早有人以为它们能相互加减。
+     */
+    @Select("SELECT COALESCE(SUM(deposit_amount), 0) AS principal_sum, COALESCE(SUM(gift_amount), 0) AS gift_sum, " +
+        "COUNT(*) AS member_count FROM user_deposit WHERE company_id = #{companyId}")
+    fun stats(@Param("companyId") companyId: Long): DepositStatsDO
+
+    /** 待支付的充值单（CZ-A4 的 `notpay_count`，也是巡检"有多少笔卡在支付中"的口径） */
+    @Select("SELECT COUNT(*) FROM deposit_trade WHERE company_id = #{companyId} " +
+        "AND trade_type = 'recharge' AND status = 'NOTPAY'")
+    fun notpayCount(@Param("companyId") companyId: Long): Long
+
+    /** 近 N 秒的充值到账合计（CZ-A4 的 `recharge_sum_7d`；只算 SUCCESS，NOTPAY 不是收入） */
+    @Select("SELECT COALESCE(SUM(amount), 0) FROM deposit_trade WHERE company_id = #{companyId} " +
+        "AND trade_type = 'recharge' AND status = 'SUCCESS' AND created >= #{since}")
+    fun rechargeSumSince(@Param("companyId") companyId: Long, @Param("since") since: Long): Long
+
+    /** CZ-A2 后台档位列表：不带 `status = 1`，关掉的档位运营要看得见才能决定开不开 */
+    @Select("<script>SELECT * FROM deposit_recharge_rule WHERE company_id = #{companyId} " +
+        "<if test='status != null'>AND status = #{status}</if> ORDER BY recharge_amount</script>")
+    fun listRulesAll(@Param("companyId") companyId: Long, @Param("status") status: Int?): List<RechargeRuleDO>
+
+    @Select("SELECT * FROM deposit_recharge_rule WHERE id = #{id} AND company_id = #{companyId}")
+    fun findRule(@Param("id") id: Long, @Param("companyId") companyId: Long): RechargeRuleDO?
+
+    @Insert("INSERT INTO deposit_recharge_rule(company_id, rule_name, recharge_amount, gift_amount, status, created, updated) " +
+        "VALUES(#{companyId}, #{ruleName}, #{rechargeAmount}, #{giftAmount}, #{status}, #{created}, #{updated})")
+    @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
+    fun insertRule(r: RechargeRuleDO): Int
+
+    @Update("UPDATE deposit_recharge_rule SET rule_name = #{ruleName}, recharge_amount = #{rechargeAmount}, " +
+        "gift_amount = #{giftAmount}, status = #{status}, updated = #{updated} WHERE id = #{id} AND company_id = #{companyId}")
+    fun updateRule(r: RechargeRuleDO): Int
+
+    /**
+     * 删档位不设守卫（CZ-A2）：档位是价目表不是账，
+     * 历史 `deposit_trade` 已把**当时**的 amount/gift_amount 写进自己那一行，删规则不动流水。
+     */
+    @Delete("DELETE FROM deposit_recharge_rule WHERE id = #{id} AND company_id = #{companyId}")
+    fun deleteRule(@Param("id") id: Long, @Param("companyId") companyId: Long): Int
+
+    /**
+     * CZ-A3 代客充值后的"这笔会员动了哪些账"（冒烟脚本按 trade_id 回查，不靠内存）。
+     * `trade_id` 是主键，单条查走主键索引，无需另建。
+     */
+    @Select("SELECT t.trade_id, t.company_id, t.user_id, t.trade_type, t.rel_id, t.amount, t.gift_amount, " +
+        "t.before_balance, t.after_balance, t.status, t.remark, t.created, t.updated, " +
+        "mi.username AS nickname, m.mobile AS mobile " +
+        "FROM deposit_trade t LEFT JOIN members m ON m.user_id = t.user_id " +
+        "LEFT JOIN members_info mi ON mi.user_id = t.user_id WHERE t.trade_id = #{tradeId}")
+    fun findTradeRow(@Param("tradeId") tradeId: String): DepositTradeRow?
+}
+
+/** CZ-A1/CZ-F2 列表行：动账本体 + 会员身份（datapass 判的是 `mobile`） */
+class DepositTradeRow {
+    var tradeId: String? = null
+    var companyId: Long = 0
+    var userId: Long = 0
+    var tradeType: String? = null
+    var relId: String? = null
+    var amount: Long = 0
+    var giftAmount: Long = 0
+    var beforeBalance: Long = 0
+    var afterBalance: Long = 0
+    var status: String? = null
+    var remark: String? = null
+    var created: Long = 0
+    var updated: Long = 0
+    var nickname: String? = null
+    var mobile: String? = null
+}
+
+/** CZ-A4 的现值三项（聚合同样落 DO，别用驼峰 Map 键） */
+class DepositStatsDO {
+    var principalSum: Long = 0
+    var giftSum: Long = 0
+    var memberCount: Long = 0
 }
 
 /** offline_payment：线下转账凭证。提交后订单仍待付款，`check_status=1` 由后台审核结清（SUP-6，M1-2 落地） */

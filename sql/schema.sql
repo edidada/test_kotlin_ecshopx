@@ -1423,3 +1423,14 @@ CREATE INDEX IF NOT EXISTS idx_invoice_status ON orders_invoice(company_id, invo
 
 -- 发票申请单号号段：缺行时 SeqGenerator 的 `check(touched==1)` 直接抛 → 500 而不是 4xx（C166 那一课）。
 INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('invoice_apply_bn', 0);
+
+-- INV-F6 那条"被引用过的抬头删不掉"的守卫要有个引用位可读：`INV-F1` 接受 `invoices_id`
+-- （从抬头本带出抬头），落申请单时就把它存下来 —— 只按 company_title+tax_number 匹配去判引用是不可靠的
+-- （改名/重号都会误判）。0 = 会员手填的抬头，不来自抬头本。
+ALTER TABLE orders_invoice ADD COLUMN IF NOT EXISTS invoices_id BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_invoice_head ON orders_invoice(company_id, invoices_id);
+
+-- CZ-A3 后台代客充值、以及任何"没有订单来源"的动账都要留一句为什么。
+-- point_member_log 本来就有 remark（PT-A2 靠它解释差额），deposit_trade 原本没有 ——
+-- 不补这一列，代客充值的理由只能落到 operator_logs 里，对账脚本读流水时看不出这笔和会员自己充的区别。
+ALTER TABLE deposit_trade ADD COLUMN IF NOT EXISTS remark VARCHAR(255);

@@ -175,6 +175,21 @@ class PointChannel(private val points: PointMapper) : PayChannel {
         if (points.deduct(order.companyId, order.userId, need, TimeSec.now()) == 0) {
             throw BizException(ErrorCode.BIZ, "积分已变动，请重试", mapOf("point" to listOf("并发扣减失败")))
         }
+        // 与退款回补对称：扣减腿也留一条负流水，否则 §23.5 门槛 1 的
+        // `Σ point_member_log.change_point = point_member.point` 在纯积分兑换这一单上就对不上。
+        // total_point 不动（PT-R2：抵扣不是"获得"）。
+        points.insertLog(
+            PointLogDO().apply {
+                companyId = order.companyId
+                userId = order.userId
+                orderId = order.orderId.toString()
+                changePoint = -need
+                beforePoint = acc.point
+                afterPoint = acc.point - need
+                remark = "积分支付抵扣"
+                created = TimeSec.now()
+            },
+        )
         return PayOutcome(
             settled = true,
             payFee = order.totalFee,

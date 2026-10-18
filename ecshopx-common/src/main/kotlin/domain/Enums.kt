@@ -73,3 +73,45 @@ object CancelStatus {
     const val CANCEL_AGREE = "CANCEL_AGREE"
     const val REFUSE_CANCEL = "REFUSE_CANCEL"
 }
+
+/**
+ * `orders_invoice.invoice_status`（M1-5 `INV-R1`，docs/04 §23.3 第 8 条）。
+ *
+ * 小写词表是这张表的原状（列默认值就写着 `'pending'`），与上面那几族大写态不同；
+ * `orders.invoice_status` 存的是同一套值（申请单状态的镜像，`INV-R2`）。
+ * `pending` 可反复改（upsert），`issued`/`rejected` 是终态 —— 再改回 422。
+ */
+object InvoiceApplyStatus {
+    const val PENDING = "pending"
+    const val ISSUED = "issued"
+    const val REJECTED = "rejected"
+
+    val KNOWN = setOf(PENDING, ISSUED, REJECTED)
+}
+
+/**
+ * 抬头词表的**唯一映射处**（`INV-R3`）：两张表两套值，本批不合并、不迁移。
+ *
+ * `members_invoices.invoices_type` 用 `personal/corporate`（抬头本，源系统原状），
+ * `orders_invoice.invoice_type` 用 `enterprise/individual`（申请单，源系统原状）。
+ * 对外只暴露各自列的词表，混用的代价是历史数据要迁；
+ * 在 Service 层做一次映射，DAO 与库里都不出现第三套值。
+ */
+object InvoiceHeadType {
+    const val PERSONAL = "personal"
+    const val CORPORATE = "corporate"
+    const val ENTERPRISE = "enterprise"
+    const val INDIVIDUAL = "individual"
+
+    /** 抬头本侧值域（`INV-F5` 的入参判据） */
+    val HEAD_VALUES = setOf(PERSONAL, CORPORATE)
+
+    /** 申请单侧值域（`INV-F1` 的入参判据） */
+    val APPLY_VALUES = setOf(ENTERPRISE, INDIVIDUAL)
+
+    /** 申请单侧：`personal → individual`、`corporate → enterprise` */
+    fun toApply(v: String): String = if (v == CORPORATE) ENTERPRISE else INDIVIDUAL
+
+    /** 抬头本侧：`enterprise → corporate`、其余按 `personal`（含未知值） */
+    fun toHead(v: String?): String = if (v == ENTERPRISE) CORPORATE else PERSONAL
+}

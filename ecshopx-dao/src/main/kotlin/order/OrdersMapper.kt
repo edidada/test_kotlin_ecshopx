@@ -245,6 +245,50 @@ interface OrdersMapper {
         @Param("rebate") rebate: Long,
         @Param("updated") updated: Long,
     ): Int
+
+    // ===== M1-5 评价位 / 发票位（docs/04 §23.3 第 4、9 条）=====
+
+    /**
+     * 评价位（`RATE-R1`）：`WHERE ... AND is_rate = FALSE` 回 0 行就是重复提交。
+     *
+     * 这一列在 M0-6 建表时就有、ORDER-8 的 `evaluation` 桶一直在读它
+     * （`DONE AND is_rate = FALSE`），但**全仓没有一个写口** —— 所以那个桶此前恒等于"已完成数"，
+     * C43 的"分桶互斥且求和恒等 total"只是没被打破，而是被一个永真的常量撑着。
+     * 本批之后它才第一次真的会变，`m07/m11/m13` 三脚本里的角标断言因此要回归。
+     */
+    @Update("UPDATE orders_normal_orders SET is_rate = TRUE, updated = #{updated} " +
+        "WHERE order_id = #{orderId} AND is_rate = FALSE")
+    fun markRate(@Param("orderId") orderId: Long, @Param("updated") updated: Long): Int
+
+    /**
+     * 发票位回写（`INV-R2`）：申请成功后 `is_invoiced=true`、`invoice_status='pending'`，
+     * 并把**当时的申请快照**存进 `invoice` CLOB。
+     *
+     * 三个后果写在注释里，别只改一半：
+     * 1. `invoice` 列在建单时可能已被 `OrderCreateService.invoiceOf` 写过一份
+     *    `{type, content}`（会员在下单页填的开票备注），本方法**覆盖**它 ——
+     *    会员后来正式提申请时，那份手填内容就不是权威版本了；
+     * 2. `invoice_status` 存小写词表（`InvoiceApplyStatus`），与 `pay_status` 那套大写态无关；
+     * 3. 后台 `INV-A2` 只迁申请单自己的状态、**不回写这份快照** —— 会员要看到"我申请时填了什么"。
+     */
+    @Update("UPDATE orders_normal_orders SET is_invoiced = TRUE, invoice_status = #{invoiceStatus}, " +
+        "invoice = #{invoice}, updated = #{updated} WHERE order_id = #{orderId}")
+    fun markInvoice(
+        @Param("orderId") orderId: Long,
+        @Param("invoiceStatus") invoiceStatus: String,
+        @Param("invoice") invoice: String?,
+        @Param("updated") updated: Long,
+    ): Int
+
+    /**
+     * 开票状态镜像（`INV-A2` 处理完后同步订单侧）。
+     *
+     * 只写 `invoice_status`、不动 `invoice` 快照，正是上面第 3 条的落地；
+     * `is_invoiced` 也不动 —— 一旦申请过就为 true，驳回不会把它抹掉（会员确实申请过）。
+     */
+    @Update("UPDATE orders_normal_orders SET invoice_status = #{invoiceStatus}, updated = #{updated} " +
+        "WHERE order_id = #{orderId}")
+    fun syncInvoiceStatus(@Param("orderId") orderId: Long, @Param("invoiceStatus") invoiceStatus: String, @Param("updated") updated: Long): Int
 }
 
 /** orders_associations：按单号路由 + 跨类列表查询（状态由 OrdersMapper.syncAssoc 维护） */
