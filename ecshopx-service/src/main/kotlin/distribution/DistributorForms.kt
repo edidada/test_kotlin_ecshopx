@@ -119,10 +119,17 @@ data class DistributorScope(val ids: List<Long>?) {
 
     fun allows(id: Long): Boolean = ids == null || id in ids
 
-    /** 列表侧的 `distributor_id` 过滤：与可见集合取交集，交集为空即"这一页没有任何一行可看" */
+    /**
+     * 列表侧的 `distributor_id` 过滤：与可见集合取交集，交集为空即"这一页没有任何一行可看"。
+     *
+     * **空集合与 `null` 同义 = "这次没指名要哪家店"**，一律回落成整个可见集合。
+     * 调用方拼这个入参时很容易写出 `listOfNotNull(raw[...]?.toLongOrNull())` —— 没传时它是 `[]` 而不是 null，
+     * 若按"空集合就是不要任何店"解释，店铺账号的列表会当场变成 0 行（症状与"他店里真没人"一模一样，最难查）。
+     * 要表达"什么都不给看"请用 [DistributorScope]`(emptyList())` 构造本身，而不是传一个空筛选。
+     */
     fun narrow(requested: List<Long>?): List<Long>? {
         if (ids == null) return requested?.takeIf { it.isNotEmpty() }
-        val r = requested?.filter { it in ids } ?: ids
+        val r = if (requested.isNullOrEmpty()) ids else ids.filter { it in requested }
         return if (r.isEmpty()) listOf(UNWATCHABLE) else r
     }
 

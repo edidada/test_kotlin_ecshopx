@@ -408,3 +408,35 @@ VALUES
   (1, 1, 2, 2, 'demo 旗舰店自提柜台', '浙江省', '杭州市', '西湖区', '文一西路 969 号 A 座 1 层', '120.026000', '30.279000', '057188886666', 1, 0, 0),
   (2, 1, 0, 0, '平台中心仓（全城可取）', '浙江省', '杭州市', '余杭区', '五常大道 1 号 3 号库', '120.043000', '30.275000', '057188880000', 1, 0, 0);
 
+-- ===== M1-4 第三批后半追加：导购权限码 + 演示角色与员工口令（追加于末尾，不回改上文） =====
+-- §18.7 的 45/46：看人 ≠ 改人。`salesman.update` 能建/改/调岗/停用，
+-- 停用这一条尤其要限：它直接关掉一个人的员工端登录入口。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (45, 38, '导购列表', 'salesman.lists',  'actived'),
+  (46, 38, '导购维护', 'salesman.update', 'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 45), (1, 46),
+  -- 店铺运营岗：管自己店的人，但管的范围照样受 `operators.distributor_ids` 约束（门槛②同一条线）
+  (2, 45), (2, 46);
+
+-- 两个角色正好是 §18.2 SM-A6 的两种归属：
+--   1 = 平台通用角色（distributor_id=0，任何一家店建导购时都能选）；
+--   2 = demo 旗舰店自己的岗位（只有店 2 选得到，别的店调岗过去是 422）。
+INSERT IGNORE INTO distribution_distributor_salesman_role
+  (role_id, company_id, distributor_id, role_name, remark, status, created, updated)
+VALUES
+  (1, 1, 0, '门店导购', '平台通用岗位：每家店都能选', 1, 0, 0),
+  (2, 1, 2, '店长', 'demo 旗舰店自己的岗位', 1, 0, 0);
+
+-- 第二条在册导购：会员 13800000002（user_id=2）。他的用途是把「店铺老板提现」与「导购提现」分开——
+-- CW-F1 认 distributor_id + user_id，CW-F3 只认 salesman_id，同一个人不能两头提。
+INSERT IGNORE INTO distribution_distributor_salesman
+  (salesman_id, company_id, distributor_id, shop_id, user_id, mobile, salesman_name, role_id, is_valid, created, updated)
+VALUES (2, 1, 2, 0, 2, '13800000002', '小李（门店导购）', 1, 'true', 0, 0);
+
+-- 员工端演示口令：两条在册导购都设成与 `operators.distributor01` 同一枚演示口令的哈希，
+-- 冒烟脚本据此登录 `/api/admin/wxapp/login`。哈希是 bcrypt 输出、不是明文，
+-- 与上面 operators 那几行的写法同一处惯例（明文口令只出现在演示脚本的拼接串里）。
+UPDATE distribution_distributor_salesman SET password = '$2a$10$XuQCFgc9Z1zSEoix6.8KlOfiSOOY3qZqW5m6Ib4raPxOPplc36ZPS'
+WHERE company_id = 1 AND salesman_id IN (1, 2);
+

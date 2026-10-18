@@ -54,7 +54,19 @@ data class OrderCreateForm(
     val remark: String? = null,
     val invoiceContent: String? = null,
     val invoiceType: String? = null,
+    /**
+     * 归属导购。前台（ORDER-2）给了就用给的；没给时服务层回落到"这个会员当前绑的导购"（C177）。
+     * 员工端（SO-E1）**入参给了也忽略**，一律由会话强制注入（§18.3）。
+     */
     val salesmanId: Long? = null,
+    /**
+     * SO-E1 代客下单时被代的那个会员（散客可空）。
+     *
+     * 只在员工面上有意义：前台（ORDER-2/3）的 `user_id` 永远取自令牌，
+     * 给 form 开这个口子是为了让"顾客的小程序"与"导购的工单"共用同一个 create 入口，
+     * 而不是再写第二条下单链。
+     */
+    val userId: Long? = null,
     val promoterUserId: Long? = null,
     val sourceId: String? = null,
     val monitorId: String? = null,

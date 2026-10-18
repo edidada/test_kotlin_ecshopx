@@ -1362,3 +1362,40 @@ ALTER TABLE orders_normal_orders ADD COLUMN IF NOT EXISTS pickup_location_id BIG
 CREATE INDEX IF NOT EXISTS idx_ziti_pickup ON orders_normal_orders(pickup_location_id, receipt_type, ziti_status);
 -- 取货码号段（§18.7）：SeqGenerator 取段时 check(touched==1)，行不存在就直接抛，必须在 schema 里先建好。
 INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('ziti_code', 0);
+
+-- ===== M1-4 第三批后半（3B）追加：导购 SM + 员工端第三条链（§18.3/§18.7）（追加于末尾，不回改上文） =====
+-- 员工端要能登录：口令列与 `operators.password` 同宽同算法（bcrypt cost=10）。
+-- 没设过密码的导购（NULL）登录一律 401 —— 空串不能当"没密码"，否则一次误更新就把账号开放出去。
+ALTER TABLE distribution_distributor_salesman ADD COLUMN IF NOT EXISTS password VARCHAR(255);
+-- SM-F1「扫码进店」要显示导购头像，源系统在 `salesman.avatar`；可空，前端拿不到就占位。
+ALTER TABLE distribution_distributor_salesman ADD COLUMN IF NOT EXISTS avatar VARCHAR(255);
+-- 「同一店内手机号唯一」是 SM-A2 那条 422 的落点：服务层先查后判管形状，这条唯一键管并发那半边。
+-- `mobile` 可空，而 NULL 在唯一索引里互不相等，历史脏行不会被这条键卡住建表。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_salesman_mobile ON distribution_distributor_salesman(distributor_id, mobile);
+
+-- 导购角色（SM-A6）。两个形状沿用本批自提点的既有约定，不另立一套：
+--   `distributor_id=0` = 平台通用角色（每家店都能选），与「平台通用自提点」同一套语义；
+--   `status` 1 启用 / 0 停用（也是逻辑停用、行留着给历史导购指认岗位名），SM-A4 调岗只认启用中的角色。
+CREATE TABLE IF NOT EXISTS distribution_distributor_salesman_role (
+  role_id        BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id     BIGINT NOT NULL,
+  distributor_id BIGINT NOT NULL DEFAULT 0,
+  role_name      VARCHAR(64),
+  remark         VARCHAR(255),
+  status         INT NOT NULL DEFAULT 1,
+  created        BIGINT NOT NULL DEFAULT 0,
+  updated        BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_smanrole ON distribution_distributor_salesman_role(company_id, distributor_id, status);
+
+-- 佣金流水挂导购：ST-E4/E5「我的统计/我的佣金」与 CW-F3 的可提余额都按这一列聚合。
+-- 入账时从订单头 `salesman_id` 带过来（代客下单由会话强制注入，会员自下单由 `members.salesman_id` 回落），
+-- 不在结算时按"现在这个会员归谁"回读 —— 与 D46 同一族理由：当时那条行才是事实。
+ALTER TABLE distribution_distribute_logs ADD COLUMN IF NOT EXISTS salesman_id BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_distlog_salesman ON distribution_distribute_logs(salesman_id, is_close);
+-- 提现单挂导购（CW-F3/F4）：店铺提现认 `distributor_id + user_id`，导购提现认 `salesman_id`，
+-- 两套余额各自算各自的，不合并成一列 —— 合并之后"老板把自己的店提空了还是不是导购的余额"说不清。
+ALTER TABLE distribution_cash_withdrawal ADD COLUMN IF NOT EXISTS salesman_id BIGINT NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_withdraw_salesman ON distribution_cash_withdrawal(salesman_id);
+-- 会员当前归属导购（SM-F2）。源系统另有带「24h 有效绑定」的关系表，本项目只留当前归属、可换绑（D62）。
+ALTER TABLE members ADD COLUMN IF NOT EXISTS salesman_id BIGINT NOT NULL DEFAULT 0;

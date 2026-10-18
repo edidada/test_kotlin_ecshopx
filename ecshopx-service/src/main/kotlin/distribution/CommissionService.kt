@@ -7,12 +7,14 @@ import com.ecshopx.kotlin.common.api.PageResult
 import com.ecshopx.kotlin.common.domain.TimeSec
 import com.ecshopx.kotlin.dao.distribution.CashWithdrawalDO
 import com.ecshopx.kotlin.dao.distribution.CashWithdrawalMapper
+import com.ecshopx.kotlin.dao.distribution.CommissionSum
 import com.ecshopx.kotlin.dao.distribution.DistributeLogDO
 import com.ecshopx.kotlin.dao.distribution.DistributeLogMapper
 import com.ecshopx.kotlin.dao.distribution.DistributeLogRow
 import com.ecshopx.kotlin.dao.distribution.DistributorMapper
 import com.ecshopx.kotlin.dao.distribution.DistributorValid
 import com.ecshopx.kotlin.dao.distribution.SalesmanLinkMapper
+import com.ecshopx.kotlin.dao.distribution.SalesmanMapper
 import com.ecshopx.kotlin.dao.distribution.WithdrawalStatus
 import com.ecshopx.kotlin.dao.distribution.WithdrawalSum
 import com.ecshopx.kotlin.dao.goods.SysConfigMapper
@@ -46,6 +48,7 @@ class CommissionService(
     private val orderItems: OrderItemsMapper,
     private val configs: SysConfigMapper,
     private val salesmen: SalesmanLinkMapper,
+    private val salesmanRows: SalesmanMapper,
     private val db: Db,
 ) {
 
@@ -73,6 +76,9 @@ class CommissionService(
                 DistributeLogDO().apply {
                     companyId = o.companyId; distributorId = o.distributorId; orderId = o.orderId
                     itemId = row.itemId; userId = o.userId; shopId = row.shopId
+                    // 导购归属跟着单走（3B）：代客下单由会话注入、会员自单由 `members.salesman_id` 回落，
+                    // 到这里已经是"这单当时算谁的"，入账只是把它抄进流水行，不重新判断（D46 同族）
+                    salesmanId = o.salesmanId
                     num = row.num; this.rebate = row.totalRebate; totalRebate = row.totalRebate
                     isClose = plan == null; planCloseTime = plan
                 },
@@ -116,6 +122,9 @@ class CommissionService(
             DistributeLogDO().apply {
                 companyId = src.companyId; distributorId = src.distributorId; this.orderId = src.orderId
                 this.itemId = src.itemId; userId = src.userId; shopId = src.shopId
+                // 三个归属（店/买家/岗）一律抄来源行：负向行要冲的就是那条已结算行所在的账，
+                // 现在这个人是不是还在这个店里，跟这笔冲销该记在谁头上无关
+                salesmanId = src.salesmanId
                 // 负向行不重复记件数：件数是成交事实，退款改的是钱不是销量
                 num = 0; rebate = -back; totalRebate = -back
                 // 已结算的钱要立刻从 balance 里回去，所以这条负向行天生是 is_close=TRUE
@@ -345,6 +354,145 @@ class CommissionService(
             "userId" to userId,
             "status" to raw["status"]?.takeIf { it.isNotBlank() },
             "distributorId" to null,
+            "salesmanId" to null,
+            "salesmanIds" to null,
+            // CW-F2 是店铺那侧的账（C176）：同一个会员如果也以导购身份提过钱（CW-F3），
+            // 那几行只进他自己的 CW-F4，不混进这份"店里的提现记录"
+            "onlyShop" to true,
+            "ids" to null,
+        )
+        return PageHelper.paginate(
+            pq,
+            count = { withdrawals.count(f) },
+            query = { offset, limit -> withdrawals.page(f, offset, limit) },
+            map = { rows -> rows.map { withdrawalView(it, distributors.findById(it.distributorId, companyId)?.name) } },
+        )
+    }
+
+    // ===================== 导购侧（3B：ST-E4 聚合 / CW-F3 申请 / CW-F4 记录） =====================
+
+    /**
+     * ST-E4 与 SM-A1 的岗侧佣金聚合。
+     *
+     * 口径与店侧 [stats] 完全一致，只是聚合键换成 `salesman_id` —— 一个人的账不因为他换过店而断开，
+     * 也不与所在店的账合并（§22 C176）：店拿店的佣金、岗拿岗的提成，两张提现单各自排队。
+     */
+    fun salesmanCommission(
+        companyId: Long,
+        salesmanId: Long,
+    ): CommissionSum = logs.sumSalesman(companyId, salesmanId)
+
+    /** 岗侧占用提现额：与店侧共用 [OccupyingSum] 那一条公式（`applied+confirmed+paid` 占、`refused` 不占） */
+    fun salesmanWithdraw(
+        companyId: Long,
+        salesmanId: Long,
+    ): Long = OccupyingSum.of(withdrawals.sumSalesman(companyId, salesmanId))
+
+    /**
+     * 岗的可提额 = **min(他自己那些行的余额, 店铺那口池的余额)**。
+     *
+     * 这一条是本案最容易想歪的地方，值得把推理写全：
+     * 佣金表里只有**一口池**（按 `distributor_id` 聚合，§18.5 D46：每行只有一个 `rebate` 数），
+     * `salesman_id` 切的是"这一份钱属于哪个岗"，**不是"另开一份钱"**。
+     * 如果两边各自按自己的聚合独立限额（岗看 `salesman_id`、店看 `distributor_id` 且都含这批行），
+     * 就会重复出金：店先把 3000 提空，岗仍能在同一批行上再提 2500 —— 池子里没有这笔钱了。
+     * 取 min 之后两边加起来永远 ≤ 池子：先提的一方把池子扣下去（店的聚合含所有提现行，
+     * 岗的提现也按 `distributor_id` 记），后提的一方自然受限。
+     * 而**列表**仍然分两栏（CW-F2 只出 `salesman_id=0`、CW-F4 只出 `salesman_id>0`），
+     * 所以"两套账互不合并"这句口径成立的是账本分列与限额分列，不是两份钱（§22 C176 记准确表述）。
+     */
+    fun salesmanWithdrawable(
+        companyId: Long,
+        salesmanId: Long,
+        distributorId: Long,
+    ): Long {
+        val own = salesmanCommission(companyId, salesmanId).commissionClosed - salesmanWithdraw(companyId, salesmanId)
+        return own.coerceAtMost(balanceOf(companyId, distributorId).balance).coerceAtLeast(0L)
+    }
+
+    /**
+     * CW-F3 导购提现申请（会员面，申请人=当前会员）。
+     *
+     * 归属认的是**在册导购行**（`salesman.user_id = 会员`），不是 `members.salesman_id` 那个"当前绑定"：
+     * 前者是"我在这个店有这个岗"，后者是"我买东西时算谁的"，拿后者发钱会把钱发给一个早就离岗的人。
+     * 非导购 403（§18.5 CW-F3 那行的判据），同一个会员在多家店各有岗时必须说清提到哪家。
+     */
+    fun salesmanApply(
+        companyId: Long,
+        userId: Long,
+        form: SalesmanWithdrawalApplyForm,
+    ): Map<String, Any?> {
+        val money = form.money ?: 0
+        val e = linkedMapOf<String, List<String>>()
+        if (money <= 0) e["money"] = listOf("提现金额必须大于 0")
+        if (e.isNotEmpty()) throw BizException(ErrorCode.BIZ, "提现申请不合法", e)
+        val mine = salesmanRows.listActiveByUser(companyId, userId)
+        if (mine.isEmpty()) throw BizException(ErrorCode.NO_PERM, "您不是任何店铺的在册导购，不能以导购身份提现")
+        val want = form.distributorId
+        val s = when {
+            want != null && want > 0 -> mine.firstOrNull { it.distributorId == want }
+                ?: throw BizException(ErrorCode.BIZ, "您在该店铺没有在册导购岗", mapOf("distributor_id" to listOf("无此岗")))
+            mine.size > 1 -> throw BizException(
+                ErrorCode.BIZ,
+                "您在 ${mine.size} 家店铺各有导购岗，请指明提现到哪家",
+                mapOf("distributor_id" to listOf("必填")),
+            )
+            else -> mine.first()
+        }
+        val d = distributors.findById(s.distributorId, companyId)
+            ?: throw BizException(ErrorCode.NOT_FOUND, "店铺不存在")
+        if (d.isValid != DistributorValid.TRUE || !d.reviewStatus) {
+            throw BizException(ErrorCode.BIZ, "店铺未启用，不能提现")
+        }
+        // 在途唯一按**岗**挡（不是按店）：同店两个导购各提各的互不影响，同一个人不能同时挂两笔
+        if (withdrawals.countInFlightBySalesman(companyId, s.salesmanId, WithdrawalStatus.IN_FLIGHT) > 0) {
+            throw BizException(ErrorCode.BIZ, "已有提现申请待处理，请等财务处理完再提")
+        }
+        val closed = salesmanCommission(companyId, s.salesmanId).commissionClosed
+        val balance = salesmanWithdrawable(companyId, s.salesmanId, s.distributorId)
+        if (money > balance) {
+            throw BizException(
+                ErrorCode.BIZ,
+                "可提现余额不足",
+                mapOf("money" to listOf("可提现 $balance 分，申请 $money 分（本岗已结算 $closed 分）")),
+            )
+        }
+        val w = CashWithdrawalDO().apply {
+            this.companyId = companyId
+            distributorId = s.distributorId
+            this.userId = userId
+            shopId = s.shopId
+            salesmanId = s.salesmanId
+            this.money = money
+            status = WithdrawalStatus.APPLIED
+        }
+        withdrawals.insert(w)
+        return withdrawalView(w, d.name)
+    }
+
+    /**
+     * CW-F4 导购提现记录（会员面）。
+     *
+     * 这里按 **`user_id`** 认行，而不是按 `salesman_id IN (我的岗)`：提现单的申请人就是本人，
+     * 万一某条岗被停用了（`is_valid` 置 false），历史申请也该还在他自己的列表里 ——
+     * 记录面少一行，就是把他提过的钱从他的账上抹掉。
+     */
+    fun salesmanList(
+        companyId: Long,
+        userId: Long,
+        raw: Map<String, String>,
+    ): PageResult<Map<String, Any?>> {
+        val pq = PageQuery.of(raw["page"]?.toIntOrNull(), (raw["page_size"] ?: raw["pageSize"])?.toIntOrNull())
+        val f = linkedMapOf<String, Any?>(
+            "companyId" to companyId,
+            "userId" to userId,
+            "status" to raw["status"]?.takeIf { it.isNotBlank() },
+            "salesmanId" to null,
+            "salesmanIds" to null,
+            // 只出岗那侧的行：同一个会员可能既替店提过钱（CW-F1，`salesman_id=0`）又替自己提过，
+            // 两套账各自成列表（C176），混在一份里就会变成"他好像提了两倍"
+            "onlySalesman" to true,
+            "distributorId" to raw["distributor_id"]?.toLongOrNull()?.takeIf { it > 0 },
             "ids" to null,
         )
         return PageHelper.paginate(
@@ -422,6 +570,8 @@ class CommissionService(
             "companyId" to companyId,
             "distributorId" to raw["distributor_id"]?.toLongOrNull()?.takeIf { it > 0 },
             "orderId" to raw["order_id"]?.toLongOrNull()?.takeIf { it > 0 },
+            // ST-E5「我的佣金」与 DL-A1 共用一条列表口径，只是这一键由员工端会话强制填进去（§18.3）
+            "salesmanId" to raw["salesman_id"]?.toLongOrNull()?.takeIf { it > 0 },
             "isClose" to if (close == null) null else close == "true" || close == "1",
             "beginTime" to raw["begin_time"]?.toLongOrNull()?.takeIf { it > 0 },
             "endTime" to raw["end_time"]?.toLongOrNull()?.takeIf { it > 0 },
@@ -439,6 +589,9 @@ class CommissionService(
         "distributorId" to raw["distributor_id"]?.toLongOrNull()?.takeIf { it > 0 },
         "status" to raw["status"]?.takeIf { it.isNotBlank() },
         "userId" to null,
+        // 后台按岗筛提现（CW-A1 追加键）；`salesmanIds` 留给"这批岗的钱"那种批量口径，目前只有服务层会填
+        "salesmanId" to raw["salesman_id"]?.toLongOrNull()?.takeIf { it > 0 },
+        "salesmanIds" to null,
         "ids" to scope.narrow(null),
     )
 
@@ -453,6 +606,8 @@ class CommissionService(
         "item_name" to r.itemName,
         "user_id" to r.userId,
         "shop_id" to r.shopId,
+        // 归属岗（3B）：0 = 这单不是导购开的。ST-E5 按这一列强制收窄，后台列表则把它当一栏展示
+        "salesman_id" to r.salesmanId,
         "num" to r.num,
         // 掩码优先级：昵称有就用昵称，没有退到手机号 —— 与售后/拼团那两处同一个口径
         "nickname" to (r.nickname?.takeIf { it.isNotBlank() } ?: mask(r.mobile)),
@@ -473,6 +628,8 @@ class CommissionService(
         "shop_name" to (shopName ?: ""),
         "user_id" to w.userId,
         "shop_id" to w.shopId,
+        // 岗与店两套余额互不合并（C176）：这一列 0 = 店铺提现、>0 = 导购提现，后台据此分栏处理
+        "salesman_id" to w.salesmanId,
         "money" to w.money,
         "status" to w.status,
         "status_text" to statusText(w.status),
@@ -507,6 +664,13 @@ class CommissionService(
 data class WithdrawalApplyForm(
     val distributorId: Long? = null,
     val money: Long? = null,
+)
+
+/** CW-F3 导购提现申请（`distributor_id` 只在"同一个人在多家店各有岗"时才必填） */
+@JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy::class)
+data class SalesmanWithdrawalApplyForm(
+    val money: Long? = null,
+    val distributorId: Long? = null,
 )
 
 /** CW-A2 处理提现 */

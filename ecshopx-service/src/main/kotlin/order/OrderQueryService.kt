@@ -90,6 +90,8 @@ class OrderQueryService(
         raw["receiver_name"]?.takeIf { it.isNotBlank() }?.let { f["receiverName"] = it }
         raw["distributor_id"]?.toLongOrNull()?.let { if (it > 0) f["distributorId"] = it }
         raw["shop_id"]?.toLongOrNull()?.let { if (it > 0) f["shopId"] = it }
+        // SO-E2「我开的单」用这一列（员工端由会话强制填，不接受前端传值覆盖）
+        raw["salesman_id"]?.toLongOrNull()?.let { if (it > 0) f["salesmanId"] = it }
         raw["pay_type"]?.takeIf { it.isNotBlank() }?.let { f["payType"] = it }
         raw["receipt_type"]?.takeIf { it.isNotBlank() }?.let { f["receiptType"] = it }
         raw["order_class"]?.takeIf { it.isNotBlank() }?.let { f["orderClass"] = it }

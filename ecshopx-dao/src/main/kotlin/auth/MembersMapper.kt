@@ -54,6 +54,33 @@ interface MembersMapper {
     @Select("<script>SELECT user_id, company_id, grade_id, mobile, disabled FROM members WHERE user_id IN " +
         "<foreach collection=\"ids\" item=\"i\" open=\"(\" separator=\",\" close=\")\">#{i}</foreach></script>")
     fun listByIds(@Param("ids") ids: List<Long>): List<MemberDO>
+
+    /**
+     * SM-F2 绑定/换绑当前归属导购（§18.1）。
+     *
+     * 只写 `members.salesman_id` 这一列，`WHERE` 带 `company_id`：跨租户改别人的归属是数据权限问题，
+     * 不能靠"反正 user_id 是全局自增"糊过去。传 0 = 解绑。
+     */
+    @Update("UPDATE members SET salesman_id = #{salesmanId}, updated = #{updated} " +
+        "WHERE user_id = #{userId} AND company_id = #{companyId}")
+    fun bindSalesman(
+        @Param("userId") userId: Long,
+        @Param("companyId") companyId: Long,
+        @Param("salesmanId") salesmanId: Long,
+        @Param("updated") updated: Long,
+    ): Int
+
+    /**
+     * 下单回落读归属（C177）：会员自己下单时，`salesman_id` 从这条当前归属来。
+     *
+     * 单独一条取数列而不是给 `findById` 的 DO 加字段：`SELECT *` 在多租户面里被很多地方用着，
+     * 加字段本身无害，但"这一列什么时候该读"是订单域的判断，显式一条读口更容易在审查时被看见。
+     */
+    @Select("SELECT COALESCE(salesman_id, 0) FROM members WHERE user_id = #{userId} AND company_id = #{companyId}")
+    fun salesmanIdOf(
+        @Param("userId") userId: Long,
+        @Param("companyId") companyId: Long,
+    ): Long?
 }
 
 interface MembersAssociationsMapper {

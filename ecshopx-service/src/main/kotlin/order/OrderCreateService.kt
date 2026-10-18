@@ -79,6 +79,7 @@ class OrderCreateService(
     private val seckillGoods: SeckillGoodsMapper,
     private val groupsService: GroupsService,
     private val distributors: DistributorMapper,
+    private val members: com.ecshopx.kotlin.dao.auth.MembersMapper,
     private val pickups: com.ecshopx.kotlin.service.distribution.PickupLocationService,
     private val seq: SeqGenerator,
     private val db: Db,
@@ -481,7 +482,11 @@ class OrderCreateService(
             itemPoint = lines.sumOf { (snapshot[it.itemId]?.point ?: 0L) * it.num }
             totalRebate = lines.sumOf { (snapshot[it.itemId]?.rebate ?: 0L) * it.num }
             distributorId = shopId
-            salesmanId = form.salesmanId ?: 0
+            // 归属导购（§22 C177）：入参给了就用入参（SO-E1 由会话强制填进来），
+            // 没给时回落到"这个会员当前绑的导购"（SM-F2 写的那一列）。
+            // 回落发生在建单这一刻、落进订单头，之后不再跟着 `members.salesman_id` 变 ——
+            // 会员换绑导购不该把历史单的佣金从 A 头上挪到 B 头上（与 D46"费率不回溯"同一条纪律）。
+            salesmanId = form.salesmanId?.takeIf { it > 0 } ?: members.salesmanIdOf(userId, companyId) ?: 0
             receiptType = if (form.receiptType == "ziti") "ziti" else "logistics"
             // §18.6：建单即发码、初始态 'false'；码是号段末 6 位（非随机），点 id 落订单头，
             // 之后核销页/取货码页都读现值（地址改了要能看出"现在去哪儿取"）

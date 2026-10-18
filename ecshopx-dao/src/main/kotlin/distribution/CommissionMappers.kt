@@ -47,6 +47,9 @@ class DistributeLogDO : Stampable {
     var itemId: Long = 0
     var userId: Long = 0
     var shopId: Long = 0
+
+    /** 归属导购（3B）：入账时从订单头 `salesman_id` 带过来，ST-E5/CW-F3 按这一列聚合 */
+    var salesmanId: Long = 0
     var num: Long = 0
 
     /** 本行佣金（分）；负向流水行是负数 */
@@ -71,6 +74,9 @@ class DistributeLogRow {
     var itemId: Long = 0
     var userId: Long = 0
     var shopId: Long = 0
+
+    /** 归属导购（3B）：入账时从订单头 `salesman_id` 带过来，ST-E5/CW-F3 按这一列聚合 */
+    var salesmanId: Long = 0
     var num: Long = 0
     var rebate: Long = 0
     var totalRebate: Long = 0
@@ -108,6 +114,9 @@ class CashWithdrawalDO : Stampable {
     /** 申请人（会员侧 CW-F1 是店铺老板的 user_id；后台代发为 0） */
     var userId: Long = 0
     var shopId: Long = 0
+
+    /** 导购提现行的归属岗（CW-F3/F4）；店铺提现行为 0，两侧互不合并（§22 C176） */
+    var salesmanId: Long = 0
     var money: Long = 0
     var status: String = WithdrawalStatus.APPLIED
     var remarks: String? = null
@@ -122,11 +131,11 @@ class CashWithdrawalDO : Stampable {
 }
 
 private const val L_COLS =
-    "id, company_id, distributor_id, order_id, item_id, user_id, shop_id, num, rebate, total_rebate, " +
+    "id, company_id, distributor_id, order_id, item_id, user_id, shop_id, salesman_id, num, rebate, total_rebate, " +
         "is_close, plan_close_time, created, updated"
 
 private const val W_COLS =
-    "id, company_id, distributor_id, user_id, shop_id, money, status, remarks, created, updated"
+    "id, company_id, distributor_id, user_id, shop_id, salesman_id, money, status, remarks, created, updated"
 
 /**
  * DL-A1 的筛选字典。
@@ -140,6 +149,7 @@ private const val L_FILTER_SQL = """
     <if test="f.distributorId != null"> AND l.distributor_id = #{f.distributorId}</if>
     <if test="f.orderId != null"> AND l.order_id = #{f.orderId}</if>
     <if test="f.isClose != null"> AND l.is_close = #{f.isClose}</if>
+    <if test="f.salesmanId != null"> AND l.salesman_id = #{f.salesmanId}</if>
     <if test="f.beginTime != null"> AND l.created &gt;= #{f.beginTime}</if>
     <if test="f.endTime != null"> AND l.created &lt;= #{f.endTime}</if>
     <if test="f.ids != null"> AND l.distributor_id IN <foreach item="d" collection="f.ids" open="(" separator="," close=")">#{d}</foreach></if>
@@ -150,9 +160,9 @@ private const val L_FILTER_SQL = """
 interface DistributeLogMapper {
 
     @Insert(
-        "INSERT INTO distribution_distribute_logs(company_id, distributor_id, order_id, item_id, user_id, shop_id, num, " +
+        "INSERT INTO distribution_distribute_logs(company_id, distributor_id, order_id, item_id, user_id, shop_id, salesman_id, num, " +
             "rebate, total_rebate, is_close, plan_close_time, created, updated) " +
-            "VALUES(#{companyId}, #{distributorId}, #{orderId}, #{itemId}, #{userId}, #{shopId}, #{num}, " +
+            "VALUES(#{companyId}, #{distributorId}, #{orderId}, #{itemId}, #{userId}, #{shopId}, #{salesmanId}, #{num}, " +
             "#{rebate}, #{totalRebate}, #{isClose}, #{planCloseTime}, #{created}, #{updated})",
     )
     @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
@@ -287,7 +297,7 @@ interface DistributeLogMapper {
      * 会员注销了也要看得到那笔佣金，不能让一条流水因为查不到人而从列表里消失。
      */
     @Select(
-        "<script>SELECT l.id, l.company_id, l.distributor_id, l.order_id, l.item_id, l.user_id, l.shop_id, l.num, " +
+        "<script>SELECT l.id, l.company_id, l.distributor_id, l.order_id, l.item_id, l.user_id, l.shop_id, l.salesman_id, l.num, " +
             "l.rebate, l.total_rebate, l.is_close, l.plan_close_time, l.created, l.updated, " +
             "i.item_name AS itemName, mi.username AS nickname, m.mobile AS mobile " +
             "FROM distribution_distribute_logs l JOIN items i ON i.item_id = l.item_id " +
@@ -314,14 +324,30 @@ interface DistributeLogMapper {
         @Param("distributorId") distributorId: Long?,
         @Param("ids") ids: List<Long>?,
     ): CommissionSum
+
+    /**
+     * ST-E4/CW-F3 的导购侧聚合：三个数与 [sum] 同一套 `CASE`，只是键换成 `salesman_id`。
+     * 单独一条而不是给 [sum] 加参数：两处调用方（店/岗）的鉴权来源完全不同，
+     * 合成一条可选参数容易让"店视角的聚合"被误当成"岗视角"用，那正是最容易把两份账并成一份错账的地方。
+     */
+    @Select(
+        "SELECT COALESCE(SUM(rebate), 0) AS commissionTotal, " +
+            "SUM(CASE WHEN is_close = FALSE THEN rebate ELSE 0 END) AS commissionOpen, " +
+            "SUM(CASE WHEN is_close = TRUE THEN rebate ELSE 0 END) AS commissionClosed " +
+            "FROM distribution_distribute_logs WHERE company_id = #{companyId} AND salesman_id = #{salesmanId}",
+    )
+    fun sumSalesman(
+        @Param("companyId") companyId: Long,
+        @Param("salesmanId") salesmanId: Long,
+    ): CommissionSum
 }
 
 @Mapper
 interface CashWithdrawalMapper {
 
     @Insert(
-        "INSERT INTO distribution_cash_withdrawal(company_id, distributor_id, user_id, shop_id, money, status, remarks, " +
-            "created, updated) VALUES(#{companyId}, #{distributorId}, #{userId}, #{shopId}, #{money}, #{status}, " +
+        "INSERT INTO distribution_cash_withdrawal(company_id, distributor_id, user_id, shop_id, salesman_id, money, status, remarks, " +
+            "created, updated) VALUES(#{companyId}, #{distributorId}, #{userId}, #{shopId}, #{salesmanId}, #{money}, #{status}, " +
             "#{remarks}, #{created}, #{updated})",
     )
     @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
@@ -329,6 +355,35 @@ interface CashWithdrawalMapper {
 
     @Select("SELECT $W_COLS FROM distribution_cash_withdrawal WHERE id = #{id} AND company_id = #{companyId}")
     fun findById(@Param("id") id: Long, @Param("companyId") companyId: Long): CashWithdrawalDO?
+
+    /**
+     * 导购提现的"在途唯一"闸门（CW-F3）。
+     *
+     * 判据按 `salesman_id` 而不是 `distributor_id`：同一家店里两个导购各自提钱互不影响，
+     * 但同一个人不能同时挂两笔没处理完的申请 —— 店那侧的 CW-F1 是按店挡的，两条各挡各的岗。
+     */
+    @Select(
+        "<script>SELECT COUNT(*) FROM distribution_cash_withdrawal WHERE company_id = #{companyId} " +
+            "AND salesman_id = #{salesmanId} AND status IN " +
+            "<foreach item=\"s\" collection=\"statuses\" open=\"(\" separator=\",\" close=\")\">#{s}</foreach></script>",
+    )
+    fun countInFlightBySalesman(
+        @Param("companyId") companyId: Long,
+        @Param("salesmanId") salesmanId: Long,
+        @Param("statuses") statuses: List<String>,
+    ): Long
+
+    /** CW-F3 的可提余额：与店那侧同一条公式，只是聚合键换成 `salesman_id`（§22 C176） */
+    @Select(
+        "SELECT COALESCE(SUM(CASE WHEN status IN ('applied','confirmed') THEN money ELSE 0 END), 0) AS withdrawApplied, " +
+            "COALESCE(SUM(CASE WHEN status = 'paid' THEN money ELSE 0 END), 0) AS withdrawPaid, " +
+            "COALESCE(SUM(CASE WHEN status = 'refused' THEN money ELSE 0 END), 0) AS withdrawRefused " +
+            "FROM distribution_cash_withdrawal WHERE company_id = #{companyId} AND salesman_id = #{salesmanId}",
+    )
+    fun sumSalesman(
+        @Param("companyId") companyId: Long,
+        @Param("salesmanId") salesmanId: Long,
+    ): WithdrawalSum
 
     /** 一店一笔在途（申请闸门）：`status IN ('applied','confirmed')` 命中即 422 */
     @Select(
@@ -365,6 +420,12 @@ interface CashWithdrawalMapper {
             "<if test=\"f.distributorId != null\"> AND distributor_id = #{f.distributorId}</if>" +
             "<if test=\"f.status != null\"> AND status = #{f.status}</if>" +
             "<if test=\"f.userId != null\"> AND user_id = #{f.userId}</if>" +
+            "<if test=\"f.salesmanId != null\"> AND salesman_id = #{f.salesmanId}</if>" +
+            "<if test=\"f.salesmanIds != null\"> AND salesman_id IN <foreach item=\"v\" collection=\"f.salesmanIds\" open=\"(\" separator=\",\" close=\")\">#{v}</foreach></if>" +
+            "<if test=\"f.onlySalesman == true\"> AND salesman_id &gt; 0</if>" +
+            // CW-F2「我的提现」是店铺那侧的账：只出 `salesman_id=0` 的行，
+            // 同一个会员替店里提的钱不能混进他自己的店铺列表（§22 C176）
+            "<if test=\"f.onlyShop == true\"> AND salesman_id = 0</if>" +
             "<if test=\"f.ids != null\"> AND distributor_id IN <foreach item=\"d\" collection=\"f.ids\" open=\"(\" separator=\",\" close=\")\">#{d}</foreach></if></script>",
     )
     fun count(@Param("f") f: Map<String, Any?>): Long
@@ -375,6 +436,11 @@ interface CashWithdrawalMapper {
             "<if test=\"f.distributorId != null\"> AND distributor_id = #{f.distributorId}</if>" +
             "<if test=\"f.status != null\"> AND status = #{f.status}</if>" +
             "<if test=\"f.userId != null\"> AND user_id = #{f.userId}</if>" +
+            "<if test=\"f.salesmanId != null\"> AND salesman_id = #{f.salesmanId}</if>" +
+            "<if test=\"f.salesmanIds != null\"> AND salesman_id IN <foreach item=\"v\" collection=\"f.salesmanIds\" open=\"(\" separator=\",\" close=\")\">#{v}</foreach></if>" +
+            "<if test=\"f.onlySalesman == true\"> AND salesman_id &gt; 0</if>" +
+            // 同上一条：店铺那侧的列表不混岗的钱（`onlyShop` 由服务层在 CW-F2 上置 true）
+            "<if test=\"f.onlyShop == true\"> AND salesman_id = 0</if>" +
             "<if test=\"f.ids != null\"> AND distributor_id IN <foreach item=\"d\" collection=\"f.ids\" open=\"(\" separator=\",\" close=\")\">#{d}</foreach></if>" +
             " ORDER BY id DESC LIMIT #{limit} OFFSET #{offset}</script>",
     )
