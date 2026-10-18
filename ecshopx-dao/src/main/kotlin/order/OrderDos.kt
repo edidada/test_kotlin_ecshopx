@@ -76,6 +76,9 @@ class NormalOrderDO : Stampable {
     var sourceFrom: String? = null
     var isOnlineOrder: Boolean = true
     var remark: String? = null
+
+    /** 拼团团号（M1-3 D29）：普通单恒 null，`order_class='groups'` 时落 GT 号 */
+    var teamId: String? = null
     override var created: Long = 0
     override var updated: Long = 0
 }

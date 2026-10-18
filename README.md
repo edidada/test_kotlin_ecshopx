@@ -99,4 +99,8 @@ ECX_PAY_PROFILE=wechatpay,alipay java -jar ecshopx-boot/target/ecshopx-boot-0.1.
 
 实跑：`tools/m13_smoke.py` 覆盖券×满减×积分叠加、择优与上不封顶、按件门槛、圈品、包邮、前台三面、权限码、租户隔离与取消回退，**可重复跑**（进场预清理 `MK<时间戳>` 残档、积分与残单都按基线差值断言）。
 
+#57 之后，链上 15 那一档真的会动单价了：秒杀与拼团的活动价**不记进 `discount_fee`**，而是把行基准换成活动价、让利落在 `activity_price_fee`，所以"折后应付"与守恒式都照旧成立（docs/04 §16 C 系列）。池子全部走数据库条件更新：秒杀三列 `activity_store/sales_store/hold_store`（占—结清—释放三条腿各一条 CAS，资格票由订单 `auto_cancel_time` 代替 Redis），拼团 `store` 扣减 + `(team_id,user_id)` 唯一席位 + `join_person_num` 条件占位，因此"2 人团坐成 3 人"在本项目里是**结构性不可能**。到期失败团与后台 `end=true` 都复用 M1-1 退款链（`ONLY_REFUND` + 当场确认），并且额外显式回补商品库存与活动额度两份。结算与凑团是三个显式 Job（`SeckillSettleJob`/`GroupsSettleJob`/`OrderTimeoutJob`），用例直接驱动时间而不等调度。
+
+实跑：`tools/m13_skgrp_smoke.py`（69 项）覆盖 SK-A1..A7/SK-F1..F2 + GP-A1..A6/GP-F1..F4 + 活动单算价，同样**可重复跑**（进场按 `SG<时间戳>` 停用上一轮残档、待付款残单按基线差值断言、收口停用本案场次并断言全场折让回 0）。注意它只验 HTTP 面，机器人与结算在冒烟里靠"活动窗口 + 强制结束"驱动，不等 `@Scheduled`。
+
 Windows + Git Bash 里指定本地仓库要写正斜杠：`mvn -B -Dmaven.repo.local=D:/develops/maven/mavenrepository …`。反斜杠会被 shell 剥掉，在工程根目录建出一个 `developsmavenmavenrepository/` 假仓库，症状是"依赖反复重下"或离线跑缺一堆 boot 作用域 jar。

@@ -2,6 +2,7 @@ package com.ecshopx.kotlin.service.order
 
 import com.ecshopx.kotlin.common.api.BizException
 import com.ecshopx.kotlin.common.api.ErrorCode
+import com.ecshopx.kotlin.common.domain.OrderClass
 import com.ecshopx.kotlin.common.domain.OrderStatus
 import com.ecshopx.kotlin.common.domain.SeqName
 import com.ecshopx.kotlin.common.domain.TimeSec
@@ -21,9 +22,13 @@ import com.ecshopx.kotlin.dao.order.OrdersMapper
 import com.ecshopx.kotlin.dao.pay.PointMapper
 import com.ecshopx.kotlin.dao.promotion.RelPromotionDO
 import com.ecshopx.kotlin.dao.promotion.RelPromotionMapper
+import com.ecshopx.kotlin.dao.promotion.SeckillGoodsMapper
 import com.ecshopx.kotlin.service.cart.CartService
 import com.ecshopx.kotlin.service.cart.PriceLine
+import com.ecshopx.kotlin.service.promotion.ActivityOffer
 import com.ecshopx.kotlin.service.promotion.CouponService
+import com.ecshopx.kotlin.service.promotion.GroupsService
+import com.ecshopx.kotlin.service.promotion.yuan
 import com.ecshopx.kotlin.service.seq.SeqGenerator
 import com.ecshopx.kotlin.service.tx.Db
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -44,6 +49,12 @@ import org.springframework.stereotype.Service
  * 券走 `UNUSED→LOCKED`、积分走 `point >= ?` 条件扣减，抢不到就整笔回滚。
  * 算价已经把这些抵扣减进应付了，占用失败还继续下单等于白拿折扣（docs/04 §14.6）。
  *
+ * M1-3 #57 再加一条：**活动单的活动池也走同一条 CAS**（D24/D25）——
+ * 秒杀抢 `hold_store`、拼团抢活动 `store` 与团席位，抢不到就 422 回滚。
+ * 算价链里的 `available` 只用来"让前端别显示买不到的价"，抢占只在这里发生一次；
+ * 申报了活动却没命中活动（活动结束/商品不在场次）同样直接拒单，
+ * 绝不允许"按普通单下一笔带活动价的单"。
+ *
  * ORDER-3（创建+预支付）依赖 trade 表与 PayChannel，随 M0-7 支付闭环一并交付。
  */
 @Service
@@ -60,6 +71,8 @@ class OrderCreateService(
     private val points: PointMapper,
     private val coupons: CouponService,
     private val rels: RelPromotionMapper,
+    private val seckillGoods: SeckillGoodsMapper,
+    private val groupsService: GroupsService,
     private val seq: SeqGenerator,
     private val db: Db,
     private val mapper: ObjectMapper,
@@ -92,7 +105,8 @@ class OrderCreateService(
             "order_id" to o.orderId.toString(),
             "pay_type" to o.payType,
             "order_type" to o.orderType,
-            "team_id" to null,
+            // §14.3：开团/参团成功才回团号，普通单恒 null（M0 的预留位落地）
+            "team_id" to o.teamId,
             "total_fee" to o.totalFee,
         )
     }
@@ -101,9 +115,16 @@ class OrderCreateService(
         if (!form.orderType.isNullOrBlank() && form.orderType != "normal") {
             throw BizException(ErrorCode.NOT_IMPLEMENTED, "该订单类型尚未开放：${form.orderType}")
         }
+        val orderClass = OrderClass.normalize(form.orderClass)
+        if (orderClass == OrderClass.NORMAL && (form.actId ?: 0) > 0) {
+            throw BizException(ErrorCode.VALIDATION, "普通订单不能带 act_id", mapOf("act_id" to listOf("请同时指定 order_class")))
+        }
         val q = if (form.directBuy) {
             if (form.entries().isEmpty()) throw BizException(ErrorCode.VALIDATION, "items 不能为空", mapOf("items" to listOf("不能为空")))
-            carts.quoteFromEntries(userId, companyId, form.entries(), form.couponCode(), form.pointUse == true)
+            carts.quoteFromEntries(
+                userId, companyId, form.entries(), form.couponCode(), form.pointUse == true,
+                activityType = orderClass, activityId = form.actId ?: 0,
+            )
         } else {
             carts.quoteFromCart(userId, companyId, firstNonZero(form.shopId, form.distributorId), form.couponCode(), form.pointUse == true)
         }
@@ -115,6 +136,8 @@ class OrderCreateService(
         if (broken.isNotEmpty()) throw BizException(ErrorCode.BIZ, "存在不可购买的商品：${reason(broken.first())}")
         if (q.checkStore) throw BizException(ErrorCode.BIZ, "商品库存不足")
         if (q.groupCount > 1) throw BizException(ErrorCode.BIZ, "暂不支持多店铺合并下单，请按店铺分别结算")
+        // 活动单的全部判据（同活动、命中、限购、限额）都在这一步，算价链只负责算钱不负责拒单
+        val act = activityOrder(orderClass, form, lines, q)
         // 用户显式点了券就不许"悄悄不用"：抵扣为 0 时拒绝成交并回预览同款原因
         // （docs/04 §14.3 撤销 C25 的开关位口径——预览与下单同一个 quote，两边判据也同一个）
         val code = q.ctx.couponCode
@@ -131,9 +154,10 @@ class OrderCreateService(
             val id = seq.next(SeqName.ORDER_NO)
             val now = TimeSec.now()
             deductStock(lines, now)
+            val teamId = act?.let { holdActivityPool(it, form, userId, companyId, lines, id, now) }
             holdUserAssets(userId, q, id, now)
 
-            val order = orderRow(id, userId, companyId, shopId, form, q, lines, recv, now, snapshot)
+            val order = orderRow(id, userId, companyId, shopId, form, q, lines, recv, now, snapshot, act, teamId)
             check(orders.insert(order) == 1) { "订单主行插入失败" }
             lines.forEach { l -> orderItems.insert(itemRow(id, userId, companyId, shopId, l, q, snapshot[l.itemId])) }
             snapshotPromotions(id, userId, q, lines, now)
@@ -148,6 +172,85 @@ class OrderCreateService(
             id
         }
         return orderId
+    }
+
+    /**
+     * 活动单归一与全部前置判据（docs/04 §14.3/§14.5）。
+     *
+     * 三条口径：
+     *  1. **入参没说、行上申报了也算活动单**：秒杀入口在商详页，但 `orders_cart` 早于本功能就带
+     *     `activity_type/activity_id` 两列（CART-1）。如果只认入参，用户从购物车结算秒杀品会变成
+     *     「按活动价付普通单」——活动价拿了、池子没占，等于凭空多卖；
+     *  2. **申报了活动就必须命中活动**：`l.activityOffer == null` 说明场次结束/商品不在场次/行不属于该活动，
+     *     直接 422 而不是回落现价（预览按现价、下单按活动价的价差是最难解释的客诉）；
+     *  3. **一笔单只允许一个活动**：`order_class` 与 `act_id` 都是单头列，混活动没法记快照也没法发货。
+     */
+    private fun activityOrder(
+        orderClass: String,
+        form: OrderCreateForm,
+        lines: List<PriceLine>,
+        q: CartService.Quote,
+    ): ActivityOrder? {
+        val declared = lines.map { it.activityType to it.activityId }
+            .filter { it.first in ACTIVITY_CLASSES && it.second > 0 }
+            .distinct()
+        if (orderClass == OrderClass.NORMAL && declared.isEmpty()) return null
+        if (declared.size > 1) throw BizException(ErrorCode.BIZ, "一笔订单只能参加一个活动，请分别下单")
+        val type = if (orderClass != OrderClass.NORMAL) orderClass else declared.first().first
+        val id = form.actId?.takeIf { it > 0 } ?: declared.firstOrNull()?.second
+            ?: throw BizException(ErrorCode.VALIDATION, "act_id 必填", mapOf("act_id" to listOf("${type} 单必须指定活动 id")))
+        if (declared.isNotEmpty() && declared.first() != type to id) {
+            throw BizException(ErrorCode.BIZ, "商品行申报的活动与本单声明的不一致，请重新从活动页下单")
+        }
+        val head = lines.map { l ->
+            if (l.activityType != type || l.activityId != id) throw BizException(ErrorCode.BIZ, "活动单里的商品必须同属一个活动：${l.itemName}")
+            l.activityOffer ?: throw BizException(ErrorCode.BIZ, "活动已结束或该商品不在此场次：${l.itemName}")
+        }.first()
+        if (type == OrderClass.GROUPS && (lines.size != 1 || lines.first().num != 1L)) {
+            throw BizException(ErrorCode.BIZ, "拼团一次只能拍 1 件（一件坐一个团席位）")
+        }
+        lines.forEach { l ->
+            val o = l.activityOffer ?: return@forEach
+            if (l.num > o.remainForMe()) {
+                throw BizException(ErrorCode.BIZ, "${l.itemName} 限购 ${o.limitNum} ${o.boughtUnit}，你已使用 ${o.bought}")
+            }
+            if (l.num > o.available) throw BizException(ErrorCode.BIZ, "${l.itemName} 活动名额不足")
+        }
+        if (head.limitMoney > 0 && q.totalFee > head.limitMoney) {
+            throw BizException(ErrorCode.BIZ, "本场次单笔限额 ${yuan(head.limitMoney)} 元，请减少数量")
+        }
+        return ActivityOrder(type, id, head)
+    }
+
+    /** 活动单头信息：`order_class` + `act_id` + 用于占池/时限的行级命中结果 */
+    private class ActivityOrder(val type: String, val id: Long, val head: ActivityOffer)
+
+    /**
+     * 抢占活动池（D24/D25），**都在下单事务内**，条件更新 0 行即抛错整笔回滚：
+     *  - 秒杀：`hold_store += num`（可购量 = 总量 − 已售 − 占用）；
+     *  - 拼团：活动 `store -= num` + 开团或占席位（`join_person_num < person_num` CAS），回团号。
+     *
+     * 顺序很关键：先抢活动池再锁券——池子抢不到时券根本没被 `LOCKED`，用户回列表还能用那张券，
+     * 反之会留下一张"被一笔不存在的订单锁住"的券，只能等超时关单回收。
+     */
+    private fun holdActivityPool(
+        act: ActivityOrder,
+        form: OrderCreateForm,
+        userId: Long,
+        companyId: Long,
+        lines: List<PriceLine>,
+        orderId: Long,
+        now: Long,
+    ): String? {
+        if (act.type == OrderClass.SECKILL) {
+            lines.forEach { l ->
+                if (seckillGoods.hold(act.id, l.itemId, l.num) == 0) {
+                    throw BizException(ErrorCode.BIZ, "秒杀商品已被抢完：${l.itemName}", mapOf("item_id" to listOf(l.itemId.toString())))
+                }
+            }
+            return null
+        }
+        return groupsService.occupySeat(companyId, userId, act.id, form.teamId, orderId, lines.sumOf { it.num }, now).teamId
     }
 
     /** 失效原因（与 CartService 的 valid 判定同口径：商品不存在 / 已下架 / 库存不足） */
@@ -201,7 +304,9 @@ class OrderCreateService(
                         moid = orderId; this.userId = userId
                         orderType = "normal"
                         itemId = l.itemId; itemName = l.itemName; itemType = l.itemType
-                        activityId = num(a["marketing_id"]); activityName = str(a["name"]); activityType = str(a["type"])
+                        // 满减行两个键都给（`marketing_id`），秒杀/拼团行只给 `id`（§14.5 order 15 的行痕迹）
+                        activityId = num(a["marketing_id"]).takeIf { it > 0 } ?: num(a["id"])
+                        activityName = str(a["name"]); activityType = str(a["type"])
                         discountFee = num(a["discount_fee"]); created = now; updated = now
                     },
                 )
@@ -305,6 +410,8 @@ class OrderCreateService(
         recv: Receiver,
         now: Long,
         snapshot: Map<Long, ItemDO>,
+        act: ActivityOrder?,
+        teamId: String?,
     ): NormalOrderDO {
         val invoiceJson = invoiceOf(form)
         return NormalOrderDO().apply {
@@ -335,8 +442,17 @@ class OrderCreateService(
             remark = form.remark
             receiverName = recv.name; receiverMobile = recv.mobile; receiverState = recv.state
             receiverCity = recv.city; receiverDistrict = recv.district; receiverAddress = recv.address
-            // 超时关单时长走租户配置（seed: order.auto_cancel_minutes=30）
-            autoCancelTime = now + autoCancelMinutes(companyId) * 60L
+            // 活动单头三件套：order_class/act_id 决定这单归哪个活动域，team_id 只有拼团才有
+            orderClass = act?.type ?: OrderClass.NORMAL
+            actId = act?.id ?: 0
+            this.teamId = teamId
+            // 超时关单时长走租户配置（seed: order.auto_cancel_minutes=30）；
+            // 秒杀单另算：`min(now + validity_period 分钟, 活动结束)`（D24 —— 活动都结束了不该还留着待付款）
+            autoCancelTime = when {
+                act == null || act.type != OrderClass.SECKILL -> now + autoCancelMinutes(companyId) * 60L
+                act.head.validityPeriod <= 0 -> minOf(now + autoCancelMinutes(companyId) * 60L, actEnd(act))
+                else -> minOf(now + act.head.validityPeriod * 60L, actEnd(act))
+            }
             created = now; updated = now
             type = 0
         }
@@ -358,6 +474,9 @@ class OrderCreateService(
         configs.getValue(companyId, "order.auto_cancel_minutes")?.toLongOrNull()
             ?: configs.getValue(0L, "order.auto_cancel_minutes")?.toLongOrNull()
             ?: 30L
+
+    /** 活动结束时间（0=未配结束，视为无上限）：`auto_cancel_time` 的第二个上限 */
+    private fun actEnd(act: ActivityOrder): Long = if (act.head.endTime > 0) act.head.endTime else Long.MAX_VALUE / 2
 
     private fun itemRow(
         orderId: Long,
@@ -418,4 +537,9 @@ class OrderCreateService(
     }
 
     private fun firstNonZero(vararg v: Long?): Long? = v.firstOrNull { it != null && it > 0 }
+
+    companion object {
+        /** 会占活动池的订单类目（§14.5 order 15 的两类；`normal` 不进活动判据） */
+        private val ACTIVITY_CLASSES = setOf(OrderClass.SECKILL, OrderClass.GROUPS)
+    }
 }

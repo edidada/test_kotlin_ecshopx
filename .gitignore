@@ -40,3 +40,6 @@ data/
 .flattened-pom.xml
 ### 实跑冒烟与构建产物日志（本地排障用，不入库）###
 logs/
+### Python 冒烟脚本的字节码缓存（本地跑出来的，不入库）###
+__pycache__/
+*.pyc

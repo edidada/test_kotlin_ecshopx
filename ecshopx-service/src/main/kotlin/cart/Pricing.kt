@@ -1,6 +1,7 @@
 package com.ecshopx.kotlin.service.cart
 
 import com.ecshopx.kotlin.dao.promotion.CouponUserDO
+import com.ecshopx.kotlin.service.promotion.ActivityOffer
 import com.ecshopx.kotlin.service.promotion.MarketingOffer
 
 /**
@@ -39,12 +40,22 @@ class PriceLine(
     var plusBuy: Boolean,
     /** 会员折扣分摊到行 */
     var memberDiscount: Long = 0,
-    /** 活动/满减/秒杀在行上的优惠（M1-3 起是真金额） */
+    /** 活动/满减在行上的优惠（M1-3 起是真金额，进 [feeDeducted]） */
     var discountFee: Long = 0,
     /** 券抵扣分摊到行（D28：逐行分摊，Σ行=组=单） */
     var couponFee: Long = 0,
     /** 积分抵扣分摊到行（同上） */
     var pointFee: Long = 0,
+    /**
+     * 秒杀/拼团让利（§14.5 order 15）。
+     *
+     * 这两个活动**改的是行单价基准**（`price` 直接换成活动价），所以让利额不进 [feeDeducted]
+     * —— 进了就会减两次。它只为出参服务：`discount_info[]` 里的 `type=seckill` 一条、
+     * 商详/结算页的"已省 X 元"，以及优惠快照行的金额。
+     */
+    var activityPriceFee: Long = 0,
+    /** 命中的活动（`activity_type` + `activity_id`），下单侧占池/开团要用它定位 */
+    var activityOffer: ActivityOffer? = null,
     var activityInfo: List<Map<String, Any?>> = emptyList(),
 ) {
     /** 行小计（未减优惠） */
@@ -70,6 +81,17 @@ class PriceGroup(
     var usedActivity: List<Map<String, Any?>> = emptyList()
     var giftActivity: List<Map<String, Any?>> = emptyList()
     var plusBuyList: List<Map<String, Any?>> = emptyList()
+
+    /**
+     * 秒杀/拼团在本组的让利合计（§14.5 order 15）。
+     *
+     * **不进 [discountFee]**：活动价改的是行单价基准，`itemFee` 已经是活动后的金额，
+     * 再记一次抵扣就会减两遍（`Σ行 total_fee + 运费 == 单 total_fee` 当场破）。
+     * 这里只为出参与快照存在：`discount_info[]` 的 `type=seckill|groups` 一行、
+     * `orders_rel_promotions` 的优惠额。
+     */
+    var activityPriceFee: Long = 0
+    var activityPriceRows: List<Map<String, Any?>> = emptyList()
 
     /** 满减命中「包邮」档：由 FullReductionRule 写、FreightRule 读（§14.5 的 30→60 依赖） */
     var freePostage: Boolean = false
@@ -120,12 +142,17 @@ class PriceContext(
     val couponReason: String? = null,
     /** 积分抵扣上限比例（`point.deduct.max_ratio`，百分比；0=不允许抵扣） */
     val pointRatio: Int = 0,
+    /** 秒杀/拼团活动价（§14.5 order 15）：由 buildContext 预取，规则链按 (类型, 活动, 商品) 命中 */
+    val activityOffers: List<ActivityOffer> = emptyList(),
 ) {
     val checkedLines: List<PriceLine> get() = lines.filter { it.checked }
     val totalFreight: Long get() = groups.sumOf { it.freight }
     val totalLineDiscount: Long get() = checkedLines.sumOf { it.discountFee }
     val totalCouponFee: Long get() = checkedLines.sumOf { it.couponFee }
     val totalPointFee: Long get() = checkedLines.sumOf { it.pointFee }
+
+    /** 秒杀/拼团让利合计（展示口径，不参与 [PriceLine.feeDeducted]） */
+    val totalActivityPriceFee: Long get() = checkedLines.sumOf { it.activityPriceFee }
 
     /** 结算页与订单详情都要的三张抵扣账 */
     val couponDiscount: Long get() = groups.sumOf { it.couponDiscount }

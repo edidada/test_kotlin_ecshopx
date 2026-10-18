@@ -34,6 +34,23 @@ object PayStatus {
     const val REFUND = "REFUND"
 }
 
+/**
+ * `orders_normal_orders.order_class`（docs/04 §14.3）：订单**业务类别**，与 `order_type` 正交。
+ *
+ * `order_type` 仍是 M0 的 normal/service 口径（service 一律 501 的守卫不动），
+ * 秒杀与拼团不改订单类型，只改类别 —— 与 PHP 同列同值，砍价（bargain）属 P2。
+ */
+object OrderClass {
+    const val NORMAL = "normal"
+    const val SECKILL = "seckill"
+    const val GROUPS = "groups"
+
+    val KNOWN = setOf(NORMAL, SECKILL, GROUPS)
+
+    /** 入参归一：未知/空值一律按普通单（`order_class`/`activity_type` 都吃这个口径） */
+    fun normalize(v: String?): String = if (v != null && v in KNOWN) v else NORMAL
+}
+
 object DeliveryStatus {
     const val PENDING = "PENDING"
     const val PART_DONE = "PART_DONE"

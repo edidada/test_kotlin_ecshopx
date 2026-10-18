@@ -4,6 +4,7 @@ import com.ecshopx.kotlin.common.api.BizException
 import com.ecshopx.kotlin.common.api.ErrorCode
 import com.ecshopx.kotlin.common.domain.CancelStatus
 import com.ecshopx.kotlin.common.domain.DeliveryStatus
+import com.ecshopx.kotlin.common.domain.OrderClass
 import com.ecshopx.kotlin.common.domain.OrderStatus
 import com.ecshopx.kotlin.common.domain.PayStatus
 import com.ecshopx.kotlin.common.domain.TimeSec
@@ -26,7 +27,9 @@ import com.ecshopx.kotlin.dao.order.TransitPatch
 import com.ecshopx.kotlin.dao.pay.PointLogDO
 import com.ecshopx.kotlin.dao.pay.PointMapper
 import com.ecshopx.kotlin.dao.promotion.RelPromotionMapper
+import com.ecshopx.kotlin.dao.promotion.SeckillGoodsMapper
 import com.ecshopx.kotlin.service.promotion.CouponService
+import com.ecshopx.kotlin.service.promotion.GroupsService
 import com.ecshopx.kotlin.service.tx.Db
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
@@ -42,6 +45,12 @@ import org.springframework.stereotype.Service
  *  - 结清 `markPaid` → 券 `LOCKED→USED`（`consume` 按 order_id 走，重复回调第二次 0 行）；
  *  - 关单 `runClose` → 券 `LOCKED→UNUSED`、积分余额回补、优惠快照作废。
  * 没用券/没用积分的单在这几条语句上都是 0 行，因此不需要先查"这单用没用"。
+ *
+ * M1-3 #57 把**活动池**也挂上同样这两个入口（docs/04 §14.6）：
+ *  - 结清 → 秒杀 `hold_store→sales_store`、拼团计人成团；
+ *  - 关单 → 秒杀释放占用、拼团退团并回补活动额度。
+ * 都放在 CAS 命中之后，所以重复回调既不会把销量加两次，也不会让团反复进出。
+ * 发货侧再加一道卡口：**未成团的拼团单不得发货**（422），订单状态本身不新增（D26）。
  */
 @Service
 class OrderFlowService(
@@ -57,6 +66,8 @@ class OrderFlowService(
     private val rels: RelPromotionMapper,
     private val coupons: CouponService,
     private val points: PointMapper,
+    private val seckillGoods: SeckillGoodsMapper,
+    private val groups: GroupsService,
     private val db: Db,
     private val mapper: ObjectMapper,
 ) {
@@ -125,6 +136,11 @@ class OrderFlowService(
             orders.syncAssoc(orderId, OrderStatus.PAYED, o.cancelStatus, DeliveryStatus.PENDING, null, now)
             // 券核销：按 order_id 从 LOCKED 出发；这单没用券就是 0 行，重复回调第二次也是 0 行
             coupons.consume(orderId, now)
+            // 活动池结算（D24/D25）：秒杀把占用转成已售，拼团把人凑齐就成团
+            if (o.orderClass == OrderClass.SECKILL && o.actId > 0) {
+                orderItems.listByOrder(orderId).forEach { seckillGoods.settle(o.actId, it.itemId, it.num) }
+            }
+            if (o.orderClass == OrderClass.GROUPS) groups.onOrderPaid(orderId)
             logs.insert(
                 OrderOperateLogDO().apply {
                     this.orderId = orderId; operatorRole = "system"; operator = "system"; behavior = t.behavior
@@ -159,6 +175,8 @@ class OrderFlowService(
     fun ship(orderId: Long, form: OrderDeliveryForm, operatorId: Long?, operator: String?): Map<String, Any?> {
         val o = load(orderId)
         val t = OrderStatusMachine.require(o.orderStatus, OrderEvent.SHIP)
+        // 发货卡口（§14.6 末行 / D26）："待成团"不是订单状态，所以在这里挡，不给状态机加一档
+        if (!groups.canShip(orderId)) throw BizException(ErrorCode.BIZ, "拼团尚未成团，暂不能发货")
         val rows = orderItems.listByOrder(orderId)
         if (rows.isEmpty()) throw BizException(ErrorCode.BIZ, "订单明细为空，无法发货")
         val plan = shipPlan(rows, form.items)
@@ -326,6 +344,10 @@ class OrderFlowService(
             goodsItems.restoreStock(row.itemId, row.num - row.deliveryItemNum, now)
             orderItems.markCancelled(row.id, (row.cancelItemNum + (row.num - row.deliveryItemNum)).toInt(), now)
         }
+        // 活动池回退（D24/D25）：秒杀把下单时的占用放回池子，拼团退团并回补活动额度。
+        // 与库存同一条 CAS 语义：非活动单在这几条语句上都是 0 行，不需要先判"这单是不是活动单"
+        if (o.orderClass == OrderClass.SECKILL && o.actId > 0) rows.forEach { seckillGoods.release(o.actId, it.itemId, it.num) }
+        if (o.orderClass == OrderClass.GROUPS) groups.onOrderClosed(o.orderId)
         // 整单关闭后路由表状态同步；已发货行（deliveryItemNum>0）不参与回补，避免"货已发出库存又回来"
         orders.syncAssoc(
             o.orderId, t.orderStatus ?: o.orderStatus, t.cancelStatus ?: CancelStatus.NOCANCEL,

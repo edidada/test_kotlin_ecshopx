@@ -118,6 +118,11 @@ data class SeckillForm(
     val activityName: String? = null,
     /** 源系统整数码：1=普通秒杀 2=限时抢购（出参给文案，不改写） */
     val activityType: Int? = null,
+    /** 与 `activity_type` 等价的列值写法（`normal`/`limited_time_sale`）；两者都给时以本字段为准 */
+    val seckillType: String? = null,
+    val adPic: String? = null,
+    /** 参与店铺（逗号分隔串，源系统同形） */
+    val distributorId: String? = null,
     val activityStartTime: Long? = null,
     val activityEndTime: Long? = null,
     /** 下单后多少分钟内必须付款（D24 用它代替 Redis 资格票） */
@@ -140,6 +145,8 @@ data class SeckillGoodsForm(
 @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy::class)
 data class SeckillGoodsItemForm(
     val itemId: Long? = null,
+    /** 商品名（缺省由服务端从 `items` 带入，后台列表回填用） */
+    val itemName: String? = null,
     /** 活动价（分） */
     val activityPrice: Long? = null,
     /** 活动库存：新行是全量，已有行是**增量**（D24：售出/占用中的行不许缩） */

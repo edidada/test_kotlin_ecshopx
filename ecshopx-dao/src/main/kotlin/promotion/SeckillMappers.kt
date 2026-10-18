@@ -243,4 +243,55 @@ interface SeckillGoodsMapper {
     /** 报表：某场次各行的三个库存数（SK-A7） */
     @Select("SELECT $SG_COLS FROM promotions_seckill_rel_goods WHERE seckill_id = #{seckillId} ORDER BY sales_store DESC, id")
     fun report(@Param("seckillId") seckillId: Long): List<SeckillGoodsDO>
+
+    /**
+     * 孤儿占用排查（`SeckillSettleJob` 第一条腿）：
+     * `hold_store` 理应等于「该场次该商品所有未付款秒杀单的件数合计」，多出来的就是
+     * 关单与释放之间断过（进程被杀、人工改库）留下的悬空占用。
+     * 口径与 [boughtByUser] 不同：那里算"在途+已成单"做限购，这里只算**仍未付款**的占用。
+     * `orphan` 一列直接在 SQL 里算差额，服务层不需要逐行再查一次未付合计。
+     */
+    @Select(
+        "SELECT g.id, g.seckill_id, g.item_id, g.hold_store, " +
+            "g.hold_store - (SELECT COALESCE(SUM(i.num), 0) FROM orders_normal_orders_items i " +
+            "JOIN orders_normal_orders o ON o.order_id = i.order_id " +
+            "WHERE o.order_class = 'seckill' AND o.order_status = 'NOTPAY' " +
+            "AND o.act_id = g.seckill_id AND i.item_id = g.item_id) AS orphan " +
+            "FROM promotions_seckill_rel_goods g WHERE g.hold_store > 0 AND g.hold_store > " +
+            "(SELECT COALESCE(SUM(i.num), 0) FROM orders_normal_orders_items i " +
+            "JOIN orders_normal_orders o ON o.order_id = i.order_id " +
+            "WHERE o.order_class = 'seckill' AND o.order_status = 'NOTPAY' " +
+            "AND o.act_id = g.seckill_id AND i.item_id = g.item_id)",
+    )
+    fun listOrphanHold(): List<SeckillOrphanRow>
+
+    /** 清孤儿占用：只按算出来的差额回收，`hold_store >= orphan` 是守卫（并发下单刚抢走的不动） */
+    @Update("UPDATE promotions_seckill_rel_goods SET hold_store = hold_store - #{orphan} WHERE id = #{id} AND hold_store >= #{orphan}")
+    fun trimHold(
+        @Param("id") id: Long,
+        @Param("orphan") orphan: Long,
+    ): Int
+
+    /** SK-A2/SK-F1 列表的 `item_count`：一次分组统计，不在循环里查 N 次 */
+    @Select(
+        "<script>SELECT seckill_id, COUNT(*) AS cnt FROM promotions_seckill_rel_goods " +
+            "WHERE seckill_id IN <foreach collection=\"ids\" item=\"s\" open=\"(\" separator=\",\" close=\")\">#{s}</foreach> " +
+            "GROUP BY seckill_id</script>",
+    )
+    fun countBatch(@Param("ids") ids: List<Long>): List<SeckillItemCountRow>
+}
+
+/** [SeckillGoodsMapper.countBatch] 的承载行 */
+class SeckillItemCountRow {
+    var seckillId: Long = 0
+    var cnt: Long = 0
+}
+
+/** [SeckillGoodsMapper.listOrphanHold] 的承载行：`orphan` = `hold_store − 仍未付款的件数合计` */
+class SeckillOrphanRow {
+    var id: Long = 0
+    var seckillId: Long = 0
+    var itemId: Long = 0
+    var holdStore: Long = 0
+    var orphan: Long = 0
 }

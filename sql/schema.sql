@@ -1343,3 +1343,7 @@ CREATE INDEX IF NOT EXISTS idx_relpro_coupon ON orders_rel_promotions(coupon_id)
 -- 团号与券码发号器（D29：team_id = "GT" + 号段值，唯一索引 uk_team 兜底；券码同构）
 INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('group_team_id', 0);
 INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('coupon_code', 0);
+
+-- 秒杀类型列放宽：本项目用**列值**表达类型（`normal` / `limited_time_sale`），
+-- 源系统的整数码 1/2 由服务层双写映射。`limited_time_sale` 17 个字符，建表时的 VARCHAR(16) 装不下。
+ALTER TABLE promotions_seckill_activity ALTER COLUMN seckill_type SET DATA TYPE VARCHAR(32);

@@ -72,6 +72,12 @@ data class PreviewForm(
     @JsonAlias("coupon_code") val couponCode: String? = null,
     /** 积分抵扣开关：docs/04 §2.4 公共入参名叫 `point_use`（与 ORDER-2 同一个键），`use_point` 兼容收 */
     @JsonAlias("use_point") val pointUse: Boolean? = null,
+    /**
+     * 秒杀/拼团直购（§14.3 的 `order_class`/`act_id`，`activity_type`/`activity_id` 兼容收）：
+     * 只作用于 `cart_type=fastbuy` 的临时行——车内的行加购时就带着这两个字段落库，预览不必再传。
+     */
+    @JsonAlias("activity_type") val orderClass: String? = null,
+    @JsonAlias("activity_id") val actId: Long? = null,
 ) {
     fun entries(): List<CartItemNum> =
         items?.filter { it.itemId != null && it.itemId > 0 }

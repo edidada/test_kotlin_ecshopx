@@ -680,3 +680,38 @@ M1-2 接进两条真渠道（微信支付 v3、支付宝）与线下转账审核
 
 `tools/m13_smoke.py`（#56：满减满折 + 券/积分挂链，53 项）设计成**可重复跑**：进场先按 `MK<时间戳>` 名字预清理上一轮的活动（半途中断的残档会污染收尾那条"全场折让回 0"），积分与待付款残单都按**基线差值**断言，本案建的活动全部 MK-A7 删除、券按 CP-A6 停发（已发放过的券删不掉，422 是正确行为）。注意 m07 与 m04 仍要求干净库（`user_deposit`、`items_rel_attributes` 的绝对值断言），这是它们 docstring 里写明的既有约束，不是本轮回归。
 
+## 16. 实现期语义补充（M1-3 #57 秒杀与拼团落地时确认，追加于 §15 之后，不回改上文）
+
+同上惯例：§14 的规格原文一字不动，实现之后才确定的口径记在这里，冲突处以本节为准。
+
+### 16.1 口径（C 系列续编，追加于 §15.1 之后）
+
+| # | 口径 | 说明 |
+|---|---|---|
+| C123 | 秒杀与拼团的前台列表**筛子不一样**，且都不是"只出在窗" | SK-F1 `frontActivities` 只滤 `disabled=false`，未开始与已结束照出——秒杀页的三个 tab 就靠行上的 `date_status` 分（`pending`/`doing`/`end`），把 `end` 滤掉 tab 页就没数据了。GP-F1 缺省 `dateStatus="doing"`（拼团列表没有 tab）。**冒烟与前端都不能假设"前台列表 = 在窗活动"**：本案实测前台第一条就是 seed 那条已结束的场次 1。停用位两侧都不出。 |
+| C124 | `report.available_store` 是**全场次求和**，不是某一行的可购量 | SK-A7 的 `available_store = Σ max(activity_store − sales_store − hold_store, 0)`，行级数字只在 `items[].available`。后台报表看总量、SKU 看行，冒烟脚本第 5 节实测 `available_store=15`（坚果 13 + 手机 2）而单看坚果是 13，断言写错对象会一路红。同理 `sales_fee/hold_fee` 也是单级求和。 |
+| C125 | `saveGoods` 是整表覆盖 + 库存只加，返回的是**全部行** | 提交的行覆盖（`item_id` 相同即 UPDATE），未提交的行原样留着（不是差量删除）；`activity_store` 入参按**增量**解释（只允许加），负增量 422「只能加不能减」，空圈品 400 表单错；出参 `items[]` 是该场次的全量行，改一个 SKU 也会看到另一行——冒烟据此断言"没提交的那行原样留着"。 |
+| C126 | 秒杀类型用**列值 + 整数码双写**，未知码不再静默降级 | 列 `seckill_type` 存 `normal`/`limited_time_sale`，出参同时给源系统的 `activity_type`（1/2）与 `seckill_type_text`。配置台发整数码：只认 1/2，其余（如 7）现在报 400「只支持 normal/limited_time_sale」而不是悄悄建成普通秒杀。`limited_time_sale` 17 个字符，建表时的 `VARCHAR(16)` 装不下 → schema 末尾追加放宽到 `VARCHAR(32)`（H2 与 MySQL 同一语句可跑）。 |
+| C127 | 重放的是**渠道回调**，不是再调一次 PAY-2 | `PAY-2` 对已付单回 422「订单已支付」是正确行为，冒烟要验"结清不双计"得往 `/api/notify/wxpay` 再发一条同 `out_trade_no` 的报文：应答仍是 `SUCCESS`（渠道要 ack），而 `hold_store→sales_store` 那条 CAS 第二次拿 0 行、销量与成交额一动不动。 |
+| C128 | 失败团**保留已付成员行**，只改团状态 | 判团失败把 `team_status` 置 3、未付成员删行回补额度，但**已付成员行留着**做对账与退款依据；机器人行 `user_id<0` 不进退款名单。`GroupsSettleJob` 再跑一轮既不复活也不重复退钱（e2e 第 20 例与实跑第 10 节同口径）。 |
+| C129 | 拼团的两条限购判据分开，且"一件一席位" | ①「同一活动只允许一笔待成团单」只数**进行中团里的未付成员行**（`countUnpaidInAct`），失败团与已成团不算；②`limit_buy_num` 数的是"失败团以外"的参团次数（已付 + 在途都算，`countJoinedInAct`），堵住反复下单占位；③拼团单一次只能拍 1 件（`num>1` 直接 422），因为一个席位对应一件货。 |
+| C130 | 「未成团不得发货」是发货卡口，不是订单状态 | D26 的落点：结清即 `PAYED`，`canShip` 只在 `team_status=2` 放行，否则 422「拼团尚未成团」。后台 `end=true` 只砸进行中的团（`transit(1→3)` 的 CAS），已成团的团与单都不动。 |
+| C131 | 机器人凑团的窗口是**提前量**，不是绝对时刻 | `listNearEndForRobot(now, horizon)` 的判据是 `now < end_time <= now + horizon`（源系统 600 秒）。本轮实测把 `horizon` 当绝对时刻写进 SQL（`end_time <= #{horizon}`），结果 `runNow()` 永远返回 0——机器人一次也没补过团。机器人占席位（`join_person_num`/`robot_num += lack`）但**不占活动额度**，所以"额度 = 满额 − 仍被占住的席位"这条不变式只对 `robot=false` 的活动成立。 |
+| C132 | ORDER-5 详情补 `team_id` | 参团页与「我的团」都要从订单详情跳回团，`OrdersMapper` 的列清单里早有这一列（D29 落主表），只是出参没装配——冒烟脚本 `KeyError: 'team_id'` 暴露。非拼团单回 `null`（`default-property-inclusion: always` 保证键位在）。契约字段集同步进 `OrderContract.ORDER_INFO`。 |
+
+### 16.2 与源系统的差异续编（D 系列，追加于 §15.2 之后）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D34 | 拼团额度与商品库存同一套 CAS 语义 | `promotion_groups_activity.store` 走 `deductStore`（`WHERE store >= #{num}`）/`restoreStore` 两条条件更新，取消、超时关单、成团失败三处都只按**已占件数**回补。源系统在团失败里直接改商品表，回补路径没有守卫，并发下能把额度加回去两次。 |
+| D35 | 团行不快照"成团人数" | `joinSeat(teamId, personNum)` 的人数由调用方读活动后传入，改活动人数即时作用于新加入者。源系统把 `person_num` 抄进团行，改配置还得回刷历史团，漏刷就出现"团里人数上限与活动不一致"。 |
+| D36 | 失败团退款复用 M1-1 链路 | 结算侧不另造退款通道：`AftersalesService.apply(ONLY_REFUND, autoApprove=true)` + `RefundService.checkRefund(checkRefund=1)`，全程走 M1-1 的闸门与幂等，订单 `pay_status` 最终 `REFUND`。因"仅退款不补库存"是 M1-1 的既定口径，拼团失败是系统原因，所以结算侧**显式**回补 `items.store` 与活动 `store`。退款失败只记日志不回滚团状态——团已判死，钱由售后面的重试与对账兜。 |
+| D37 | 机器人成员用负数 `user_id` | 源系统用 0，而本项目 `(team_id, user_id)` 唯一索引（D25 的一部分）下 0 只能坐一行，凑不齐 `person_num-1` 个空位。改成 `-(team.id*100 + 序号)`，出参按 `user_id < 0` 报"虚拟成员"，昵称固定"虚拟成团"。 |
+| D38 | 秒杀资格票 = `auto_cancel_time` | D24 的落地细节：建单时写 `min(now + validity_period*60, 活动结束)`，超时关单顺带释放 `hold_store`；`SeckillSettleJob` 只处理"单已不在 `NOTPAY` 而 `hold_store` 仍占着"的悬空占用（`listOrphanHold` 逐行比对订单态），Redis 票池与延迟任务都不需要。 |
+
+### 16.3 实跑冒烟
+
+`tools/m13_skgrp_smoke.py`（#57：秒杀 SK-A1..A7 / SK-F1..F2 + 拼团 GP-A1..A6 / GP-F1..F4 + 活动单算价，**69 项**）同样设计成可重复跑：进场按 `SG<时间戳>` 前缀停用上一轮残留的场次与活动（两侧都没有删除口，停用即归档），待付款残单按**基线差值**断言，收口把本案两个场次全部停用并断言"算价链回到 seed 态（全场折让 0）"。同库连跑两遍 69/69 全绿；清库后九脚本顺序回归见 docs/05 的 #57 验收段。
+
+本轮顺手改了一处邻居脚本的不变式：`tools/m07_smoke.py` 的收尾原来断言"会员待付款单必须为 0"，而常驻演示库里 m11/m12 各自刻意留着在途单（与 §15.3、D21 同一族的"全局归零式断言只能单跑成立"），改成进场记基线、退场回到基线。**余额不足**那类绝对值断言仍按 m07 docstring 的干净库口径，不在本轮放宽。
+

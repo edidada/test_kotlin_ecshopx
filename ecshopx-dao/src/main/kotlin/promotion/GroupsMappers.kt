@@ -127,6 +127,14 @@ interface GroupsActivityMapper {
     @Select("SELECT $GA_COLS FROM promotion_groups_activity WHERE groups_activity_id = #{id} AND company_id = #{companyId}")
     fun findById(@Param("id") id: Long, @Param("companyId") companyId: Long): GroupsActivityDO?
 
+    /**
+     * 定时结算用：不带租户过滤按活动 id 取。
+     * 团是跨租户扫出来的（`listDue`/`listNearEndForRobot` 只有 act_id），
+     * 回填租户再查一次等于把"活动不存在"变成"查不到租户"，反而更难判断。
+     */
+    @Select("SELECT $GA_COLS FROM promotion_groups_activity WHERE groups_activity_id = #{id}")
+    fun findAnyById(@Param("id") id: Long): GroupsActivityDO?
+
     @Update(
         "UPDATE promotion_groups_activity SET act_name = #{actName}, goods_id = #{goodsId}, act_price = #{actPrice}, " +
             "person_num = #{personNum}, limit_buy_num = #{limitBuyNum}, limit_time = #{limitTime}, begin_time = #{beginTime}, " +
@@ -166,6 +174,25 @@ interface GroupsActivityMapper {
             "AND begin_time <= #{now} AND end_time >= #{now}",
     )
     fun listRunning(@Param("companyId") companyId: Long, @Param("now") now: Long): List<GroupsActivityDO>
+
+    /**
+     * 下单占库存（CAS）：与商品库存、秒杀池同一套语义 —— 受影响行数 0 就是抢输了。
+     * `store` 是活动总量，成团失败与关单都走 [restoreStore] 回补。
+     */
+    @Update("UPDATE promotion_groups_activity SET store = store - #{num} WHERE groups_activity_id = #{id} AND company_id = #{companyId} AND store >= #{num}")
+    fun deductStore(
+        @Param("id") id: Long,
+        @Param("companyId") companyId: Long,
+        @Param("num") num: Long,
+    ): Int
+
+    /** 回补（取消/关单/成团失败）。`store < 原总量` 的钳制由"只按已占件数回"在服务层保证 */
+    @Update("UPDATE promotion_groups_activity SET store = store + #{num} WHERE groups_activity_id = #{id} AND company_id = #{companyId}")
+    fun restoreStore(
+        @Param("id") id: Long,
+        @Param("companyId") companyId: Long,
+        @Param("num") num: Long,
+    ): Int
 }
 
 @Mapper
@@ -251,12 +278,14 @@ interface GroupsTeamMapper {
         @Param("limit") limit: Int,
     ): List<GroupsTeamDO>
 
-    /** 临近结束且允许机器人的团（第二条腿）：`horizon` 是给定的时间窗上限（源系统 600 秒） */
+    /** 临近结束且允许机器人的团（第二条腿）：窗口是 `now < end_time <= now + horizon`，
+     *  `horizon` 是**提前量**（秒）不是绝对时刻，直接和 `end_time` 比会一条也扫不出来 */
     @Select(
         "SELECT t.id, t.team_id, t.act_id, t.head_user_id, t.join_person_num, t.team_status, t.begin_time, " +
             "t.end_time, t.robot_num, t.created FROM promotion_groups_team t " +
             "JOIN promotion_groups_activity a ON a.groups_activity_id = t.act_id " +
-            "WHERE t.team_status = 1 AND t.end_time > #{now} AND t.end_time <= #{horizon} AND a.robot = TRUE AND a.disabled = FALSE " +
+            "WHERE t.team_status = 1 AND t.end_time > #{now} AND t.end_time <= #{now} + #{horizon} " +
+            "AND a.robot = TRUE AND a.disabled = FALSE " +
             "ORDER BY t.id LIMIT #{limit}",
     )
     fun listNearEndForRobot(
@@ -318,4 +347,31 @@ interface GroupsMemberMapper {
 
     @Select("SELECT $GM_COLS FROM promotion_groups_team_member WHERE order_id = #{orderId} LIMIT 1")
     fun findByOrder(@Param("orderId") orderId: String): GroupsMemberDO?
+
+    /**
+     * 本人在该活动下的**在途未付**参团行数（源系统同口径："同一会员同一活动只允许一笔待成团订单"）。
+     * 只看进行中的团：失败团由结算清理，成功团的成员已付，本来就不算"待成团"。
+     */
+    @Select(
+        "SELECT COUNT(*) FROM promotion_groups_team_member m JOIN promotion_groups_team t ON t.team_id = m.team_id " +
+            "WHERE t.act_id = #{actId} AND m.user_id = #{userId} AND m.paid = FALSE AND t.team_status = 1",
+    )
+    fun countUnpaidInAct(
+        @Param("actId") actId: Long,
+        @Param("userId") userId: Long,
+    ): Long
+
+    /** 限购口径：本人在该活动下"失败团以外"的参团次数（已付 + 在途都算，堵住反复下单） */
+    @Select(
+        "SELECT COUNT(*) FROM promotion_groups_team_member m JOIN promotion_groups_team t ON t.team_id = m.team_id " +
+            "WHERE t.act_id = #{actId} AND m.user_id = #{userId} AND t.team_status <> 3",
+    )
+    fun countJoinedInAct(
+        @Param("actId") actId: Long,
+        @Param("userId") userId: Long,
+    ): Long
+
+    /** 团里已付的真人成员（发货卡口与"团内还差谁"都用它） */
+    @Select("SELECT COUNT(*) FROM promotion_groups_team_member WHERE team_id = #{teamId} AND user_id > 0")
+    fun countHumans(@Param("teamId") teamId: String): Long
 }

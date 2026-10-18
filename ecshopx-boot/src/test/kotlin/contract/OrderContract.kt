@@ -40,7 +40,7 @@ object OrderContract {
         "fee_type", "fee_rate", "fee_symbol", "auto_cancel_time", "auto_finish_time", "end_time",
         "create_time", "update_time", "type", "order_class", "order_source", "salesman_id",
         "distributor_id", "shop_id", "delivery_corp", "delivery_code", "delivery_img", "delivery_time",
-        "is_rate",
+        "is_rate", "team_id",
     )
 
     /** ORDER-5 items[] 全列 */

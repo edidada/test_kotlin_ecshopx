@@ -27,7 +27,7 @@ interface OrdersMapper {
             "pay_type, pay_channel, receipt_type, ziti_code, ziti_status, invoice, is_invoiced, invoice_status, " +
             "auto_cancel_time, auto_finish_time, end_time, delivery_time, delivery_corp, delivery_code, " +
             "receiver_name, receiver_mobile, receiver_state, receiver_city, receiver_district, receiver_address, " +
-            "is_rate, left_aftersales_num, source_from, is_online_order, remark, created, updated"
+            "is_rate, left_aftersales_num, source_from, is_online_order, remark, team_id, created, updated"
 
         /** 前台与后台共用的筛选字典（键缺省即不启用；status 三态在服务层归一化） */
         const val WHERE = """
@@ -68,7 +68,7 @@ interface OrdersMapper {
             "pay_type, pay_channel, receipt_type, ziti_code, ziti_status, invoice, is_invoiced, invoice_status, " +
             "auto_cancel_time, auto_finish_time, end_time, delivery_time, delivery_corp, delivery_code, receiver_name, " +
             "receiver_mobile, receiver_state, receiver_city, receiver_district, receiver_address, is_rate, " +
-            "left_aftersales_num, source_from, is_online_order, remark, created, updated) " +
+            "left_aftersales_num, source_from, is_online_order, remark, team_id, created, updated) " +
             "VALUES(#{orderId}, #{title}, #{companyId}, #{shopId}, #{userId}, #{actId}, #{mobile}, #{orderClass}, " +
             "#{orderType}, #{orderStatus}, #{payStatus}, #{deliveryStatus}, #{cancelStatus}, #{orderSource}, #{orderHolder}, #{orderFrom}, " +
             "#{itemFee}, #{totalFee}, #{marketFee}, #{costFee}, #{commissionFee}, #{freightFee}, #{discountFee}, #{memberDiscount}, " +
@@ -77,7 +77,7 @@ interface OrdersMapper {
             "#{payType}, #{payChannel}, #{receiptType}, #{zitiCode}, #{zitiStatus}, #{invoice}, #{isInvoiced}, #{invoiceStatus}, " +
             "#{autoCancelTime}, #{autoFinishTime}, #{endTime}, #{deliveryTime}, #{deliveryCorp}, #{deliveryCode}, #{receiverName}, " +
             "#{receiverMobile}, #{receiverState}, #{receiverCity}, #{receiverDistrict}, #{receiverAddress}, #{isRate}, " +
-            "#{leftAftersalesNum}, #{sourceFrom}, #{isOnlineOrder}, #{remark}, #{created}, #{updated})",
+            "#{leftAftersalesNum}, #{sourceFrom}, #{isOnlineOrder}, #{remark}, #{teamId}, #{created}, #{updated})",
     )
     fun insert(o: NormalOrderDO): Int
 

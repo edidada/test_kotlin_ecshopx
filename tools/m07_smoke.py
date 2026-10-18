@@ -137,6 +137,10 @@ if TIMEOUT_ONLY:
 
 # ===== 1. PAY-1 支付参数与账户基线 =====
 s0 = store(atok)                      # 建单前先取基线，建单本身已扣 1 件
+# 待付款残单同样按**基线差值**判：演示库是常驻的，m11 等脚本跑完会留下自己的在途单，
+# 断言"必须为 0"会把邻居的残留算到本案头上（实测：第二轮回归就是这么红的）
+base_notpay = data("GET", "/api/h5app/wxapp/orders?order_status=notpay&page=1&pageSize=50",
+                   token=mtok)["total_count"]
 o0 = create(mtok)
 c = cfg(o0, mtok)
 check("PAY-1 出参键位（16 键，多一少一都算破契约）",
@@ -293,7 +297,8 @@ sold += 1
 data("POST", "/api/h5app/wxapp/order/cancel", {"order_id": oBig, "cancel_reason": "清理"}, mtok)
 data("POST", "/api/h5app/wxapp/order/cancel", {"order_id": oOff, "cancel_reason": "清理"}, mtok)
 left = data("GET", "/api/h5app/wxapp/orders?order_status=notpay&page=1&pageSize=50", token=mtok)
-check("清理后本人无待付款残单", left["total_count"] == 0, left["total_count"])
+check("清理后没给会员多留待付款残单（基线 %d）" % base_notpay,
+      left["total_count"] == base_notpay, (base_notpay, left["total_count"]))
 check("库存 = 基线 - 已结清件数（取消全部回补）", store(atok) == s0 - sold, (store(atok), s0, sold))
 
 print("\n[%s] 通过 %d/%d" % (RUN, sum(ok), len(ok)))

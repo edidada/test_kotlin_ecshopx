@@ -1,17 +1,20 @@
 package com.ecshopx.kotlin.service.cart
 
+import com.ecshopx.kotlin.common.domain.OrderClass
 import com.ecshopx.kotlin.dao.promotion.MarketingBound
+import com.ecshopx.kotlin.service.promotion.ActivityOffer
 import com.ecshopx.kotlin.service.promotion.CouponCheck
 import com.ecshopx.kotlin.service.promotion.MarketingOffer
 import com.ecshopx.kotlin.service.promotion.MarketingStep
+import com.ecshopx.kotlin.service.promotion.yuan
 import org.springframework.stereotype.Component
 
 /**
- * 算价责任链（详细设计 §7 + docs/04 §14.5）。M1-3 挂七档：
+ * 算价责任链（详细设计 §7 + docs/04 §14.5）。M1-3 挂八档：
  *
  * ```
  * 10 Grouping        店铺分组
- * 15 (预留) ActivityPrice  秒杀/拼团活动价 —— 改 price 基准，M1-3 #57 落地
+ * 15 ActivityPrice   秒杀/拼团活动价 —— 改 price 基准（D24/D25，让利不进 discountFee）
  * 20 MemberDiscount  会员等级折让
  * 30 FullReduction   满减 / 满折（+ 命中包邮标记）
  * 40 Coupon          优惠券抵扣（单店铺组）
@@ -25,7 +28,7 @@ import org.springframework.stereotype.Component
  * 跨节点依赖只允许"读更小 order 写过的字段"，所以 `now`、活动、券、积分余额
  * 全部由 `CartService.buildContext` 预取进 ctx。
  *
- * 金额口径（§14.5）：`行应付 = 行小计 − 活动折让 − 券抵扣 − 积分抵扣`，
+ * 金额口径（§14.5）：`行小计 = 活动价 × 件数`、`行应付 = 行小计 − 活动折让(会员/满减) − 券抵扣 − 积分抵扣`，
  * 三类抵扣都**逐行分摊**（D28），于是 `Σ行 = Σ组 = 单` 恒成立，售后按件退才不会重复退抵扣。
  */
 @Component
@@ -61,6 +64,86 @@ class GroupingRule : PriceRule {
     override val order = 10
     override fun apply(ctx: PriceContext) {
         if (ctx.groups.isEmpty()) ctx.groups.addAll(PriceContext.groupByShop(ctx.lines))
+    }
+}
+
+/**
+ * 秒杀 / 拼团活动价（order 15，docs/04 §14.5 + D24/D25）。
+ *
+ * 它是链路上**唯一改单价基准**的节点，所以排在会员折让之前：会员折、满减、券、积分
+ * 全部按活动价之后的应付计算（"秒杀价再打会员折"是源系统的实际行为，也是用户的预期）。
+ *
+ * 四条口径：
+ *  1. **只命中申报了活动的行**：`activity_type='normal'` 或 `activity_id<=0` 的行一律不动。
+ *     秒杀/拼团入口在活动页，加购与下单必须带 `activity_type/activity_id`（CART-1 早已接收），
+ *     静默套用等于把秒杀当满减用，活动池会被普通单吃光；
+ *  2. **让利记在 [PriceLine.activityPriceFee]，不进 `discountFee`**：`price` 已被换成活动价，
+ *     `itemFee` 就是活动后的金额，再抵一次会减两遍并破坏 `Σ行+运费==单` 的守恒断言；
+ *  3. **活动价不低于现价时不改价**（[ActivityOffer.covers]），但仍把 offer 挂到行上 ——
+ *     占池、限购、成团这些动作看的是"这行属于哪场活动"，不是"便宜了多少"；
+ *  4. **申报了活动却查不到 offer = 活动已结束/商品不在场次里**，这里只留 `activityOffer=null`，
+ *     由下单侧（`OrderCreateService`）拒单。预览阶段照常出个原价，
+ *     用户在结算页看到的就是"这单不再享受活动价"。
+ *
+ * 池子余量（[ActivityOffer.available]）在这里**只做展示不做卡口**：
+ * 与 M0-6 商品库存同构 —— 预览永远给价，真抢在下单时用 CAS 定生死（0 行 = 422）。
+ * 预览若跟着余量变价，同一 ctx 跑两次就可能不等，M0-5 的属性测试会先失败。
+ */
+@Component
+class ActivityPriceRule : PriceRule {
+    override val order = 15
+
+    override fun apply(ctx: PriceContext) {
+        if (ctx.activityOffers.isEmpty()) return
+        val byKey = ctx.activityOffers.associateBy { Triple(it.activityType, it.activityId, it.itemId) }
+        ctx.groups.forEach { g ->
+            // 未勾选的行不换价：CART-2 的未勾选行按现价展示，勾选后重新算价自然出活动价
+            val hit = g.checkedLines.mapNotNull { l ->
+                byKey[Triple(l.activityType, l.activityId, l.itemId)]?.let { l to it }
+            }
+            if (hit.isEmpty()) return@forEach
+            hit.forEach { (l, o) ->
+                l.activityOffer = o
+                if (o.covers()) {
+                    l.activityPriceFee = (o.originPrice - o.activityPrice) * l.num
+                    l.price = o.activityPrice
+                    l.activityInfo = l.activityInfo + lineRow(o, l.activityPriceFee)
+                }
+            }
+            g.activityPriceFee = g.checkedLines.sumOf { it.activityPriceFee }
+            // 一店一组通常一活动；同活动多行合成一行，跨活动分行列（type 不同必须分开说）
+            g.activityPriceRows = hit.map { it.second }
+                .distinctBy { it.activityType to it.activityId }
+                .mapNotNull { o ->
+                    val fee = g.checkedLines.filter { it.activityOffer === o }.sumOf { it.activityPriceFee }
+                    if (fee <= 0) null else groupRow(o, fee)
+                }
+        }
+    }
+
+    private fun lineRow(o: ActivityOffer, fee: Long): Map<String, Any?> = linkedMapOf(
+        "id" to o.activityId,
+        "type" to o.activityType,
+        "name" to o.activityName,
+        "rule" to ruleText(o),
+        "discount_fee" to fee,
+        "activity_price" to o.activityPrice,
+        "origin_price" to o.originPrice,
+    )
+
+    private fun groupRow(o: ActivityOffer, fee: Long): Map<String, Any?> = linkedMapOf(
+        "id" to o.activityId,
+        "activity_id" to o.activityId,
+        "type" to o.activityType,
+        "name" to o.activityName,
+        "rule" to ruleText(o),
+        "discount_fee" to fee,
+    )
+
+    /** 活动力度文案：秒杀说"限时抢购"，拼团说清几人团（前台 `discount_info[].rule` 要看懂省在哪） */
+    private fun ruleText(o: ActivityOffer): String {
+        val price = "现价 ${yuan(o.originPrice)} 元，活动价 ${yuan(o.activityPrice)} 元"
+        return if (o.activityType == OrderClass.GROUPS && o.personNum > 0) "${o.personNum}人团，$price" else "限时秒杀，$price"
     }
 }
 

@@ -281,6 +281,8 @@ class OrderQueryService(
         "order_source" to o.orderSource,
         "order_holder" to o.orderHolder,
         "order_from" to o.orderFrom,
+        // 拼团单挂团号（D29）：参团页与"我的团"都要从订单详情跳回团，非拼团单为 null
+        "team_id" to o.teamId,
         "item_fee" to o.itemFee,
         "market_fee" to o.marketFee,
         "cost_fee" to o.costFee,

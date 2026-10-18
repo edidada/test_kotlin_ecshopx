@@ -37,6 +37,7 @@ import org.springframework.stereotype.Service
 class MarketingService(
     private val acts: MarketingActivityMapper,
     private val items: MarketingItemsMapper,
+    private val seckill: SeckillService,
     private val db: Db,
     private val mapper: ObjectMapper,
 ) {
@@ -263,15 +264,19 @@ class MarketingService(
 
     /**
      * MK-F3 单商品可享的全部营销（商详页角标）。
-     * 秒杀价属 #57，这里先返回满减/满折部分并保持 `seckill` 键位为 null。
+     *
+     * 满减/满折与秒杀在这里合成一次应答：`marketing[]` 是"满 X 减 Y"那一类，
+     * `seckill` 是"此刻的活动价"那一类（null=不在秒杀里）。两者判据各自与算价链同源
+     * （§14.5 的 30 与 15），所以角标上写着的价，结算一定给得起。
      */
     fun itemPromotions(
         companyId: Long,
         itemId: Long,
     ): Map<String, Any?> {
         val now = TimeSec.now()
+        val sec = seckill.itemOffer(companyId, itemId)
         val all = acts.listPricable(companyId, now, MarketingType.PRICABLE)
-        if (all.isEmpty()) return linkedMapOf("item_id" to itemId, "marketing" to emptyList<Map<String, Any?>>(), "tags" to emptyList<String>(), "seckill" to null)
+        if (all.isEmpty()) return linkedMapOf("item_id" to itemId, "marketing" to emptyList<Map<String, Any?>>(), "tags" to emptyList<String>(), "seckill" to sec)
         val hitIds = items.listHit(all.map { it.marketingId }, listOf(itemId)).map { it.marketingId }.toSet()
         val hits = all.mapNotNull { a ->
             val o = MarketingRuleParser.parse(a, mapper, hitIds)
@@ -281,8 +286,8 @@ class MarketingService(
             "item_id" to itemId,
             "marketing" to hits.map { frontRow(it.first) },
             "tags" to hits.mapNotNull { it.first.promotionTag }.distinct(),
-            // 秒杀价属 #57：键位先给前台占住，角标组件不用二次改造
-            "seckill" to null,
+            // 秒杀价：与 §14.5 order 15 同判据，前台角标与结算价不会分叉
+            "seckill" to sec,
         )
     }
 

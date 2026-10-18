@@ -14,8 +14,21 @@ import com.fasterxml.jackson.databind.annotation.JsonNaming
 data class OrderCreateForm(
     /** cart（读车内勾选项）/ fastbuy / offline */
     val cartType: String? = null,
-    /** M0 只支持 normal；service/groups/seckill 属 P1/P2 */
+    /** M0 只支持 normal；service/groups/seckill 一律 501（守卫不动） */
     val orderType: String? = null,
+    /**
+     * M1-3 活动单类目（docs/04 §14.3）：`normal`/`seckill`/`groups`。
+     *
+     * 与 `order_type` 是两件事：`order_type` 是"订单业务形态"（normal/service…），
+     * `order_class` 是"这单属于哪个活动域"，两者在源系统就是两列，本项目不合并。
+     * 缺省按 `normal`；非法值不报错（[com.ecshopx.kotlin.common.domain.OrderClass.normalize] 归一），
+     * 与 ORDER-1 同一口径 —— 前台传错类目不该把结算打断，按普通单算就行。
+     */
+    val orderClass: String? = null,
+    /** 活动 id：`order_class=seckill` 时是 `seckill_id`，`groups` 时是 `groups_activity_id` */
+    val actId: Long? = null,
+    /** 参团时带上团号；不传=自己开新团（仅 `order_class=groups` 有意义） */
+    val teamId: String? = null,
     val items: List<CartItemNum>? = null,
     val itemId: Long? = null,
     val itemNum: Long? = null,

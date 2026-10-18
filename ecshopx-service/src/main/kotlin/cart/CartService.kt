@@ -2,6 +2,7 @@ package com.ecshopx.kotlin.service.cart
 
 import com.ecshopx.kotlin.common.api.BizException
 import com.ecshopx.kotlin.common.api.ErrorCode
+import com.ecshopx.kotlin.common.domain.OrderClass
 import com.ecshopx.kotlin.common.domain.TimeSec
 import com.ecshopx.kotlin.dao.auth.MemberGradeDO
 import com.ecshopx.kotlin.dao.auth.MembersGradeMapper
@@ -22,6 +23,9 @@ import com.ecshopx.kotlin.dao.promotion.MarketingType
 import com.ecshopx.kotlin.dao.tenant.CompanyMapper
 import com.ecshopx.kotlin.dao.tenant.DistributorShopMapper
 import com.ecshopx.kotlin.dao.tenant.ShopProfileDO
+import com.ecshopx.kotlin.service.promotion.ActivityLineKey
+import com.ecshopx.kotlin.service.promotion.ActivityOffer
+import com.ecshopx.kotlin.service.promotion.ActivityOfferService
 import com.ecshopx.kotlin.service.promotion.CouponCheck
 import com.ecshopx.kotlin.service.promotion.CouponService
 import com.ecshopx.kotlin.service.promotion.MarketingOffer
@@ -56,6 +60,7 @@ class CartService(
     private val points: PointMapper,
     private val configs: SysConfigMapper,
     private val coupons: CouponService,
+    private val activityOfferService: ActivityOfferService,
     private val engine: MarketingEngine,
     private val db: Db,
     private val mapper: ObjectMapper,
@@ -105,6 +110,13 @@ class CartService(
         val activityDiscount: Long get() = (discountFee - memberDiscount).coerceAtLeast(0L)
         val couponDiscount: Long get() = ctx.couponDiscount
         val pointFee: Long get() = ctx.totalPointFee
+        /**
+         * 秒杀/拼团让利（§14.5 order 15）：**不在 [discountFee] 里**。
+         * 活动价已经改写进 `price`，这笔钱只用于出参展示与优惠快照，
+         * 绝不能再减一次（否则 `Σ行+运费==单` 的守恒当场破）。
+         */
+        val activityPriceFee: Long get() = ctx.groups.sumOf { it.activityPriceFee }
+        val activityPriceRows: List<Map<String, Any?>> get() = ctx.groups.flatMap { it.activityPriceRows }
         val couponInfo: List<Map<String, Any?>> get() = ctx.groups.flatMap { it.couponInfo }
         val usedActivity: List<Map<String, Any?>> get() = ctx.groups.flatMap { it.usedActivity }
         val totalFee: Long get() = ctx.totalPayFee()
@@ -148,7 +160,10 @@ class CartService(
             quote(
                 userId, companyId,
                 pendings = if (form.cartType == "fastbuy" || form.cartType == "offline")
-                    fromEntries(form.entries(), userId, companyId)
+                    fromEntries(
+                        form.entries(), userId, companyId,
+                        activityType = OrderClass.normalize(form.orderClass), activityId = form.actId ?: 0,
+                    )
                 else fromCart(userId, companyId, firstNonZero(form.shopId, form.distributorId)),
                 couponCode = form.couponCode,
                 usePoint = form.pointUse == true,
@@ -160,8 +175,16 @@ class CartService(
         quote(userId, companyId, fromCart(userId, companyId, shopId).filter { it.checked }, couponCode, usePoint)
 
     /** fastbuy/直购 → Quote */
-    fun quoteFromEntries(userId: Long, companyId: Long, entries: List<CartItemNum>, couponCode: String?, usePoint: Boolean): Quote =
-        quote(userId, companyId, fromEntries(entries, userId, companyId), couponCode, usePoint)
+    fun quoteFromEntries(
+        userId: Long,
+        companyId: Long,
+        entries: List<CartItemNum>,
+        couponCode: String?,
+        usePoint: Boolean,
+        activityType: String = OrderClass.NORMAL,
+        activityId: Long = 0,
+    ): Quote =
+        quote(userId, companyId, fromEntries(entries, userId, companyId, activityType, activityId), couponCode, usePoint)
 
     private fun quote(userId: Long, companyId: Long, pendings: List<Pending>, couponCode: String?, usePoint: Boolean): Quote {
         val valid = pendings.filter { it.valid }
@@ -215,7 +238,26 @@ class CartService(
             coupon = coupon,
             couponReason = couponReason,
             pointRatio = if (usePoint) pointRatio(companyId) else 0,
+            activityOffers = activityOffersOf(companyId, userId, lines, now),
         )
+    }
+
+    /**
+     * 秒杀/拼团活动价预取（§14.5 order 15 的取数腿）。
+     *
+     * 只把**申报了活动**的行交给预取（`activity_type` 不是 `normal` 且 `activity_id>0`）：
+     * 普通车行不该因为库里有一场秒杀就变价（口径 [ActivityOfferService] 第 1 条）。
+     * 一次批量取，规则链拿到的仍是纯数据。
+     */
+    private fun activityOffersOf(
+        companyId: Long,
+        userId: Long,
+        lines: List<PriceLine>,
+        now: Long,
+    ): List<ActivityOffer> {
+        val keys = lines.filter { it.activityType in ACTIVITY_CLASSES && it.activityId > 0 }
+            .map { ActivityLineKey(it.activityType, it.activityId, it.itemId, it.goodsId, it.price) }
+        return if (keys.isEmpty()) emptyList() else activityOfferService.offers(companyId, userId, keys, now)
     }
 
     /**
@@ -278,7 +320,19 @@ class CartService(
         }
     }
 
-    private fun fromEntries(entries: List<CartItemNum>, userId: Long, companyId: Long): List<Pending> {
+    /**
+     * 直购行（fastbuy / ORDER-2 的 `items[]`）。
+     *
+     * 秒杀/拼团入口永远是一批同活动的行（活动页「马上抢」），所以活动标识按整批下发；
+     * 车内行不是这样 —— [fromCart] 逐行读 `orders_cart.activity_type/activity_id`（CART-1 加购时就落库）。
+     */
+    private fun fromEntries(
+        entries: List<CartItemNum>,
+        userId: Long,
+        companyId: Long,
+        activityType: String = OrderClass.NORMAL,
+        activityId: Long = 0,
+    ): List<Pending> {
         val list = entries.filter { (it.itemId ?: 0) > 0 }
         if (list.isEmpty()) return emptyList()
         val itemById = loadItems(list.map { it.itemId!! })
@@ -287,7 +341,7 @@ class CartService(
             val shopId = item?.distributorId ?: 0
             Pending(
                 0, userId, companyId, e.itemId!!, item?.itemName ?: "", shopId,
-                if (shopId > 0) "distributor" else "shop", "normal", 0, null,
+                if (shopId > 0) "distributor" else "shop", activityType, activityId, null,
                 item?.price ?: 0, e.num ?: 1, true, false, item,
             )
         }
@@ -421,6 +475,8 @@ class CartService(
             "cart_total_num" to 0L,
             "cart_total_count" to 0,
             "member_discount" to 0L,
+            "activity_price_fee" to 0L,
+            "activity_price_info" to emptyList<Map<String, Any?>>(),
             "coupon_discount" to 0L,
             "coupon_info" to emptyList<Map<String, Any?>>(),
             "point_fee" to 0L,
@@ -443,6 +499,8 @@ class CartService(
             this["cart_total_num"] = g.cartTotalNum
             this["cart_total_count"] = g.cartTotalCount
             this["member_discount"] = g.memberDiscount
+            this["activity_price_fee"] = g.activityPriceFee
+            this["activity_price_info"] = g.activityPriceRows
             this["coupon_discount"] = g.couponDiscount
             this["coupon_info"] = g.couponInfo
             this["point_fee"] = g.pointFee
@@ -532,6 +590,8 @@ class CartService(
             "type" to l.type,
             "grade_name" to q.gradeName(),
             "member_discount" to l.memberDiscount,
+            "activity_price_fee" to l.activityPriceFee,
+            "activity_price_info" to l.activityInfo.filter { e -> ACTIVITY_CLASSES.any { it == e["type"] } },
             "activity_info" to l.activityInfo,
         )
     }
@@ -602,6 +662,7 @@ class CartService(
             "coupon_reason" to couponReason(q),
             "member_discount" to q.memberDiscount,
             "goods_discount" to q.activityDiscount,
+            "activity_price_fee" to q.activityPriceFee,
             "point" to q.valid.sumOf { p -> (p.item?.point ?: 0L) * p.num },
             "point_use" to q.ctx.usePoint,
             "point_fee" to q.pointFee,
@@ -627,8 +688,11 @@ class CartService(
                     "pic" to jsonList(l.pics).firstOrNull(), "num" to l.num, "price" to l.price,
                     "item_fee" to l.itemFee, "total_fee" to l.totalFee,
                     "discount_fee" to l.discountFee, "member_discount" to l.memberDiscount,
+                    "activity_price_fee" to l.activityPriceFee,
+                    "origin_price" to (l.activityOffer?.originPrice ?: l.price),
                     "coupon_fee" to l.couponFee, "point_fee" to l.pointFee,
                     "cart_id" to l.cartId, "is_checked" to l.checked, "store" to l.store,
+                    "activity_type" to l.activityType, "activity_id" to l.activityId,
                     "item_spec_desc" to q.specDescById[l.itemId], "approve_status" to l.approveStatus,
                 )
             },
@@ -645,7 +709,9 @@ class CartService(
      * 不用在 `discount_fee/coupon_discount/point_fee` 三个字段之间自己拼。
      */
     private fun discountInfo(q: Quote): List<Map<String, Any?>> =
-        q.usedActivity.map { a ->
+        q.activityPriceRows.map { a ->
+            linkedMapOf<String, Any?>("type" to a["type"], "rule" to a["rule"], "discount_fee" to a["discount_fee"])
+        } + q.usedActivity.map { a ->
             linkedMapOf<String, Any?>("type" to a["type"], "rule" to a["rule"], "discount_fee" to a["discount_fee"])
         } + q.couponInfo.map { c ->
             linkedMapOf<String, Any?>("type" to "coupon", "rule" to c["rule"], "discount_fee" to c["deduct_fee"])
@@ -683,5 +749,8 @@ class CartService(
     companion object {
         /** 积分抵现上限比例（`sys_config`，company_id=0 是平台默认） */
         private const val KEY_POINT_RATIO = "point.deduct.max_ratio"
+
+        /** 会改单价基准的活动类（§14.5 order 15）：其余 `activity_type` 一律按普通行算价 */
+        private val ACTIVITY_CLASSES = setOf(OrderClass.SECKILL, OrderClass.GROUPS)
     }
 }
