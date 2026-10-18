@@ -960,3 +960,36 @@ schema 末尾追加两条列（第三批落地时一次给全，MySQL/H2 同一�
 | D53 | **提现状态机在 service 判 + 条件更新兜并发**，不给表加"状态机列"或流转日志表 | `transit(id, from, to)` 的 `WHERE status=#{from}` 让"两个人同时点通过"只有一次生效，第二次 0 行→422「该申请已被处理」；非法目标（`applied`）400 走校验面，跨态与终态 422 走业务面——与 §15 券、M1-1 退款那两处一致 |
 | D54 | **`DL-A3` 的 `closed_fee` 只在"实际改到的行数==预览行数"时才给数**，否则给 0 | 先 `closePreview` 取数、再 `closeBatch` 置位是两条语句，并发下预览有数、更新 0 行。出参报预览的钱等于报一笔没发生的结算；`closed_count` 取 `UPDATE` 的受影响行数才是真话 |
 | D55 | **定时结算做成 `@Scheduled` 固定延迟的一个 Job（`CommissionSettleJob`），不还原源系统的 `cron` 表与任务中心** | 与 M0-6 超时关单、M1-3 拼团结算同一条纪律：条件更新 + 可配 `ecx.schedule.*`，测试与冒烟把 initial-delay 拉到 1 小时以免抢跑（`settleDueAll` 与 `runNow()` 给用例直接调）。源系统任务中心的启停/重试/通知一并划 P2 |
+
+## 21. 实现期语义补充（M1-4 第三批 3A：自提点 PL + 取货码核销 WO 落地时确认，追加于 §20 之后，不回改上文）
+
+交付面：`PL-A1..A5` / `PL-F1` / `WO-A1..A2` / `ZT-F1` 九条端点 + §18.6 的建单发码四条闸门、核销四闸门与"核销即完成" + `DS-F2` 追加 `pickup_locations[]` + 权限码 51 `pickup.lists` / 52 `pickup.update` / 53 `order.writeoff`（§18.7）+ 号段 `ziti_code`。新代码落位：`dao/distribution/PickupMappers.kt`、`service/distribution/PickupLocationService.kt`、`service/order/WriteOffService.kt`、`web-admin/PickupAdminController.kt`、`web-front/PickupFrontController.kt`；`OrderCreateService` 在**算价之后、扣库存之前**挂 `zitiPlan()`，`OrdersMapper` 加 `pickup_location_id` 列与一条 CAS `writeOff`。
+
+### 21.1 口径确认（C 系列续编）
+
+| # | 口径 | 实测依据 |
+|---|---|---|
+| C160 | **"这是谁的点"看 `distributor_id`，"谁的单能用这个点"看 `rel_distributor_id`，两列各有各的出口**：后台列表按前者收窄（§18.3 数据权限），前台取点按 `归属本店 OR rel=0 OR rel=本店`。`PL-A2` 不传 `rel` 就是 **0 = 使用方不设限**，所以一家自己没建点的加盟店仍会靠平台通用点成交——§18.6 那条"该店还没有可用自提点"在演示库里几乎走不到 | e2e 用例 1「店铺账号只看得到自己归属的点」+ 用例 5「平台通用点每家都看得到」；冒烟「PL-A2 默认启用；不传 rel 就是 0」+「本店一个点都没建，但全平台通用点那条通路让它成交」 |
+| C161 | **停用闸门数的是"未完结且还可能来取货"**：`ziti_status='false' AND order_status NOT IN ('DONE','CANCEL')`。首版只排 `DONE`，冒烟第二轮当场死——一张**永远不会有货被取走**的取消单把那个点永久锁死，门店再也停不掉 | 生产改动：`PickupMappers.countOpenZitiOrders`；e2e「取消单不拦停用」（先 422 后 200 两段）；冒烟「取消掉那张未付款单之后，它占着的平台通用点也停得下来了」 |
+| C162 | **核销四道闸门的顺序与错误形状**：非自提单 422 → 未付款 422 → 码逐字不符 422 → 已核销 422；**缺字段才 400，空串算"传了但对不上"走 422**；码只 `trim()` 两侧空白（§18.6"不区分前后空格"）。查询面 `WO-A1` 不设付款闸门（输码前总得先看清这一单），但码仍逐字比 | e2e 用例 9「闸门一条条拦」四段 + 用例 8「查询面也逐字比」；冒烟「空串走比对而不是「没传」：422」「缺字段才 400」「码两侧空白算 trim」 |
+| C163 | **防双核靠 `UPDATE` 的受影响行数，不靠先读后判**：`WHERE receipt_type='ziti' AND ziti_status='false'` 回 0 行就是别人已经核过 → 422「该单已核销，请勿重复操作」。两路同时读到 `ziti_status='false'` 是允许的，落地只有一路 | e2e 用例 11（两条线程各发一次，断言 200 恰有一次、库里 `end_time` 只落一次）；冒烟「闸门④：重复核销 422」 |
+| C164 | **核销即完成，一枪三态**：`order_status=DONE` + `delivery_status=DONE`（自提没有发货环节）+ `end_time=now` + **清空 `auto_cancel_time`/`auto_finish_time`** + `syncAssoc` + `orders_operate_logs(behavior='writeoff', operator_role='seller')`。两个自动时间必须清空，否则定时器会去动一张已完成的单 | e2e 用例 10（状态/时间/清空/关联/留痕五段）；冒烟「两个自动时间清空」「`end_time` 落在核销这一刻」「会员侧文案变「已失效」」 |
+| C165 | **单上不存取货点快照，只存 `pickup_location_id`**：核销页与会员码页读的都是点的**现值**（改了门牌显示新门牌），**停用中的点也照样读得到**并如实回 `status=0`。历史单的"我在哪儿取的钱"不能被一次停用抹掉 | e2e 用例 15；冒烟「核销页显示的是改后的地址，不是建单那一刻的」「历史单的取货地址不能被「停用」抹掉」 |
+| C166 | **码是建单那一刻发出去、存下来的**：`"%06d".format(seq.next(ZITI_CODE) % 1_000_000)`（号段值取末 6 位，非随机、可回溯），同一秒内两单靠号段游标分开；再建一单也不回改上一单的码。`seq_generator` 缺 `ziti_code` 那一行时 `SeqGenerator` 的 `check(touched==1)` 直接抛异常 → 建单 500 而不是 4xx，**所以 schema 必须 `INSERT IGNORE` 那一行** | e2e 用例 6「两单两张码」「码是存下来的」；冒烟「建单即发码：6 位数字」（清 `data/` 冷启动验到 `ziti_code` 行自动补齐） |
+| C167 | **权限码判在归属之前**（§18.7 给店铺运营岗只配 51 `pickup.lists` + 53 `order.writeoff`）：建/改/停/挂店一律 **403**，不是"先试归属再报 404"；而**数据权限越界在引用面仍是 404**（店铺账号查别人店的自提单）。两条线互不替代（C145/C146 在点面上复现） | e2e 用例 2/3/14；冒烟「连建自己店的点也是 403：权限码判在归属之前」「别人店的单：店铺账号 404（不是 403）」 |
+| C168 | **`shop_name` 是 JOIN 出来的展示列，但必须进 `PL-A2/A3` 的单行出参**：DO 没有这一列，`viewOf` 回查店名补上；平台通用点（`distributor_id=0`）回**空串而不是 null**（列表与单行同一渲染位）。另：H2 里 JOIN 别名**必须写 snake**（`d.name AS shop_name`），驼峰别名会被 `DATABASE_TO_LOWER` 整段小写丢弃 → 永远读不到值 | e2e 用例 1「demo 旗舰店 JOIN 出来」；冒烟「PL-A2 出参形状与列表一致」+「seed 追加的两条演示点在常驻库里真的存在」（别名写错时这一条就是空串） |
+| C169 | **会员侧的判据是"人的归属"，不是数据权限**：`ZT-F1` 按 `user_id` 认，不是本人的单 404（不给"这单存在"）、未登录 401 `Unauthenticated.`、非自提单 422；会员面给自己看码时电话**不掩码**（他打的就是这个号），而 `PL-F1` 匿名面一律掩码（前 3 后 4）、`distance` 只在传了坐标时出数（**没传也保留键**：Jackson 未配 `NON_NULL`） | e2e 用例 7/5；冒烟「会员面给自己看码：电话不掩码」「前台电话一律掩码（前 3 后 4）」「传坐标才出 distance」 |
+| C170 | **`@Audited` 的路由名就是权限码字符串**（`pickup.update` / `order.writeoff`），落 `operator_logs.route_name`（列名不是 `route`）；`SUP-4` 的 `keyword` 筛的正是 `route_name LIKE`，冒烟因此能用**差值**证明"这一轮留了痕" | 冒烟「审计：本轮的写路径都留了痕」「审计行里能看到这条路由是哪个账号写的」；e2e 用例 14 直接 SQL 断 `route_name IN (…) >= 5` |
+| C171 | **建单的四条自提闸门排在扣库存之前**：店铺存在 → `is_ziti` → 营业态（`is_valid='true'` 且过审）→ 点可用（显式选点走 `requireUsable`，未选走 `defaultFor`）。被拒的每一次**分毫不动库存池**，与取消回补共用 `StockPool` 那一条腿 | 冒烟「未开自提的店走 ziti → 422」+「闸门在扣库存之前：这一拒分毫没动池子」+「取消回补同一条腿」；e2e 用例 6「选了一个不属于这家店、也不通用的点 → 422」 |
+
+### 21.2 与源系统的差异（D 系列续编）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D56 | **自提单的运费没有做 0 化**（已知未做，不是实测口径）：源系统 `receipt_type='ziti'` 的 `freight` 恒 0，本项目仍按模板算运费并计入 `total_fee` | 算价链在 M0-5 收口成唯一 `quote`，运费在 `PriceContext` 里与营销减免有叠加顺序；本轮只在建单侧加自提闸门、没动算价侧。**验证方法**（若要改）：`receipt_type='ziti'` 建单后断 `freight_fee==0` 且 `total_fee==item_fee`；当前冒烟刻意没断这两条，以免把差异写成通过 |
+| D57 | **平台通用点（`distributor_id=0`）只有 `admin` 型建得了**：`create` 允许 0，但先过 `scope.require(0)`——店铺账号的可见集合永不含 0 | 通用点是平台的权力，不是任何一家店的权利：一个加盟店把点挂成通用就等于把取货地址变成公共资产。§18.6 只说"通用点"，没规定谁能建，这是本项目的裁定 |
+| D58 | **`status` 不"顺手归一"成 1**：入参只认 1/0，脏值（7）400 走校验面 | 把 7 当"启用"存进去，`PL-A1` 的 `status` 过滤器就再也筛不到这类脏值，运维看到的世界与库里不一致 |
+| D59 | **`PL-A4` 是逻辑删（`status=0`），行不真删** | 与 C165 同一条理由：历史自提单要能回看取货地址；前台一律筛掉，后台 `?status=0` 还能筛到，`WO-A1` 读现值时不设"必须启用"这道门 |
+| D60 | **`PL` 族没有"按 id 单读"的 GET**（源系统同形：配置台只有列表 + 表单），因此 `PL-A2/A3` 的出参必须是完整行 | 前端建完点直接把这一行插进列表，两个形状不一致就得各写一套渲染。e2e 首跑按 `GET /api/pickuplocation/{id}` 断言吃了 **405**，改成断 `POST` 出参并给 `viewOf` 补 `shop_name`（C168）才对得上 |
+| D61 | **`pickup_location_id` 用 `ALTER TABLE … ADD COLUMN IF NOT EXISTS` 追加，并配复合索引 `idx_ziti_pickup(pickup_location_id, receipt_type, ziti_status)`**（C161）| 常驻库重启自动补列补索引，不必清库；停用闸门每改一次点都要按这三列扫 `orders_normal_orders`，没索引就是一次全表扫 |
+| D62 | **`WO-A2` 与员工端 `SO-E4` 的核销只留一个实现**（本批为 3B 预留的口径，尚未落地）：差别只在归属判据（后台按 `DistributorScope`，员工按在册行），码比对与状态副作用共用 `WriteOffService.writeOff` | 两处各写一遍就会出现"后台核完的单员工端还能再核一次"这种双花；共用一条 CAS 从结构上堵掉 |
