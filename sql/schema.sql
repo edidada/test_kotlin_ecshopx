@@ -1352,3 +1352,13 @@ ALTER TABLE promotions_seckill_activity ALTER COLUMN seckill_type SET DATA TYPE 
 -- SI-A1 是"按 (店, 商品) upsert"，服务层先查后插；并发下两条同名挂品会各自成立，
 -- 于是同店同品出现两行、扣库存只命中其中一行 —— 唯一键把它钉在数据库层（与 uk_team 同思路）。
 CREATE UNIQUE INDEX IF NOT EXISTS uk_distitems ON distribution_distributor_items(distributor_id, item_id);
+
+-- ===== M1-4 第三批追加：自提单挂点 + 取货码号段（追加于末尾，不回改上文） =====
+-- 自提单除了三列（receipt_type/ziti_code/ziti_status）还得知道"去哪儿取"。
+-- 点地址不落快照而是存 id：点改了门牌号，核销页要显示现在能取到货的地址，不是两年前那条。
+-- 历史单的取货地址靠"停用不删行"（PL-A4）保住，而不是靠订单里的副本。
+ALTER TABLE orders_normal_orders ADD COLUMN IF NOT EXISTS pickup_location_id BIGINT NOT NULL DEFAULT 0;
+-- PL-A4 停用前的"还有几张未核销的单指着它"是这张表上唯一的按点反查，建索引而不是扫全单表。
+CREATE INDEX IF NOT EXISTS idx_ziti_pickup ON orders_normal_orders(pickup_location_id, receipt_type, ziti_status);
+-- 取货码号段（§18.7）：SeqGenerator 取段时 check(touched==1)，行不存在就直接抛，必须在 schema 里先建好。
+INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('ziti_code', 0);

@@ -24,7 +24,7 @@ interface OrdersMapper {
             "item_fee, total_fee, pay_fee, market_fee, cost_fee, commission_fee, freight_fee, discount_fee, member_discount, " +
             "coupon_discount, point_fee, point_use, item_point, get_points, total_rebate, distributor_id, salesman_id, " +
             "supplier_id, merchant_id, original_order_id, type, taxable_fee, total_tax, fee_type, fee_rate, fee_symbol, " +
-            "pay_type, pay_channel, receipt_type, ziti_code, ziti_status, invoice, is_invoiced, invoice_status, " +
+            "pay_type, pay_channel, receipt_type, ziti_code, ziti_status, pickup_location_id, invoice, is_invoiced, invoice_status, " +
             "auto_cancel_time, auto_finish_time, end_time, delivery_time, delivery_corp, delivery_code, " +
             "receiver_name, receiver_mobile, receiver_state, receiver_city, receiver_district, receiver_address, " +
             "is_rate, left_aftersales_num, source_from, is_online_order, remark, team_id, created, updated"
@@ -66,7 +66,7 @@ interface OrdersMapper {
             "item_fee, total_fee, market_fee, cost_fee, commission_fee, freight_fee, discount_fee, member_discount, " +
             "coupon_discount, point_fee, point_use, item_point, get_points, total_rebate, distributor_id, salesman_id, " +
             "supplier_id, merchant_id, original_order_id, type, taxable_fee, total_tax, fee_type, fee_rate, fee_symbol, " +
-            "pay_type, pay_channel, receipt_type, ziti_code, ziti_status, invoice, is_invoiced, invoice_status, " +
+            "pay_type, pay_channel, receipt_type, ziti_code, ziti_status, pickup_location_id, invoice, is_invoiced, invoice_status, " +
             "auto_cancel_time, auto_finish_time, end_time, delivery_time, delivery_corp, delivery_code, receiver_name, " +
             "receiver_mobile, receiver_state, receiver_city, receiver_district, receiver_address, is_rate, " +
             "left_aftersales_num, source_from, is_online_order, remark, team_id, created, updated) " +
@@ -75,7 +75,7 @@ interface OrdersMapper {
             "#{itemFee}, #{totalFee}, #{marketFee}, #{costFee}, #{commissionFee}, #{freightFee}, #{discountFee}, #{memberDiscount}, " +
             "#{couponDiscount}, #{pointFee}, #{pointUse}, #{itemPoint}, #{getPoints}, #{totalRebate}, #{distributorId}, #{salesmanId}, " +
             "#{supplierId}, #{merchantId}, #{originalOrderId}, #{type}, #{taxableFee}, #{totalTax}, #{feeType}, #{feeRate}, #{feeSymbol}, " +
-            "#{payType}, #{payChannel}, #{receiptType}, #{zitiCode}, #{zitiStatus}, #{invoice}, #{isInvoiced}, #{invoiceStatus}, " +
+            "#{payType}, #{payChannel}, #{receiptType}, #{zitiCode}, #{zitiStatus}, #{pickupLocationId}, #{invoice}, #{isInvoiced}, #{invoiceStatus}, " +
             "#{autoCancelTime}, #{autoFinishTime}, #{endTime}, #{deliveryTime}, #{deliveryCorp}, #{deliveryCode}, #{receiverName}, " +
             "#{receiverMobile}, #{receiverState}, #{receiverCity}, #{receiverDistrict}, #{receiverAddress}, #{isRate}, " +
             "#{leftAftersalesNum}, #{sourceFrom}, #{isOnlineOrder}, #{remark}, #{teamId}, #{created}, #{updated})",
@@ -157,6 +157,21 @@ interface OrdersMapper {
     /** 后台改备注（备注只走这一条，避免与状态迁移混在一起） */
     @Update("UPDATE orders_normal_orders SET remark = #{remark}, updated = #{updated} WHERE order_id = #{orderId}")
     fun updateRemark(@Param("orderId") orderId: Long, @Param("remark") remark: String, @Param("updated") updated: Long): Int
+
+    /**
+     * 自提核销（WO-A2 / SO-E4）：把 `ziti_status` 从 'false' 抢到 'true' 的一次条件更新。
+     *
+     * 自提单没有发货环节，核销即完成：单头直接进 `DONE`、`delivery_status` 同步 `DONE`、
+     * `end_time` 落此刻，两个自动时间清空（不然后台定时器会把已完成的单再动一次）。
+     * 判据全写在 WHERE 里（`receipt_type='ziti' AND ziti_status='false'`），
+     * 两路同时核销只有一路改到行 —— 与状态机 `transit`、券 `LOCKED→USED` 同一条 CAS 纪律。
+     */
+    @Update(
+        "UPDATE orders_normal_orders SET ziti_status = 'true', order_status = 'DONE', delivery_status = 'DONE', " +
+            "end_time = #{now}, auto_cancel_time = NULL, auto_finish_time = NULL, updated = #{now} " +
+            "WHERE order_id = #{orderId} AND receipt_type = 'ziti' AND ziti_status = 'false'",
+    )
+    fun writeOff(@Param("orderId") orderId: Long, @Param("now") now: Long): Int
 
     /**
      * ORDER-8 角标：一次条件聚合（口径与 docs/04 §2.4 的状态映射一致）。

@@ -56,6 +56,8 @@ class NormalOrderDO : Stampable {
     var receiptType: String? = "logistics"
     var zitiCode: String? = null
     var zitiStatus: String? = null
+    /** 自提单选的取货点（`distribution_pickup_location.id`；物流单恒 0） */
+    var pickupLocationId: Long = 0
     var invoice: String? = null
     var isInvoiced: Boolean = false
     var invoiceStatus: String? = null

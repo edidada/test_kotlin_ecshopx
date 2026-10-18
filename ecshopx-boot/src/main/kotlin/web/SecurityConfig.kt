@@ -48,6 +48,8 @@ class SecurityConfig(
                     "/api/h5app/wxapp/distributors/*",
                     "/api/h5app/wxapp/goods/shopitems",
                     "/api/h5app/wxapp/goods/items_price_store/*",
+                    // M1-4 第三批：选自提点发生在下单之前，这一步小程序还没有令牌（PL-F1 在 §18.1 里标 *）
+                    "/api/h5app/wxapp/distributor/pickuplocation",
                 ).permitAll()
                     .anyRequest().authenticated()
             }

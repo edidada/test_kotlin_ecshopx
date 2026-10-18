@@ -36,6 +36,8 @@ data class OrderCreateForm(
     val distributorId: Long? = null,
     /** logistics（默认）/ ziti */
     val receiptType: String? = null,
+    /** 自提点 id（`receipt_type=ziti` 时用；不传=取该店第一个启用的点） */
+    val pickupLocationId: Long? = null,
     /** 传地址簿 id 时服务端展开收货六件套 */
     val addressId: Long? = null,
     val receiverName: String? = null,

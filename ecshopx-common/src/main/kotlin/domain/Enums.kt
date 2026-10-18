@@ -15,6 +15,8 @@ enum class SeqName(val dbValue: String, val prefix: String) {
     GROUP_TEAM_ID("group_team_id", "GT"),
     /** 券码（M1-3 CP-F2 领取时发号，uk_coupon_code 唯一索引兜底） */
     COUPON_CODE("coupon_code", "C"),
+    /** 自提取货码（M1-4 §18.6）：号段值取末 6 位成码，非随机；同店不重复即可 */
+    ZITI_CODE("ziti_code", ""),
 }
 
 /** 订单主状态（大写态，与 PHP order_status/pay_status 字符串枚举一致，概要设计 §3） */

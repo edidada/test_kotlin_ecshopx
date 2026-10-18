@@ -31,6 +31,7 @@ import org.springframework.stereotype.Service
 class DistributorService(
     private val distributors: DistributorMapper,
     private val shopItems: ShopItemMapper,
+    private val pickups: PickupLocationService,
 ) {
 
     // ===================== DS-A1 / DS-A4 =====================
@@ -309,7 +310,7 @@ class DistributorService(
         )
     }
 
-    /** DS-F2 店铺主页：档案 + 简介 + 挂品数；未营业的店对前台就是 404 */
+    /** DS-F2 店铺主页：档案 + 简介 + 挂品数 + 可用自提点；未营业的店对前台就是 404 */
     fun frontDetail(
         companyId: Long,
         distributorId: Long,
@@ -320,6 +321,8 @@ class DistributorService(
         return LinkedHashMap(frontRow(d)).apply {
             put("introduce", d.introduce)
             put("item_count", itemCnt(distributorId))
+            // 关了自提的店不给点：主页上出现"到店自提"入口却在结算被 422，比少一栏难看得多
+            put("pickup_locations", if (d.isZiti) pickups.pickupLocationsFor(companyId, distributorId) else emptyList<Map<String, Any?>>())
         }
     }
 

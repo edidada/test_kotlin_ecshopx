@@ -8,6 +8,8 @@ import com.ecshopx.kotlin.common.domain.SeqName
 import com.ecshopx.kotlin.common.domain.TimeSec
 import com.ecshopx.kotlin.dao.auth.MembersAddressMapper
 import com.ecshopx.kotlin.dao.cart.OrdersCartMapper
+import com.ecshopx.kotlin.dao.distribution.DistributorMapper
+import com.ecshopx.kotlin.dao.distribution.DistributorValid
 import com.ecshopx.kotlin.dao.goods.ItemDO
 import com.ecshopx.kotlin.dao.goods.ItemsMapper
 import com.ecshopx.kotlin.dao.goods.SysConfigMapper
@@ -76,6 +78,8 @@ class OrderCreateService(
     private val rels: RelPromotionMapper,
     private val seckillGoods: SeckillGoodsMapper,
     private val groupsService: GroupsService,
+    private val distributors: DistributorMapper,
+    private val pickups: com.ecshopx.kotlin.service.distribution.PickupLocationService,
     private val seq: SeqGenerator,
     private val db: Db,
     private val mapper: ObjectMapper,
@@ -149,6 +153,9 @@ class OrderCreateService(
         }
 
         val shopId = q.ctx.groups.first { it.cartTotalCount > 0 }.shopId
+        // §18.6：自提单的三道前置判据在算价之后、落库之前 —— 店选了哪一家只有算价知道，
+        // 而"这家店支不支持自提"必须在扣库存前拒掉，否则拒一次就白占一次池子
+        val ziti = if (form.receiptType == "ziti") zitiPlan(companyId, shopId, form) else null
         val recv = receiver(userId, form)
         val cartIds = lines.map { it.cartId }.filter { it > 0 }
         val snapshot = itemSnapshot(companyId, lines.map { it.itemId })
@@ -160,7 +167,7 @@ class OrderCreateService(
             val teamId = act?.let { holdActivityPool(it, form, userId, companyId, lines, id, now) }
             holdUserAssets(userId, q, id, now)
 
-            val order = orderRow(id, userId, companyId, shopId, form, q, lines, recv, now, snapshot, act, teamId)
+            val order = orderRow(id, userId, companyId, shopId, form, q, lines, recv, now, snapshot, act, teamId, ziti)
             check(orders.insert(order) == 1) { "订单主行插入失败" }
             lines.forEach { l -> orderItems.insert(itemRow(id, userId, companyId, shopId, l, q, snapshot[l.itemId])) }
             snapshotPromotions(id, userId, q, lines, now)
@@ -397,6 +404,39 @@ class OrderCreateService(
         val city: String?, val district: String?, val address: String?,
     )
 
+    /**
+     * §18.6 自提单建单侧的三条判据（在扣库存之前跑完）。
+     *
+     * 店铺存在且 `is_ziti`、店铺在营业态、点必须归这家店用（本店自己的或全平台通用的）且启用。
+     * 买家没显式选点时回落到"该店第一个启用的点"—— 演示链要能一次点通；
+     * 但一家店一个点都没有就不许走自提，422 写"请先在后台配置"，比生成一张没有取货地址的单好收拾。
+     */
+    private fun zitiPlan(
+        companyId: Long,
+        shopId: Long,
+        form: OrderCreateForm,
+    ): ZitiPlan {
+        val d = distributors.findById(shopId, companyId)
+            ?: throw BizException(ErrorCode.BIZ, "自提单必须落在一家店铺上", mapOf("receipt_type" to listOf("所选店铺不存在")))
+        if (!d.isZiti) throw BizException(ErrorCode.BIZ, "该店铺不支持自提", mapOf("receipt_type" to listOf("该店铺未开启自提")))
+        if (d.isValid != DistributorValid.TRUE || !d.reviewStatus) {
+            throw BizException(ErrorCode.BIZ, "店铺未启用，不能自提")
+        }
+        val wanted = form.pickupLocationId ?: 0
+        val point = if (wanted > 0) {
+            pickups.requireUsable(companyId, shopId, wanted)
+        } else {
+            pickups.defaultFor(companyId, shopId)
+                ?: throw BizException(ErrorCode.BIZ, "该店铺还没有可用自提点，请先在后台配置", mapOf("pickup_location_id" to listOf("该店未配置自提点")))
+        }
+        return ZitiPlan(zitiCode(), point.id)
+    }
+
+    /** 6 位取货码：号段值取末 6 位（非随机、可回溯），同一秒内的两单靠号段游标分开 */
+    private fun zitiCode(): String = "%06d".format(seq.next(SeqName.ZITI_CODE) % 1_000_000L)
+
+    private data class ZitiPlan(val code: String, val pointId: Long)
+
     private fun itemSnapshot(companyId: Long, ids: List<Long>): Map<Long, ItemDO> {
         val uniq = ids.distinct()
         if (uniq.isEmpty()) return emptyMap()
@@ -417,6 +457,7 @@ class OrderCreateService(
         snapshot: Map<Long, ItemDO>,
         act: ActivityOrder?,
         teamId: String?,
+        ziti: ZitiPlan?,
     ): NormalOrderDO {
         val invoiceJson = invoiceOf(form)
         return NormalOrderDO().apply {
@@ -442,6 +483,11 @@ class OrderCreateService(
             distributorId = shopId
             salesmanId = form.salesmanId ?: 0
             receiptType = if (form.receiptType == "ziti") "ziti" else "logistics"
+            // §18.6：建单即发码、初始态 'false'；码是号段末 6 位（非随机），点 id 落订单头，
+            // 之后核销页/取货码页都读现值（地址改了要能看出"现在去哪儿取"）
+            zitiCode = ziti?.code
+            zitiStatus = if (ziti == null) null else "false"
+            pickupLocationId = ziti?.pointId ?: 0
             invoice = invoiceJson
             isInvoiced = invoiceJson != null
             remark = form.remark

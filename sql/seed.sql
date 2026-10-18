@@ -380,3 +380,31 @@ INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VA
 INSERT IGNORE INTO distribution_distributor_salesman
   (salesman_id, company_id, distributor_id, shop_id, user_id, mobile, salesman_name, role_id, is_valid, created, updated)
 VALUES (1, 1, 2, 0, 1, '13800000001', 'demo 旗舰店老板', 0, 'true', 0, 0);
+
+-- ===== M1-4 第三批追加：自提点/核销权限码 + 演示自提点（追加于末尾，不回改上文） =====
+-- §18.7：`pickup.lists`/`pickup.update` 两条（看点 ≠ 建改停点），`order.writeoff` 单独一条 ——
+-- 核销是"承认买家已经把货拿走了"，这一下之后单子不能再退也不能再改，
+-- 所以它既不能挂在 `order.lists`（看）也不能挂在 `order.update`（改）底下。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (51, 38, '自提点列表', 'pickup.lists',    'actived'),
+  (52, 38, '自提点维护', 'pickup.update',   'actived'),
+  (53, 38, '自提核销',   'order.writeoff',  'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 51), (1, 52), (1, 53),
+  -- 店铺运营岗：能看自己的点、能核销自己店的单，但建/改/停点是平台的活（越权用例靠这条缺配跑）
+  (2, 51), (2, 53);
+
+-- 演示店开自提：13800000001 那家 demo 旗舰店（distributor_id=2）与商城总部都要能走自提链，
+-- 否则 ORDER-2 传 receipt_type=ziti 一律 422，冒烟里没有可读的自提单。
+UPDATE distribution_distributor SET is_ziti = TRUE WHERE company_id = 1 AND distributor_id IN (1, 2);
+
+-- 演示自提点两条，形状正好是 §18.6 的两个分支：
+--   1) 归属店自己的点（distributor_id=2、rel_distributor_id=2）→ 只有这家店的前台看得到；
+--   2) 平台通用点（distributor_id=0、rel_distributor_id=0）→ 每家店的前台都看得到，
+--      而它在工作台列表里只有 admin 型账号可见（店铺账号 scope.require(0) → 404）。
+INSERT IGNORE INTO distribution_pickup_location
+  (id, company_id, distributor_id, rel_distributor_id, name, province, city, area, address, lng, lat, contract_phone, status, created, updated)
+VALUES
+  (1, 1, 2, 2, 'demo 旗舰店自提柜台', '浙江省', '杭州市', '西湖区', '文一西路 969 号 A 座 1 层', '120.026000', '30.279000', '057188886666', 1, 0, 0),
+  (2, 1, 0, 0, '平台中心仓（全城可取）', '浙江省', '杭州市', '余杭区', '五常大道 1 号 3 号库', '120.043000', '30.275000', '057188880000', 1, 0, 0);
+
