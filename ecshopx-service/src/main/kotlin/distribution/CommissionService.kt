@@ -5,6 +5,7 @@ import com.ecshopx.kotlin.common.api.ErrorCode
 import com.ecshopx.kotlin.common.api.PageQuery
 import com.ecshopx.kotlin.common.api.PageResult
 import com.ecshopx.kotlin.common.domain.TimeSec
+import com.ecshopx.kotlin.common.security.Mask
 import com.ecshopx.kotlin.dao.distribution.CashWithdrawalDO
 import com.ecshopx.kotlin.dao.distribution.CashWithdrawalMapper
 import com.ecshopx.kotlin.dao.distribution.CommissionSum
@@ -528,7 +529,7 @@ class CommissionService(
             "paid_time" to (if (paid) w.updated else 0L),
             "account" to linkedMapOf(
                 "name" to (d?.name ?: ""),
-                "mobile" to mask(d?.mobile),
+                "mobile" to Mask.mobile(d?.mobile),
                 "bank_name" to "",
                 "bank_account" to "",
                 "tip" to if (paid) "已打款" else "待财务打款",
@@ -610,7 +611,7 @@ class CommissionService(
         "salesman_id" to r.salesmanId,
         "num" to r.num,
         // 掩码优先级：昵称有就用昵称，没有退到手机号 —— 与售后/拼团那两处同一个口径
-        "nickname" to (r.nickname?.takeIf { it.isNotBlank() } ?: mask(r.mobile)),
+        "nickname" to (r.nickname?.takeIf { it.isNotBlank() } ?: Mask.mobile(r.mobile)),
         "rebate" to r.rebate,
         "total_rebate" to r.totalRebate,
         "is_close" to r.isClose,
@@ -647,7 +648,6 @@ class CommissionService(
         else -> "已拒绝"
     }
 
-    private fun mask(v: String?): String? = v?.takeIf { it.length >= 7 }?.let { "${it.take(3)}****${it.takeLast(4)}" } ?: v
 
     companion object {
         const val KEY_DELAY = "commission.close_delay"

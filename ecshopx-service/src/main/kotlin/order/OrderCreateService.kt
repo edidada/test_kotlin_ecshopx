@@ -480,6 +480,11 @@ class OrderCreateService(
             pointFee = q.pointFee
             pointUse = q.pointFee
             itemPoint = lines.sumOf { (snapshot[it.itemId]?.point ?: 0L) * it.num }
+            // 可得积分 = Σ行 `item_point`（§23.3 PT-R1）。这一列 C54 结清时读的就是它，
+            // 而 M1-5 之前全仓没有任何一处给它赋值 —— 列在 INSERT 里躺着、恒为 0，
+            // 于是"支付赠送积分"这条判据从来没真跑通过（PayEndToEndTest 当年靠手写 UPDATE 才绿）。
+            // 行侧不另开一列：`orders_normal_orders_items` 只有 `item_point`，那已经是"这一行得几分"。
+            getPoints = itemPoint
             totalRebate = lines.sumOf { (snapshot[it.itemId]?.rebate ?: 0L) * it.num }
             distributorId = shopId
             // 归属导购（§22 C177）：入参给了就用入参（SO-E1 由会话强制填进来），

@@ -5,6 +5,7 @@ import com.ecshopx.kotlin.common.api.ErrorCode
 import com.ecshopx.kotlin.common.api.PageQuery
 import com.ecshopx.kotlin.common.api.PageResult
 import com.ecshopx.kotlin.common.domain.TimeSec
+import com.ecshopx.kotlin.common.security.Mask
 import com.ecshopx.kotlin.dao.distribution.DistributorMapper
 import com.ecshopx.kotlin.dao.distribution.DistributorValid
 import com.ecshopx.kotlin.dao.distribution.PickupLocationDO
@@ -286,7 +287,7 @@ class PickupLocationService(
         "full_address" to listOf(r.province, r.city, r.area, r.address).filter { !it.isNullOrBlank() }.joinToString(""),
         "lng" to r.lng,
         "lat" to r.lat,
-        "contract_phone" to (if (mask) maskPhone(r.contractPhone) else r.contractPhone),
+        "contract_phone" to (if (mask) Mask.mobile(r.contractPhone) else r.contractPhone),
         "status" to r.status,
         // 没传坐标就不给 distance 这个键，前端据此决定要不要显示"距您 x km"
         "distance" to (if (lng != null && lat != null) distanceKm(lng, lat, r.lng?.toDoubleOrNull(), r.lat?.toDoubleOrNull()) else null),
@@ -294,11 +295,6 @@ class PickupLocationService(
         "updated" to r.updated,
     )
 
-    private fun maskPhone(v: String?): String? = when {
-        v.isNullOrBlank() -> v
-        v.length <= 4 -> v
-        else -> "${v.take(3)}****${v.takeLast(4)}"
-    }
 
     /** 球面距离（km，一位小数）。坐标缺一侧就 null，让"没配经纬度"在出参里看得出来 */
     private fun distanceKm(

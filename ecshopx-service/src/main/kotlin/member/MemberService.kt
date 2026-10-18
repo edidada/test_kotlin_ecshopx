@@ -3,6 +3,7 @@ package com.ecshopx.kotlin.service.member
 import com.ecshopx.kotlin.common.api.BizException
 import com.ecshopx.kotlin.common.api.ErrorCode
 import com.ecshopx.kotlin.common.domain.TimeSec
+import com.ecshopx.kotlin.common.security.Mask
 import com.ecshopx.kotlin.dao.auth.MemberDO
 import com.ecshopx.kotlin.dao.auth.MemberGradeDO
 import com.ecshopx.kotlin.dao.auth.MembersGradeMapper
@@ -57,7 +58,7 @@ class MemberService(
         return linkedMapOf(
             "user_id" to m.userId,
             "grade_id" to m.gradeId,
-            "mobile" to mask(m.mobile),
+            "mobile" to Mask.mobileOrEmpty(m.mobile),
             "nickname" to (i.username ?: ""),
             "avatar" to (i.avatar ?: ""),
             "sex" to i.sex,
@@ -140,7 +141,7 @@ class MemberService(
         if (members.updateMobile(userId, companyId, m.mobile, to, TimeSec.now()) == 0) {
             throw BizException(ErrorCode.BIZ, "手机号已变更，请重试")
         }
-        return mapOf("user_id" to userId, "mobile" to mask(to))
+        return mapOf("user_id" to userId, "mobile" to Mask.mobileOrEmpty(to))
     }
 
     /**
@@ -210,11 +211,5 @@ class MemberService(
         /** 资料接口显式拒改的字段（其余未知键静默忽略，与源系统行为一致） */
         val FORBIDDEN = listOf("mobile", "company_id", "user_id", "have_consume")
 
-        /** 138****0001；短号（历史脏数据）原样返回，不抛 */
-        fun mask(mobile: String?): String = when {
-            mobile.isNullOrBlank() -> ""
-            mobile.length < 7 -> mobile
-            else -> mobile.take(3) + "****" + mobile.takeLast(4)
-        }
     }
 }

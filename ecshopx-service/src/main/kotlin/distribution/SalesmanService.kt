@@ -5,6 +5,7 @@ import com.ecshopx.kotlin.common.api.ErrorCode
 import com.ecshopx.kotlin.common.api.PageQuery
 import com.ecshopx.kotlin.common.api.PageResult
 import com.ecshopx.kotlin.common.domain.TimeSec
+import com.ecshopx.kotlin.common.security.Mask
 import com.ecshopx.kotlin.dao.auth.MembersMapper
 import com.ecshopx.kotlin.dao.distribution.DistributorMapper
 import com.ecshopx.kotlin.dao.distribution.DistributorValid
@@ -685,7 +686,7 @@ class SalesmanService(
         "user_id" to r.userId,
         "salesman_name" to (r.salesmanName ?: ""),
         // 列表面掩码（§18.2 SM-A1）：运营看的是"哪个岗有几个人"，不是抄手机号
-        "mobile" to mask(r.mobile),
+        "mobile" to Mask.mobile(r.mobile),
         "role_id" to r.roleId,
         "role_name" to (r.roleName ?: ""),
         "shop_name" to (r.shopName ?: ""),
@@ -710,7 +711,6 @@ class SalesmanService(
         "updated" to r.updated,
     )
 
-    private fun mask(v: String?): String? = v?.takeIf { it.length >= 7 }?.let { "${it.take(3)}****${it.takeLast(4)}" } ?: v
 
     /**
      * `is_valid` 是源系统留在 VARCHAR 里的两位枚举（`'true'` / `'false'`），不是布尔列。

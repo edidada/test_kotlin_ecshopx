@@ -440,3 +440,50 @@ VALUES (2, 1, 2, 0, 2, '13800000002', '小李（门店导购）', 1, 'true', 0, 
 UPDATE distribution_distributor_salesman SET password = '$2a$10$XuQCFgc9Z1zSEoix6.8KlOfiSOOY3qZqW5m6Ib4raPxOPplc36ZPS'
 WHERE company_id = 1 AND salesman_id IN (1, 2);
 
+
+-- ===== M1-5 追加：积分/储值/评价/发票权限码 + 配置缺省 + 演示抬头（docs/04 §23.4，追加于末尾，不回改上文） =====
+-- 54..63 十条仍按「看码 ≠ 改码」分列（§18.7 那条线），另外单列两条与钱直接打交道的：
+--   `deposit.recharge`（代客充值，不动支付就动余额）与 `invoice.update`（开票）都只给平台；
+--   `datapass.pass`（63）是唯一一个「不判定归属、只决定同一行出全值还是掩码值」的码，挂在系统设置目录下。
+-- 64 是给这批看码新开的目录（会员资产）——积分与储值既不属于订单也不属于营销，硬挂到 38「店铺与分销」
+-- 会让店铺运营在权限树里看起来"该有"，实际一条都不给。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (64,  0, '会员资产',       'member_assets',      'catalog'),
+  (54, 64, '积分列表',       'point.lists',        'actived'),
+  (55, 64, '积分调账',       'point.update',       'actived'),
+  (56, 64, '储值流水',       'deposit.lists',      'actived'),
+  (57, 64, '充值档位维护',   'deposit.rule.update','actived'),
+  (58, 64, '代客充值',       'deposit.recharge',   'actived'),
+  (59,  4, '评价列表',       'rate.lists',         'actived'),
+  (60,  4, '评价回复',       'rate.reply',         'actived'),
+  (61,  4, '发票申请列表',   'invoice.lists',      'actived'),
+  (62,  4, '发票处理',       'invoice.update',     'actived'),
+  (63,  8, '敏感信息穿透',   'datapass.pass',      'actived');
+
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 54), (1, 55), (1, 56), (1, 57), (1, 58), (1, 59), (1, 60), (1, 61), (1, 62), (1, 63), (1, 64),
+  -- 店铺运营岗（role 2）只拿四个看数码 + 本店可回复：
+  -- 调账、改档位、代客充值、开票、看全值都是平台权力（D57/C167 同一条划分）。
+  (2, 54), (2, 56), (2, 59), (2, 60), (2, 61);
+
+-- 配置缺省：值用现库的 '1'/'0' 词表（`pay.*.enable` 那三条就是这个写法），不另起 true/false。
+-- 已有的 `pay.point.enable` / `pay.deposit.enable` / `point.deduct.max_ratio` 三键复用，这里不重复插。
+INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VALUES
+  (1, 'deposit.recharge.point.rate', '0', 0),
+  (1, 'invoice.enable', '1', 0),
+  (1, 'invoice.types', '["02"]', 0);
+
+-- 演示抬头两条（`members_invoices` 自 M0 建表起零引用，这里给冒烟一个可读的起点）：
+-- 个人抬头 + 企业抬头各一条，默认位给企业那条 —— `is_def` 在同一会员下只能有一个 true（INV-F5）。
+INSERT IGNORE INTO members_invoices
+  (invoices_id, user_id, company_id, invoices_type, name, telephone, tax_number, business_address, bank, bank_account, is_def, created)
+VALUES
+  (1, 1, 1, 'personal', '张三', '13800000001', NULL, NULL, NULL, NULL, FALSE, 0),
+  (2, 1, 1, 'corporate', '杭州演示科技有限公司', '13800000001', '91330100MA27XXXX0B', '杭州市西湖区文一西路 969 号', '演示银行杭州分行', '6222000000000001', TRUE, 0);
+
+-- ===== M1-5 追加：演示商品的可得积分（docs/04 §23.3 PT-R1，追加于末尾，不回改上文） =====
+-- `items.point` 建表至今恒为默认 0，于是"每件得几分"这条链在演示数据上从来没有可观测的一格：
+-- 建单算出的 `item_point`/`get_points` 都是 0，结清时 C54 直接 return，积分一条流水都不写。
+-- 给演示主力商品（item_id=3，PAY/M1 各脚本下单都用它）标 100 分/件，赠分链自此在实跑里看得见。
+-- 只 UPDATE 演示行、不改建表默认值：0 才是"这个商品不送积分"的正确默认。
+UPDATE items SET point = 100 WHERE company_id = 1 AND item_id = 3;

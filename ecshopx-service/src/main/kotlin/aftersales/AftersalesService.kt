@@ -8,6 +8,7 @@ import com.ecshopx.kotlin.common.domain.OrderStatus
 import com.ecshopx.kotlin.common.domain.PayStatus
 import com.ecshopx.kotlin.common.domain.SeqName
 import com.ecshopx.kotlin.common.domain.TimeSec
+import com.ecshopx.kotlin.common.security.Mask
 import com.ecshopx.kotlin.dao.aftersales.AftersalesDO
 import com.ecshopx.kotlin.dao.aftersales.AftersalesDetailDO
 import com.ecshopx.kotlin.dao.aftersales.AftersalesDetailMapper
@@ -539,7 +540,7 @@ class AftersalesService(
         "evidence_pic" to parseList(a.evidencePic),
         "return_type" to a.returnType,
         "contact" to a.contact,
-        "mobile" to mask(a.mobile),
+        "mobile" to Mask.phone(a.mobile),
         "freight" to a.freight,
         "sendback_data" to parseObject(a.sendbackData),
         "company_id" to a.companyId,
@@ -665,10 +666,6 @@ class AftersalesService(
     private fun parseObject(raw: String?): Map<String, Any?>? =
         raw?.takeIf { it.isNotBlank() }?.let { runCatching { json.readValue(it, ANY_MAP) }.getOrNull() }
 
-    private fun mask(mobile: String?): String? {
-        val m = mobile?.takeIf { it.isNotBlank() } ?: return null
-        return if (m.length < 7) m else "${m.take(3)}${"*".repeat(m.length - 7)}${m.takeLast(4)}"
-    }
 
     companion object {
         const val KEY_REASON = "aftersales.reason"

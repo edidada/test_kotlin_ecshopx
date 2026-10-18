@@ -2,6 +2,7 @@ package com.ecshopx.kotlin.service.member
 
 import com.ecshopx.kotlin.common.api.BizException
 import com.ecshopx.kotlin.common.api.ErrorCode
+import com.ecshopx.kotlin.common.security.Mask
 import com.ecshopx.kotlin.service.auth.MemberAuthService
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
@@ -30,7 +31,7 @@ class VcodeService(
         val t = (type ?: "login").trim()
         if (t !in types) throw BizException(ErrorCode.VALIDATION, "验证码类型不支持", mapOf("type" to listOf(t)))
         return linkedMapOf(
-            "mobile" to MemberService.mask(m),
+            "mobile" to Mask.mobile(m),
             "type" to t,
             "status" to 1,
             "expire_seconds" to EXPIRE_SECONDS,

@@ -8,6 +8,7 @@ import com.ecshopx.kotlin.common.domain.OrderClass
 import com.ecshopx.kotlin.common.domain.OrderStatus
 import com.ecshopx.kotlin.common.domain.SeqName
 import com.ecshopx.kotlin.common.domain.TimeSec
+import com.ecshopx.kotlin.common.security.Mask
 import com.ecshopx.kotlin.dao.aftersales.AftersalesType
 import com.ecshopx.kotlin.dao.auth.MembersMapper
 import com.ecshopx.kotlin.dao.goods.ItemsMapper
@@ -605,7 +606,7 @@ class GroupsService(
         if (userId <= 0) return "虚拟成团"
         val m = memberRepo.findById(userId)?.mobile
         if (m.isNullOrBlank() || m.length < 7) return "用户${userId.toString().takeLast(4)}"
-        return "${m.take(3)}****${m.takeLast(4)}"
+        return Mask.mobile(m)!!
     }
 
     private fun statusText(status: Int): String = when (status) {

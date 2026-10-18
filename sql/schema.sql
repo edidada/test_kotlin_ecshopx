@@ -1399,3 +1399,27 @@ ALTER TABLE distribution_cash_withdrawal ADD COLUMN IF NOT EXISTS salesman_id BI
 CREATE INDEX IF NOT EXISTS idx_withdraw_salesman ON distribution_cash_withdrawal(salesman_id);
 -- 会员当前归属导购（SM-F2）。源系统另有带「24h 有效绑定」的关系表，本项目只留当前归属、可换绑（D62）。
 ALTER TABLE members ADD COLUMN IF NOT EXISTS salesman_id BIGINT NOT NULL DEFAULT 0;
+
+-- ===== M1-5 追加：评价 / 发票 / 发号的数据形状（docs/04 §23.4，追加于末尾，不回改上文） =====
+-- 评价要能按店铺收窄：加盟体系里「这条差评是谁家的」是运营的第一筛，而 `trade_rate` 原本只有
+-- `goods_id/item_id`，归属只能靠再 join 一次订单。归属在落单那刻定死（C177 同一条纪律），
+-- 落评价时从订单行带下来，不在读时回查「这商品现在挂在哪家」。
+ALTER TABLE trade_rate ADD COLUMN IF NOT EXISTS distributor_id BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE trade_rate ADD COLUMN IF NOT EXISTS shop_id BIGINT NOT NULL DEFAULT 0;
+-- 匿名与会员改名之后，仍要能看到「当时那个名字」：出参位固定存在，不靠 join members 现读。
+ALTER TABLE trade_rate ADD COLUMN IF NOT EXISTS nickname VARCHAR(64);
+-- 注意 `idx_rate_item(item_id, star)` 是建表时那条，这里必须另起名 ——
+-- 同名索引的 `IF NOT EXISTS` 只会静默跳过，不会帮你把索引形状改掉。
+CREATE INDEX IF NOT EXISTS idx_rate_company_item ON trade_rate(company_id, item_id, created);
+CREATE INDEX IF NOT EXISTS idx_rate_order ON trade_rate(company_id, order_id);
+
+-- 后台处理发票的备注，`INV-A2` 那条「rejected 必须带 remark」的判据读这一列。
+ALTER TABLE orders_invoice ADD COLUMN IF NOT EXISTS remark VARCHAR(255);
+-- 一单一申请（INV-R1）：源系统 `order_id` 允许逗号分隔多订单，本项目收紧成单个订单号 ——
+-- `invoice_amount` 只能对着一个订单算，多单合开的金额归属说不清。P2 放开时去掉这条 uk 即可。
+-- `orders_invoice` 建表起就没写过一行数据（全仓零引用），加这条唯一键不会卡住任何历史行。
+CREATE UNIQUE INDEX IF NOT EXISTS uk_invoice_order ON orders_invoice(company_id, order_id);
+CREATE INDEX IF NOT EXISTS idx_invoice_status ON orders_invoice(company_id, invoice_status);
+
+-- 发票申请单号号段：缺行时 SeqGenerator 的 `check(touched==1)` 直接抛 → 500 而不是 4xx（C166 那一课）。
+INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('invoice_apply_bn', 0);

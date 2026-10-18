@@ -208,10 +208,17 @@ class PayEndToEndTest {
         assertEquals(1L, fetch("/api/h5app/wxapp/orderscount").path("pending_delivery").asLong(), "结清后进待发货")
     }
 
-    @Test @Order(5) fun `PAY-2 积分支付与赠送积分入账`() {
+    @Test @Order(5) fun `PAY-2 积分支付与赠送积分入账（M1-5 起走建单算出的 get_points，不再手写 UPDATE）`() {
         jdbc.update("UPDATE point_member SET point = 20000 WHERE user_id = 1")
         orderPoint = createOrder()
-        jdbc.update("UPDATE orders_normal_orders SET get_points = 100 WHERE order_id = ?", orderPoint.toLong())
+        // §23.3 PT-R1：这一列从此由建单写入（演示商品 item_id=3 每件 100 分 × 1 件）。
+        // 本批之前的做法是这里补一句 `UPDATE ... SET get_points = 100` 再断言入账 ——
+        // 那等于把"C54 这条判据在真实建单链上跑不通"伪装成测试通过（docs/05 §72 记过的遗留）。
+        assertEquals("100", orderCol(orderPoint, "get_points"), "get_points 必须由建单写入")
+        assertEquals(
+            orderCol(orderPoint, "get_points"), orderCol(orderPoint, "item_point"),
+            "单头可得积分 = Σ行 item_point（行侧不另开列，§23.3 PT-R1）",
+        )
         val d = pay(orderPoint, "point")
         assertEquals("SUCCESS", d.path("trade_state").asText())
         assertEquals(8900L, d.path("point_used").asLong(), "1 积分 = 1 分")

@@ -17,6 +17,13 @@ enum class SeqName(val dbValue: String, val prefix: String) {
     COUPON_CODE("coupon_code", "C"),
     /** 自提取货码（M1-4 §18.6）：号段值取末 6 位成码，非随机；同店不重复即可 */
     ZITI_CODE("ziti_code", ""),
+
+    /**
+     * 发票申请单号（M1-5 INV-F1）：形状沿用 [RECHARGE_NO] 那条「前缀 + 时间 + 号段尾」，
+     * 不照搬 ZITI_CODE 的末 6 位短码 —— 取货码要在小票上手抄，申请单号要进财务系统对账。
+     * schema 里必须同时有 `('invoice_apply_bn', 0)` 那一行，缺行时 SeqGenerator 抛 500（C166）。
+     */
+    INVOICE_APPLY_BN("invoice_apply_bn", "FP"),
 }
 
 /** 订单主状态（大写态，与 PHP order_status/pay_status 字符串枚举一致，概要设计 §3） */
