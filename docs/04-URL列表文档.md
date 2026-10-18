@@ -744,3 +744,164 @@ M1-2 接进两条真渠道（微信支付 v3、支付宝）与线下转账审核
 
 `tools/m13_matrix_smoke.py`（#58：五档开关全组合 + 四叠加下单落库 + 并发超员/抢额度/抢池，**68 项**）与两个 e2e 门槛用例分工明确：用例管**口径**（逐级基数、四账独立、守恒式、`discount_info` 序列），脚本管**起得来的服务**（真 HTTP 面、真令牌、真 CAS）。脚本设计成可重复跑，与 §15.3/§16.3 同一套纪律：进场按 `MT<时间戳>` 停用上一轮残档、待付款残单与积分都按**基线差值**断言、收口把本案活动全部停用/删除并断言"算价链回到 seed 态（全场折让 0、行价回现价）"。并发三段用 `ThreadPoolExecutor` + `threading.Barrier` 同瞬起跑：8 路挤 2 人团恰好 1 单成功、9 路抢额度 3 恰好成 3 团、9 路抢池 3 件恰好 3 单（`hold=3 / sales=0 / available=0`），取消后席位、额度、池子三者全部回位。等级与余额两处不能写死的口径见 D40。
 
+## 18. P1 端点规格 —— 店铺与分销域（M1-4 开发前补齐，追加于 §17 之后，不回改上文）
+
+范围按 docs/05 §M1-4：**分销商（店铺）CRUD + 审核、店铺商品双模（价格/库存/上下架）、导购 salesman + 员工端链、佣金 `distribute_logs`（入账/冲销/结算）、提现申请-审核-打款、自提点 + `ziti_code` 核销**。
+不做（P2）：店铺标签/分类、开屏广告与轮播、地理围栏与配送距离、自配送配置、店铺白名单、进店规格（inRule）、小程序码、企微同步、导购任务/通知/排行榜/赠券、社区团购团长域、推广员(promoter)域、分账(渠道侧)、statements 账期对账单（§3 已整域划 P2）、快证/旺店通店铺映射。
+
+### 18.0 盘点结论：源系统落位与本项目落位
+
+| 本项目表（`sql/schema.sql` 已存在） | PHP 落位 | 现状 |
+|---|---|---|
+| `distribution_distributor` | `Distributor`（DistributionBundle） | seed 两行（1 商城总部 `is_distributor=TRUE` 自营/平台收款；2 demo 旗舰店 加盟/店铺收款），**Kotlin 侧只有 `DistributorShopMapper.listByIds` 一条只读口**（购物车与订单详情取店铺名/Logo） |
+| `distribution_distributor_items` | `DistributorItems` | 零引用。列里 `store/price/is_show/is_can_sale/is_total_store/sales/default_item_id` 就是双模的全部依据 |
+| `distribution_distributor_salesman` | `Salesperson` | 零引用；`Principal.Kind.SALESMAN` 已定义但过滤器链不认（`SecurityConfig` 注释明写"员工端链在 M1-4 补"） |
+| `distribution_distribute_logs` | `DistributeLogs` | 零引用；`OrderCreateService` 已把行佣金算进 `orders_normal_items.rebate/total_rebate`，`RefundService` 已调 `reverseCommission` 只减订单列、不写日志 |
+| `distribution_cash_withdrawal` | `CashWithdrawal` | 零引用 |
+| `distribution_pickup_location` | `PickupLocation` | 零引用；`orders_normal_orders.receipt_type/ziti_code/ziti_status` 三列已建，`ziti_code` **建单时从不生成**、`ziti_status` 从不写 |
+
+订单侧已有的挂接点（本轮只补语义，不动列）：`distributor_id`（= 建单时的 `shop_id`）、`salesman_id`（ORDER-2 已接收，落单不改归属）、`order_holder`、`is_distribution`、明细 `is_total_store`（当前**硬编码 true**）、`items.distributor_id`（0=商城总部）。后台 `OrderAdminController` 的"distributor_id 越权过滤属 M1-4"注释与 `ItemQuery` 已有的 distributor 三态筛选是本轮要落的两处。
+
+### 18.1 会员面（前缀 `/api/h5app/wxapp`，鉴权=会员 JWT，链=frontChain；标 * 的走匿名）
+
+| # | 方法 | URL | 说明 |
+|---|---|---|---|
+| DS-F1 | GET* | `/distributors` | 营业中店铺列表：`distributor_id,name,logo,banner,is_valid,distribution_type,is_ziti,is_delivery,province,city,distance?`（分页 + `keyword`/`city` 过滤） |
+| DS-F2 | GET* | `/distributors/{distributor_id}` | 店铺主页：档案 + `introduce` + `pickup_locations[]`（该店启用的自提点） |
+| SI-F1 | GET* | `/goods/shopitems` | 店铺商品列表：入参 `distributor_id`(Y) + 与 GOODS-7 同的筛选/分页；出参行 = GOODS-7 字段集 + `shop_price`/`shop_store`/`is_show`/`is_can_sale`/`is_total_store`（**价与库存给店铺态**，未挂品的行不出现在列表里） |
+| SI-F2 | GET* | `/goods/items_price_store/{item_id}` | 单行价格与库存：`?distributor_id=` 缺省=总部态；出参 `{item_id,price,store,is_show,is_can_sale,is_total_store}` |
+| PL-F1 | GET* | `/distributor/pickuplocation` | 可用自提点：入参 `distributor_id`(Y)、可选 `lng/lat`；出参 `{list[]{id,name,province,city,area,address,contract_phone(掩码),distance}}`，只出 `status=1` 且归属该店（或 `rel_distributor_id=0` 全平台通用）的点 |
+| CW-F1 | POST | `/cash_withdrawal` | 店铺提现申请：`{distributor_id(Y), money(Y,分)}` → 出参 `{id,status:'applied',money}`。闸门见 §18.5 |
+| CW-F2 | GET | `/cash_withdrawals` | 我的提现记录（店铺视角）：分页 + `status` 过滤；出参行见 §18.5 |
+| CW-F3 | POST | `/salesman/applyCashWithdrawal` | 导购提现申请：`{money}`，归属取**当前会员绑定的导购行**（`user_id` 命中 `salesman`），非导购 403 |
+| CW-F4 | GET | `/salesman/getCashWithdrawalList` | 导购提现记录 |
+| SM-F1 | GET* | `/salesperson` | 导购信息（扫码进入）：`?salesman_id=` 或 `?mobile=`，出 `{salesman_id,salesman_name,avatar,distributor_id,shop_name,qrcode_text}`；查不到回 404 |
+| SM-F2 | POST | `/member/bindSalesperson` | 绑定我的导购：`{salesman_id(Y)}`，写 `members.salesman_id`（**schema 末尾追加该列** `ALTER TABLE members ADD COLUMN IF NOT EXISTS salesman_id BIGINT NOT NULL DEFAULT 0`，源系统另有关系表带"24h 有效绑定"语义，本项目只留当前归属、可换绑），出 `{user_id,salesman_id,bind_time}` |
+| ZT-F1 | GET | `/order/{order_id}/ziticode` | 自提取货码：出 `{order_id,ziti_code,ziti_status,pickup{name,address,contract_phone},valid_text}`；只有本人 `receipt_type=ziti` 的单可查 |
+
+### 18.2 后台（前缀 `/api`，鉴权=运营 JWT + `@RequiresResource`，写路径 `@Audited`）
+
+| # | 方法 | URL | 说明 / 权限码 |
+|---|---|---|---|
+| DS-A1 | POST | `/distributor` | 创建店铺：`name(Y) mobile(Y) province city area address logo banner introduce distribution_type(0自营/1加盟) is_ziti is_delivery is_self_delivery payment_subject rate shop_id`。`source_from=1`、`review_status` 由入参决定（缺省 true）；自营店全场唯一（已有 `is_distributor=TRUE` 时再建自营 → 422）。`distributor.lists`→`distributor.update` |
+| DS-A2 | GET | `/distributors` | 列表：`keyword`/`is_valid(true|false|closed)`/`review_status`/`distribution_type`/`source_from` + 分页；行含 `order_count`、`commission_fee`（未结算佣金）与 `balance`（可提现） |
+| DS-A3 | GET | `/distributors/info` | 详情：`?distributor_id=`，出档案全字段 + 审核态 + 收款主体 + 费率文案 + 统计三数 |
+| DS-A4 | PUT | `/distributor/{distributor_id}` | 更新（**不碰 `review_status`/`is_distributor`/`company_id`**；自营店名称与联系方式可改，`distribution_type` 建后不可改 → 422） |
+| DS-A5 | PUT | `/distributor/{distributor_id}/review` | 审核：`{review_status(Y: true/false), reason?}`；`source_from=1` 且已审过的重复审核 422「无需重复审核」 |
+| DS-A6 | PUT | `/distributor/{distributor_id}/status` | 运营开关：`{is_valid: 'true'|'false'|'closed'}`；`closed`（关店）要求**无在途提现且无未结佣金**，否则 422（先结后关） |
+| DS-A7 | PUT | `/distributor/{distributor_id}/payment-subject` | 收款主体：`{payment_subject(0平台/1店铺), rate(万分比 0..10000)}`；改费率只影响**之后**的佣金，不回溯已落日志 |
+| DS-A8 | GET | `/distributor/count/{distributor_id}` | 店铺统计：`{order_count,pay_fee,refund_fee,commission_total,commission_closed,commission_open,balance}` |
+| SI-A1 | POST | `/distributor/items` | 挂品：`{distributor_id(Y), items:[{item_id(Y), price?, store?, is_total_store?, is_show?, is_can_sale?}]}`（**整表按 (店, 商品) upsert**，与 SK-A6 同一口径；`price` 不传=跟随总部现价） |
+| SI-A2 | GET | `/distributor/items` | 店铺商品列表：`distributor_id`(Y) + `keyword`/`is_show`/`is_can_sale` + 分页；行给**店铺态与总部态两组**（`shop_price/price`、`shop_store/store`）便于运营对比 |
+| SI-A3 | PUT | `/distributors/item` | 配置价格/库存/上下架：`{distributor_id(Y), item_id(Y), price?, store?, is_show?, is_can_sale?, is_total_store?}`；`store` 入参按**绝对值**（与 SK-A5 的增量口径不同，这里跟源系统"配置店铺库存"一致），`is_total_store` 由 false→true 时店铺库存列**保留但不参与扣减** |
+| SI-A4 | DELETE | `/distributor/items` | 取消挂品：`{distributor_id(Y), item_ids[](Y)}`；只删关联行，不动 `items`，也不动订单历史快照 |
+| SM-A1 | GET | `/salesmans` | 导购列表：`distributor_id`/`keyword`/`role_id`/`is_valid` + 分页；行 `{salesman_id,salesman_name,mobile(掩码),distributor_id,shop_id,role_id,role_name,user_id,is_valid,order_count,commission_fee}` |
+| SM-A2 | POST | `/salesman` | 新增导购：`{distributor_id(Y), salesman_name(Y), mobile(Y), role_id?, user_id?, shop_id?, password?}`；`(distributor_id, mobile)` 店內唯一，重复 422 |
+| SM-A3 | PUT | `/salesman/{salesman_id}` | 更新（姓名/手机号/所属店/user 绑定） |
+| SM-A4 | PUT | `/salesman/role/{salesman_id}` | 调岗：`{role_id(Y)}`；角色必须是本店启用的角色 |
+| SM-A5 | PUT | `/salesman/{salesman_id}/status` | 启停：`{is_valid: 'true'|'false'}`；停用即员工端登录被拒（**会话不吊销**，见 §18.3） |
+| SM-A6 | GET/POST/PUT/DELETE | `/salesman/roles`、`/salesman/role/{role_id}` | 导购角色 CRUD：`{role_name(Y), remark?}`；被导购引用的角色不能删（422） |
+| DL-A1 | GET | `/distribution/logs` | 佣金记录：`distributor_id`/`order_id`/`is_close`/`begin_time`/`end_time` + 分页；行 `{id,order_id,order_no,item_id,item_name,user_id,nickname(掩码),num,rebate,total_rebate,is_close,plan_close_time,created}` |
+| DL-A2 | GET | `/distribution/count` | 分销统计：`{commission_total,commission_open,commission_closed,withdraw_applied,withdraw_paid,balance}`（全场或按 `distributor_id` 收窄） |
+| DL-A3 | POST | `/distribution/logs/close` | 显式结算：`{distributor_id?, to_time?}` → 把 `is_close=FALSE AND plan_close_time<=to_time` 的行批量置已结算，出 `{closed_count, closed_fee}`；同一时间窗重复调用第二次 `closed_count=0`（幂等） |
+| CW-A1 | GET | `/distribution/cash_withdrawals` | 提现列表：`status`/`distributor_id` + 分页 |
+| CW-A2 | PUT | `/distribution/cash_withdrawal/{id}` | 处理：`{status: 'confirmed'|'refused'|'paid', remarks?}`；三态迁移见 §18.5 状态机 |
+| CW-A3 | GET | `/distributor/cash_withdrawal/payinfo/{id}` | 打款信息（mock 回执）：`{id,money,status,pay_type:'offline',account{...},paid_time}`；非 `paid` 时 `paid_time=0` 且 `account` 给"待财务打款" |
+| PL-A1 | GET | `/pickuplocation` | 自提点列表：`keyword`/`status`/`rel_distributor_id` + 分页 |
+| PL-A2 | POST | `/pickuplocation` | 新建：`{name(Y), province, city, area, address(Y), contract_phone(Y), lng, lat, status(1/0), rel_distributor_id?}`（`rel_distributor_id=0` = 全平台通用点） |
+| PL-A3 | PUT | `/pickuplocation/{id}` | 更新 |
+| PL-A4 | DELETE | `/pickuplocation/{id}` | 删除（逻辑删 `status=0`；被未完结自提单引用时 422） |
+| PL-A5 | PUT | `/pickuplocation/reldistributor` | 挂店/摘店：`{id(Y), distributor_id(Y), bind: true|false}` |
+| WO-A1 | GET | `/writeoff/{order_id}` | 核销查询：`{order_id,order_no,ziti_code,ziti_status,receiver_name,receiver_mobile,total_fee,items[]}`；码不匹配 422 |
+| WO-A2 | POST | `/writeoff/{order_id}` | 核销执行：`{ziti_code(Y)}` → 见 §18.6 |
+
+### 18.3 员工端面（前缀 `/api/admin/wxapp`，**新增第三条链** `staffChain`）
+
+源系统用 `provider=adminwxapp` + header `x-wxapp-session`。本项目保持**同一 header 名**（`x-wxapp-session`），值是本项目签发的 `Kind.SALESMAN` JWT；`JwtSalesmanFilter` 校验后把 `SalesmanPrincipal(salesmanId, distributorId, shopId, userId?)` 放进上下文。会员/运营令牌打到员工面是 **401**（`Unauthenticated.`），与既有的"跨面拒绝"同口径。
+
+| # | 方法 | URL | 说明 |
+|---|---|---|---|
+| ST-E1 | POST | `/login` | 员工登录：`{mobile(Y), password(Y)}` → `{token, salesman_id, salesman_name, distributor_id, shop_id, role_id, role_name}`；密码走 `operators` 同一 bcrypt 列（`salesman.password`，schema 末尾追加）；停用/未设密码 401 |
+| ST-E2 | GET | `/getinfo` | 当前员工信息（含所属店铺名与角色名） |
+| ST-E3 | GET | `/shoplist` | 本店简易档（`distributor_id,name,mobile,is_ziti,is_delivery,hour`） |
+| ST-E4 | GET | `/salespersonCount` | 我的统计：`{order_count,today_count,pending_count,commission_open,closed,balance}` |
+| ST-E5 | GET | `/salespersonFee` | 我的佣金明细（分页，`is_close` 过滤），口径同 DL-A1 但**强制 `salesman_id=自己`** |
+| SO-E1 | POST | `/order/create` | 代客下单：入参 = ORDER-2 全集 + `user_id?`（散客可空）；`salesman_id` **由会话强制注入**，入参给了也忽略；越权指定别人的 `distributor_id` → 403 |
+| SO-E2 | GET | `/order/getlist` | 我开的单：分页 + `order_status`/`keyword`，只出 `salesman_id=自己` 的行 |
+| SO-E3 | GET | `/order/getinfo` | 详情（同 ORDER-5 字段集，外加 `salesman{}`） |
+| SO-E4 | POST | `/order/ziti` | 员工端自提核销：`{order_id(Y), ziti_code(Y)}` = WO-A2 的另一个入口（同一 service 方法，不复制逻辑） |
+
+### 18.4 店铺商品双模：价格与库存的唯一口径
+
+`is_total_store` 决定**库存从哪个池子扣**，与价格是两个独立维度：
+
+```
+行价格 = distribution_distributor_items.price（该店挂过品） ?: items.price（总部现价）
+行库存 = is_total_store=TRUE  → items.store（总部池，CAS deductStock 一条腿不变）
+        is_total_store=FALSE → distribution_distributor_items.store（店铺池，新增 CAS）
+上下架 = is_show / is_can_sale 任一 false → 前台列表不出、购物车进 invalid_cart（原因"该店铺已下架此商品"/"该店铺暂不可售"）
+```
+
+三条硬约束：① 店铺价与店铺库存**只在 `CartService.buildContext` 预取**（与营销域同一条纪律，规则链继续不查库），`PriceLine` 新增 `stockSource`（`TOTAL`/`SHOP`）与 `shopRowId`，`price` 直接换成店铺价、`origin_price` 仍给总部现价；② 扣减与回补必须**同一条腿对称**——`OrderCreateService.deductStock` 按行 `stockSource` 分流，取消/超时关单/售后回补同样分流，漏一条就出现"店铺卖光了、总部库存纹丝不动"；③ 未挂品的商品在店铺视角**不参与**该店购物车与下单（`distributor_id` 与 `shop_id` 不一致时进 invalid），跨店混 cart 只是展示分组，结算仍是**一单一店**（`form.shop_id` 决定这单归谁，拆单不属 M1-4）。
+
+### 18.5 佣金与提现：入账、冲销、结算、状态机
+
+入账落在**支付回调成功之后**（`PayService` 结清处，与积分入账 `accruePoints` 同位）：按订单行逐行写 `distribution_distribute_logs`，`rebate = 行 total_rebate`（下单时已按 `items.rebate × num` 算好，与订单明细同源，不重算费率）、`total_rebate` 记累计、`is_close=FALSE`、`plan_close_time = 结清时刻 + sys_config.commission.close_delay`（天，seed 追加，缺省 7）。三条硬口径：① 只有 `distributor_id>0` 且 `order_holder='distributor'` 的单才产生佣金（自营单平台不抽佣）；② 平台服务费与佣金分账（`payment_subject=1` 店铺收款时平台按 `rate` 收服务费）属 statements 账期域，**M1-4 只做列与展示，不做对账单**；③ 重复回调不双计（幂等判据 = 该 `order_id` 已有日志行就跳过，与 M1-2 的 `trade_state` 判据同族）。
+
+冲销改在同一个事务里做两件事：现有 `reverseCommission` 减订单列（`total_rebate`/`commission_fee`）之外，新增**按行退款占比减对应日志行的 `rebate`**（退款额占比向下取整，且 `rebate` 不为负——减到 0 为止）。已 `is_close` 的日志行**只记负向流水不回改**（结算后的钱已经进了可提现余额，回改历史行会让账实不符）。
+
+提现状态机（`distribution_cash_withdrawal.status`，照抄源系统四态）：
+
+```
+applied ──confirmed──> confirmed ──paid──> paid（终态，记 paid_time）
+   │                        │
+   └──refused──> refused     └──refused──> refused（终态，钱回可提现余额）
+```
+
+余额口径：`balance = Σ(is_close=TRUE 的 rebate) − Σ(status IN ('applied','confirmed','paid') 的 money)`。申请闸门（全部 422 且带 `errors`）：`money<=0`、`money>balance`（"可提现余额不足"）、该店已有 `applied/confirmed` 在途（"已有提现申请待处理"）、店铺 `is_valid!='true'` 或 `review_status=false`（"店铺未启用，不能提现"）。`refused` 不写日志行、不动佣金表——它只让上面的 `balance` 公式少扣一笔，因此**天然可重算**。
+
+### 18.6 自提核销与 `ziti_code`
+
+`receipt_type='ziti'` 建单时（`OrderCreateService`，本轮把"只放宽收货校验"补成完整语义）：校验 `distributor_id` 对应的店 `is_ziti=TRUE` 否则 422「该店铺不支持自提」；生成 **6 位数字码**（`SeqGenerator` 新号段 `ziti_code`，非随机，同店不重复即可）写 `ziti_code`、`ziti_status=FALSE`；订单状态沿用 C42 的 `status=4`「待自提」语义（付款后由状态机推到 4，而不是 5 待收货）。
+
+核销（WO-A2 = SO-E4 同一 service）四条闸门：① 单必须 `receipt_type='ziti'`；② `ziti_status=FALSE`（已核销 422「该单已核销」）；③ `order_status` 必须在 4（未付款/已关闭不能核）；④ **码逐字相等**（不区分前后空格，不做大小写）。通过后：`ziti_status=TRUE`、`order_status` 推到完成（自提单没有发货环节，直接置 3 已收货），并写 `orders_operate_logs`（操作人=核销员工/运营）。**并发核销**用条件更新 `WHERE order_id=? AND ziti_status=FALSE` 做 CAS，两路同时只有一路改到行（与营销域同一套 CAS 纪律）。`ziticode` 前台查询只出本人该单，码不给别人看。
+
+### 18.7 权限码与号段（`sql/seed.sql` 末尾追加，接 M1-3 的 37 之后）
+
+| resource_id | resource_code | 覆盖端点 |
+|---|---|---|
+| 38 | `distributor`（catalog） | 目录 |
+| 39..42 | `distributor.lists` / `.update` / `.review` / `.status` | DS-A1..A8（看/改/审/开关四条分立，"能改档案"不等于"能自己过审"） |
+| 43,44 | `distributor.items_lists` / `.items_update` | SI-A1..A4 + SI-F1（挂品与改价是两个岗） |
+| 45,46 | `salesman.lists` / `.update` | SM-A1..A5 + 角色 SM-A6 |
+| 47 | `distribution.logs` | DL-A1/A2 + CW-A3 的"看钱"面 |
+| 48 | `distribution.close` | DL-A3 结算（**独立一条**：结算是把钱从"在途"变成"可提"的动作） |
+| 49,50 | `withdraw.lists` / `.check` | CW-A1/A2（申请方与审核方必须分人，与 M1-1 退款岗同一理由） |
+| 51,52 | `pickup.lists` / `.update` | PL-A1..A5 |
+| 53 | `order.writeoff` | WO-A1/A2（核销=承认货已到手） |
+| — | 员工面（ST-E/SO-E）**不吃 resource_code** | 鉴权=SALESMAN JWT + 会话内 `salesman_id/distributor_id` 强制过滤，越权面靠 §18.3 的"会话注入"而不是运营权限树 |
+
+号段：`seq_generator` 追加 `('ziti_code',0)`；新表主键沿用 AUTO_INCREMENT + `RESTART WITH 100`（与 M0-4 九表同惯例）。
+schema 末尾追加两条列（第三批落地时一次给全，MySQL/H2 同一语句可跑）：`distribution_distributor_salesman.password VARCHAR(255)`（员工端登录口令，bcrypt，与 `operators` 同列宽同算法）、`members.salesman_id BIGINT DEFAULT 0`（会员当前归属导购）。
+
+### 18.8 分批交付
+
+| 批次 | 内容 | 端点 |
+|---|---|---|
+| 第一批 | 店铺档案（DS-A/F）+ 店铺商品双模（SI-A/F）+ **算价与扣库存按 `stockSource` 分流** + 多店铺混合购物车拆单展示 + 后台订单 `distributor_id` 越权过滤 | DS-A1..A8 / DS-F1..F2 / SI-A1..A4 / SI-F1..F2 |
+| 第二批 | 佣金入账/冲销/结算（DL）+ 提现四态链（CW-A/F）+ `sys_config.commission.close_delay` | DL-A1..A3 / CW-A1..A3 / CW-F1..F4 |
+| 第三批 | 自提点（PL）+ `ziti_code` 生成与核销（WO/ZT-F1）+ 导购（SM）+ **员工端第三条链**与 SO-E 族 | PL-A1..A5 / PL-F1 / WO-A1..A2 / ZT-F1 / SM-A1..A6 / SM-F1..F2 / ST-E1..E5 / SO-E1..E4 |
+
+门槛用例（docs/05 §M1-4）：① **多店铺混合购物车拆单展示** —— 总部店与加盟店各挂同一 SKU 的不同价/不同池，`CART-2` 两组各按自己店铺价与店铺库存出数、运费按组各算一次、`invalid_cart` 收"该店已下架"的行；下单只成交所选那一店，另一店的池子分毫不动。② **`distributor_id` 过滤越权** —— 用运营令牌（挂 role）看后台订单/佣金/提现列表时按 `distributor_id` 收窄，`viewer`（seed 无角色）403、跨店 id 404 而不是 200 回显别人的数据；员工令牌打会员面与后台面各自 401。
+
+### 18.9 与源系统的差异（D 系列续编，追加于 §16.2/§17.2 之后）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D42 | 店铺"审核"与"启停"是两个端点，不像源系统混在 `updateDistributor` 里 | 审核位 `review_status` 只由 DS-A5 改，运营开关 `is_valid` 只由 DS-A6 改（与营销域"审核与启用是两个维度"C115 同一条纪律）。`closed` 关店要求先把佣金结清、提现处理完，源系统不查这一步，会出现"店关了、账上还挂着未结佣金"的悬空数 |
+| D43 | 店铺商品不引入 Redis/缓存与"批量导入导出" | SI-A1..A4 全部走数据库条件更新；`items/export`（L521）与 `wxacode`、标签分类、围栏等一并划 P2（§18 开头的"不做"清单），本项目演示形态是单机 H2 + 无 Redis |
+| D44 | 员工端会话用 JWT，不还原 PHP 的 `x-wxapp-session` 服务端会话 | header 名沿用 `x-wxapp-session` 保住线协议形状，值是本项目的 `Kind.SALESMAN` 令牌。源系统"停用导购后会话仍活"的缺陷不继承：员工面每个请求都回查 `salesman.is_valid`，停用即刻 401（多一次索引查询，换来"停用真的停用"） |
+| D45 | 导购不做任务/通知/排行榜/赠券/客诉 | 附录里这些占导购域 60+ 条路由，全部 P2；M1-4 只落"人员 + 角色 + 归属 + 佣金 + 代客下单"这条经营主干 |
+| D46 | 佣金按**行 rebate 快照**入账，不在结算时重算费率 | 源系统在回调里重读商品 `rebate`/`commission_ratio`，改一次费率就把历史单的佣金改掉。本项目下单时已把 `items.rebate × num` 落到 `orders_normal_items.total_rebate`，入账只读它（与"优惠快照后面会被改被删"同一族：C121）。`rate`（万分比平台服务费）只影响之后新单 |
+| D47 | 提现"打款"是 mock 回执，不接渠道代付 | CW-A3 只回账户型信息与 `paid_time`；bady/adapay/hfpay 三家渠道提现族（附录 15 条）属 M2-2「只做 `PayChannel` 实现位，不逐家联调」 |
+
