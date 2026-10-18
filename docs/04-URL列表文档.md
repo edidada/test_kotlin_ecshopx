@@ -993,3 +993,34 @@ schema 末尾追加两条列（第三批落地时一次给全，MySQL/H2 同一�
 | D60 | **`PL` 族没有"按 id 单读"的 GET**（源系统同形：配置台只有列表 + 表单），因此 `PL-A2/A3` 的出参必须是完整行 | 前端建完点直接把这一行插进列表，两个形状不一致就得各写一套渲染。e2e 首跑按 `GET /api/pickuplocation/{id}` 断言吃了 **405**，改成断 `POST` 出参并给 `viewOf` 补 `shop_name`（C168）才对得上 |
 | D61 | **`pickup_location_id` 用 `ALTER TABLE … ADD COLUMN IF NOT EXISTS` 追加，并配复合索引 `idx_ziti_pickup(pickup_location_id, receipt_type, ziti_status)`**（C161）| 常驻库重启自动补列补索引，不必清库；停用闸门每改一次点都要按这三列扫 `orders_normal_orders`，没索引就是一次全表扫 |
 | D62 | **`WO-A2` 与员工端 `SO-E4` 的核销只留一个实现**（本批为 3B 预留的口径，尚未落地）：差别只在归属判据（后台按 `DistributorScope`，员工按在册行），码比对与状态副作用共用 `WriteOffService.writeOff` | 两处各写一遍就会出现"后台核完的单员工端还能再核一次"这种双花；共用一条 CAS 从结构上堵掉 |
+
+## 22. 实现期语义补充（M1-4 第三批 3B：导购 SM + 员工端链 ST/SO + 岗侧提现 CW 落地时确认，追加于 §21 之后，不回改上文）
+
+交付面：`SM-A1..A6` / `SM-F1/F2` / `ST-E1..E5` / `SO-E1..E4` / `CW-F3/F4` 共 **19 条端点** + 第三条安全链 `staffChain`（`@Order(0)`、`/api/admin/wxapp/**`、规范头 `x-wxapp-session`、主体 `Kind.SALESMAN`）+ §18.3 员工面五条强制口径 + §18.5 的导购侧提现 + 权限码 45 `salesman.lists` / 46 `salesman.update`（§18.7）+ 新表 `distribution_distributor_salesman_role` 与六处 schema 追加（`salesman.password`、`salesman.avatar`、`uk_salesman_mobile(distributor_id, mobile)`、`distribute_logs.salesman_id`、`cash_withdrawal.salesman_id`、`members.salesman_id`）。新代码落位：`dao/distribution/SalesmanMappers.kt`、`service/distribution/SalesmanService.kt`、`service/auth/SalesmanContext.kt`、`web-admin/security/JwtSalesmanFilter.kt`、`web-admin/SalesmanAdminController.kt`、`web-admin/StaffController.kt`、`web-front/SalesmanFrontController.kt`；改动面：`SecurityConfig` 加 `staffChain`、`CommissionService`/`CommissionMappers` 加岗侧聚合与两列、`OrderCreateService` 加 C177 回落、`MembersMapper` 加 `bindSalesman`/`salesmanIdOf`。
+
+### 22.1 口径确认（C 系列续编）
+
+| # | 口径 | 实测依据 |
+|---|---|---|
+| C172 | **员工登录认手机号，不认 `user_id`**：`findLogin(companyId, mobile, distributorId?)`。`distributor_id` 传错店=查无此人，与"手机号不在册""口令不符"**同一句** `Unauthenticated.` 401，不回答"这个号在别家店存不存在"；不传 `distributor_id` 而同一手机号在多家店在册时按**最小 `salesman_id`** 回落（多店是常态，见 C182） | e2e 用例 1/2；冒烟「三种失败同一句 401（停用/没设口令/口令不符）」「`distributor_id` 传错店等于查无此人」 |
+| C173 | **员工面一条 `@RequiresResource` 都没有**：45/46 两个码只属于运营面（"管人"是后台动作），员工能看见什么、能改什么全部由会话里的 `salesman_id`/`distributor_id` 决定，**不接受前端传值覆盖**——`SO-E1` 入参给 `salesman_id` 一律忽略，`ST-E5` 明细强制 `salesman_id=会话` | e2e 用例 10/12；冒烟「ST-E5 入参 `salesman_id=1` 被会话覆盖」「SO-E1 `salesman_id` 取会话（入参传谁都忽略）」 |
+| C174 | **这条链的位次就是这条链的全部难点**：`staffChain` 必须 `@Order(0)`。`/api/admin/**` 是 `/api/**` 的子集，排在 `adminChain` 之后它永远轮不到，员工令牌会掉进运营链被 `JwtOperatorFilter` 认成"不是 OPERATOR" → **回的是 401，与"链没匹配上"同形**，排查极费时间。规范头是 `x-wxapp-session`，`Authorization: Bearer` 同值兼容（D44）；只有 `/api/admin/wxapp/login` 匿名，其余每条都要 `Kind.SALESMAN` 会话 | e2e 用例 1「令牌就绪与三条链互不认对方」；冒烟第 1 段（员工令牌打 `/api/salesmans` 401、运营/会员令牌打 `/api/admin/wxapp/getinfo` 401、两种头都认） |
+| C175 | **口令只进不出**：`password` 只在建/改时接收，`SM-A1/A2/A3`、`ST-E2`、前台 `SM-F1` 的出参里没有这一列（bcrypt 落库，明文只出现在 seed 的哈希与演示脚本的拼接串）。`SM-A3` 是三态读-改-写：不传=不动、**传空串=清空口令**（清空后即刻 401，与口令不符同一句：`hash.isNullOrEmpty()` 排在比对之前）、传新串=改 | e2e 用例 6「建人校验与口令只进不出」+ 用例 7；冒烟「传空串=清空口令，随即 401」 |
+| C176 | **岗侧提现是一口池上的 `min`，不是第二份钱**：`可提 = min(本岗已结算 − 本岗占用, 店池余额)`。岗侧聚合（`sumSalesman` / 岗侧占用）与店侧同一套 `CASE`，只是键换成 `salesman_id`——**故意写成第二条 SQL 而不给 `sum` 加可选参数**：两侧鉴权来源完全不同（店按 `DistributorScope`，岗按在册行），合并成一条可选参数就是把两份账并成一份错账的路径。记录面分栏：`CW-F2` 只出 `salesman_id=0`，`CW-F4` 只出 `>0`，后台 `CW-A1` 可按 `salesman_id` 筛 | e2e 用例 14/15；冒烟「C176 一口池取 min」「CW-F2 只出店侧的行」「CW-F4 只出岗侧的行」「CW-A1 按岗筛」 |
+| C177 | **归属在落单那一刻定死**：员工代客下单由会话强制注入；会员自己下单回落到 `members.salesman_id`（`form.salesmanId?.takeIf { it > 0 } ?: members.salesmanIdOf(userId, companyId) ?: 0`）。此后换绑、停用、改岗都**不回改**历史单与已落流水（与 D46 同一条纪律）；`distribute_logs.salesman_id` 从订单头带下来，入账时不重新查绑定 | e2e 用例 9「绑定导购后自单自动带归属」；冒烟「绑上之后会员自己下单 `salesman_id` 跟着进单」「落单即定（换绑不回改旧单）」 |
+| C178 | **"在册"是三处共用的同一个判据**（`salesman.is_valid`），停用即刻三处生效：员工面每个请求回查 → 401（D44，已有会话也立刻作废）；前台 `SM-F1` 查无此人 → 404；钱面 `CW-F3` 断钱。三处读的都是**在册行**，不是 `members.salesman_id` 那个当前绑定 | e2e 用例 7「改档调岗启停与停用即刻生效」；冒烟「停用即刻关掉已有会话」「停用后前台也查无此人」「岗停用后 CW-F3 立刻断钱」 |
+| C179 | **`CW-F3` 的错误形状分三支**：① 一家岗都没有 → **403**「您不是任何店铺的在册导购」；② 还有别的岗、只是本店没有 → **422** + `errors.distributor_id=["无此岗"]`；③ 未传 `distributor_id` 且在 ≥2 家有岗 → **422**「您在 N 家店铺各有导购岗」+ `["必填"]`。资格判据（①②③）一律排在额度判据（"可提现 X 分"）之前，与 C153 同一条纪律 | e2e 用例 14「提现先认在册岗再认余额与在途」；冒烟「没岗位的会员以导购身份提现 → 403」「指明一家他没岗的店 → 422 `["无此岗"]`」「驳回后岗侧在途清了，但人已停用 → 仍 422」 |
+| C180 | **一口池只有一个在途位**（本批实跑照出来的口径，写实现时没料到）：店侧 `CW-F1` 那道闸门 `countInFlight` 按 `distributor_id` 数行，而岗侧那笔**同样带 `distributor_id`** → 岗挂一笔在途时店侧申请直接 422；反过来店侧把池提空后，岗侧不是被闸门挡、是被 `min` 压成「可提现 0 分」。两种挡法共用一条理由：**别让两笔申请同时盯着同一份钱**，否则财务按行打款必然有一笔超付。岗侧那道 `countInFlightBySalesman` 才是真按岗挡（同店两个导购各提各的互不影响） | 冒烟「反过来也挡：岗侧那笔同样占住店侧那道在途闸门」「C176 一口池的正证：池被店侧提空后岗侧一分都提不了」「在途唯一按岗挡」；e2e 用例 15「一份池子两个口径且记录分两栏」 |
+| C181 | **岗位的可选性 = 归属 + 营业态两条**（`SM-A6`）：`distributor_id=0` 是平台通用岗，每家店建导购时都选得到，但**只有 `admin` 型建得了**（D57 同一条权力划分）；本店专属岗跨店选 → 422「该岗位不存在或已停用」+ `errors.role_id=["本店不可选"]`；`status=0` 的岗同样不可选；删岗前数在册人数 → 422「该岗位下还有 N 名导购，请先调岗再删」+ `errors.role_id=["仍被引用"]`；同店同名岗 422 | e2e 用例 8「岗位 CRUD 走复数路径且删不掉还有人的岗」；冒烟「平台通用岗跨店选得到」「别家店专属岗 → 422 `["本店不可选"]`」「挂着导购的岗删不掉」 |
+| C182 | **手机号是店内唯一，不是全局唯一**：`uk_salesman_mobile(distributor_id, mobile)`。同一个人可以在两家店各有一份岗——这正是 C172 多店回落与 C179 ③「指明提现到哪家」存在的前提；同店重号 → 422「该店铺下已有同手机号的导购」+ `errors.mobile=["店内重复"]`。常驻演示库里这条是真索引，脚本侧因此必须按时间戳生成手机号、收尾**停用**本轮岗而不是删行（删行会把别家店的历史引用一起抹掉） | 冒烟第 3 段「手机号店内唯一」「本轮建的四个岗全部停用（残留的人登不进员工端，也不占下一轮的唯一索引）」 |
+| C183 | **员工代客下单只有"给一个会员开单"这条路走得通**：给了 `user_id` → 走那个会员的车内结算；被代的人不存在或跨租户一律 **404**（不给"这个 `user_id` 存在吗"），越店 → **403** `errors.distributor_id=["非本店铺"]`。员工本人若是没绑账号的散客（`user_id=0`），购物车路径自然算出 0 行 → 422「购物车为空」，与前台同一条判据、**不是缺陷**；`fastbuy`/`offline` 这种"带着行来"的模式照样成交 | e2e 用例 10「代客下单三条强制」；冒烟「越店开单 403 `["非本店铺"]`」「被代下单的会员不存在 → 404」「散客走购物车 → 422（期望行为不是缺陷）」 |
+
+### 22.2 与源系统的差异（D 系列续编）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D63 | **店侧提现也必须有在册行**：`CW-F1` 的归属判据是 `salesmen.countActive(companyId, userId, distributorId)`，不是"这家店的老板"——本项目 `distributor` 表根本没有老板列，源系统靠 `distributor.user_id` 那一条。代价：从没配过导购的店主提不了现。缓解：seed 给店 2 的两条在册行绑了 `user_id=1/2` 并设了演示口令，演示库开箱能提 | §18.5 的 CW-F1 一句话在源系统里是"老板提自己店的钱"，本项目改写成"在册员工替店提"，归属只有一条可信来源。验证：冒烟「同一个人替店提也要有在册行」 |
+| D64 | **`role_id=0` = 没配岗，允许存在但不接待顾客**：`SM-A2` 建人时可以不选岗（源系统同形），但 `SM-F1` 扫码面把 `roleId<=0` 的人当查无此人 404。seed 的 `salesman_id=1`（demo 旗舰店老板）正是 `role_id=0`，只用来走店侧提现 | 没岗的人没有可展示的角色，前台给他挂一个"未知岗位"比不出现更容易误导顾客。验证：e2e 用例 4「扫码进店查得到有岗的导购查不到没岗的」 |
+| D65 | **员工令牌只有 `salesman_id / distributor_id / company_id` 三 claim**（`Kind.SALESMAN`），不还原 PHP 的服务端会话（D44）；每个请求回查 `is_valid`。代价是每请求一次索引查询，换来"停用真的停用" | 源系统停用导购后旧会话仍活，本项目不继承。验证：冒烟「停用即刻关掉已有会话（D44）」 |
+| D66 | **`SO-E1` 复用 `ORDER-2` 那条建单入口**（给 `OrderForm` 开一个 `userId` 口子），不写第二条下单链：前台的 `user_id` 永远取自令牌，只有员工面才接受入参 `user_id`。两条链迟早要在算价、扣库存、佣金入账、留痕四个地方各漂一个版本 | 代价是 form 上多一个"只对员工有意义"的字段，注释里写明了谁能用。验证：e2e 用例 10 + 冒烟第 6 段整条 |
+| D67 | **岗侧聚合是新增的第二条 SQL**（`sumSalesman` 与岗侧占用），不是给店侧那条加可选参数（C176 的结构性理由）。看起来重复、审起来分得清 | 验证：e2e 用例 15 分别断两侧占用与余额；冒烟「岗的余额被自己的在途提现扣光」「`withdraw_occupying` 含岗侧申请」 |
