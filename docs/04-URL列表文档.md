@@ -933,3 +933,30 @@ schema 末尾追加两条列（第三批落地时一次给全，MySQL/H2 同一�
 | D49 | **扣减/回补收口到唯一 `StockPool.deduct/restore`**，四处原先各自调 `ItemsMapper.deductStock/restoreStock` 的调用点全部改走它 | §18.4 写"扣减与回补必须同一条腿对称"，代码里只有一种兑现方式：让扣和回补共用一个方法。原来四处分流，只要有一处忘了判 `is_total_store`，就会出现"店铺卖光了、总部库存纹丝不动"或"取消一单把总部池加两次"。调用方只带 `(店, 品, 件数, is_total_store)`，池子归属读**订单明细行**不回读挂品行（挂品行可能在两单之间被改被删，C150 同族） |
 | D50 | **列表派生数走"一次 GROUP BY 批量回捞"，不做逐行子查询** | `DS-A2` 的 `order_count/pay_fee/refund_fee/commission_fee/balance` 五条聚合各一条 SQL、按本页 `distributor_id` 集合 `IN` 查，与商品域 `ItemService.enrich` 同一条防 N+1 纪律。退款额不并进订单那条聚合：`orders_normal_orders` 没有 `refund_fee` 列，钱在 `trade.refunded_fee`，跨表 JOIN 要在 H2/MySQL 两种方言下各写一遍 `CAST(order_id AS CHAR)`，拆两条 GROUP BY 更便宜且不漂 |
 | D51 | **`distribution_distributor_items` 不实现 `Stampable`** | 本表按源系统 schema 原样沿用，**没有 `created/updated` 两列**；照抄 M0-4 记过的那条会给 `SeedDataLoader` 与 `INSERT` 一起报 `Column "created" not found` |
+
+## 20. 实现期语义补充（M1-4 第二批：佣金 DL + 提现 CW 落地时确认，追加于 §19 之后，不回改上文）
+
+交付面：`DL-A1..A3` / `CW-A1..A3` / `CW-F1..F2` 八条端点 + §18.5 的入账三条硬口径、冲销两段式与提现四态机 + `sys_config.commission.close_delay` + 权限码 47..50（§18.7）。新代码落位：`dao/distribution/CommissionMappers.kt`、`service/distribution/{CommissionService,CommissionSettleJob}.kt`、`web-admin/CommissionAdminController.kt`、`web-front/CommissionFrontController.kt`；`PayService` 的三个结清点与 `RefundService.reverseCommission` 各挂一行调用——**钱动的那条事务里必然同时动佣金流水**，不再有"付了钱没佣金、退了款佣金还在"的中间态。
+
+### 20.1 口径确认（C 系列续编）
+
+| # | 口径 | 实测依据 |
+|---|---|---|
+| C151 | **入账只跟钱走，幂等判据是"这一单有没有流水行"**。`accrue` 挂在结清事务内、与 `accruePoints` 同位；挡重放用 `COUNT(order_id)>0` 而不是订单状态——状态在取消/售后/后台改单里都会被别处动，流水行不会 | e2e「未付款的单不入账」（DL-A1 0 行）+「回调重放不双计 零佣金不写行」（重放一次仍 1 行）；冒烟同名两条（`POST /api/notify/wxpay` 打两遍，`logs?order_id=` 的 `total_count==1`） |
+| C152 | **流水的 `rebate` 与 `total_rebate` 都写订单行的 `total_rebate`（该行佣金总额，不是单件）**：聚合式 `SUM(rebate)` 与 `SUM(total_rebate)` 必须同值可互换，否则 `balance` 与统计卡的"佣金合计"会差一件的钱。`num` 只记成交件数，**负向行 `num=0`**——退款改的是钱不是销量 | e2e「结清即入账 佣金取行上的 `total_rebate`」断 `rebate==total_rebate==1000`；冒烟「补一条等额负向行」+「负向行天生已结算、件数记 0」 |
+| C153 | **提现的资格判据排在额度判据之前**：四道闸门顺序是 表单合法 → 归属（在册员工行）→ 店铺营业态 → **在途唯一** → 余额。反过来的话，一家已经把额度提满的店再点一次，看到的是"可提现 0 分"这种把人往错误方向引的原因，而他真正该看到的是"上一笔还没处理完" | e2e「CW-F1 四道闸门」首跑就红在这里（第二笔拿到 422「可提现余额不足」而不是「已有提现申请待处理」），把 `countInFlight` 提到 `balanceOf` 之前后转绿；冒烟「在途唯一 → 422（资格判据排在余额之前）」 |
+| C154 | **会员面的"这是不是你的店"只认 `distribution_distributor_salesman` 的在册行**（`user_id + distributor_id + is_valid='true'`）。`distribution_distributors` 没有"老板"列，源系统靠 `salesman.user_id` 反查，本项目照抄这条判据；seed 因此追加一条 `demo 旗舰店`↔演示会员的在册行 | e2e/冒烟「不是你的店 → 403（归属只认在册员工行）」：同一令牌打 `distributor_id=1` 是 403，打 `=2` 是 200 |
+| C155 | **`cash_withdrawal` 没有 `paid_time` 列**（照源系统 schema 原样），终态时刻一律落 `updated`；出参 `paid_time` 只在 `status='paid'` 时给该值，其余状态**给 0 而不是 null**，前端不用判空 | 冒烟「落 `applied` 且 `paid_time=0`」「`confirmed→paid` 200，终态时刻落在 `updated`」「打款后 `paid_time>0`」；e2e「CW-A3 打款前先给待财务打款」 |
+| C156 | **DL-A1 的 `order_id`/`order_no` 是同值的两个字符串位**：本仓 `orders_normal_orders.order_id` 就是号段发出来的单号，表里没有 `order_no` 列。两个键都给是让后台拿去显示、前端拿去跳详情，谁都不用知道"其实是一个数"。**昵称取 `members_info.username`，空则退到掩码手机号**；`members`/`members_info` 都 `LEFT JOIN`——注销会员的佣金流水仍要出得来，钱不能因为人已注销就从账上消失 | 冒烟「单号出参是字符串且与 `order_no` 同值」+「买家昵称出得来」；e2e 契约 `CommissionContract.LOG_ROW` 含 `order_no` |
+| C157 | **到期判据只有一条，与入口无关**：`is_close=FALSE AND plan_close_time<=to_time`。`DL-A3`（运营手动）与 `CommissionSettleJob`（定时）共用它，差别只在 Job 没有租户上下文，所以 DAO 另给一条不带 `company_id` 的 `closeBatchAll`；两者都是条件更新，多实例同时扫只有一份副作用落地 | e2e「结算只由到期判据决定 与入口无关」（Job `runNow()` 结掉的行与 `DL-A3` 同一批）；冒烟「`DL-A3` 到期一次结清」+「同一时间窗第二次 0 行（幂等）」 |
+| C158 | **`fastbuy` 的店铺取 `items.distributor_id`，与 `distributor_id` 入参无关**——商品挂在总部名下时，`fastbuy` 单永远归总部。要造"加盟店佣金"只有**进店加购 + 车内结算**（`CART-*` 带 `distributor_id` → `order_new {cart_type:'cart', distributor_id}`）这一条路 | e2e 首跑 13 例红的根因就是借了 `PayEndToEndTest` 的 `fastbuy` helper；改成车内结算后 16 例降到 2 例（剩下那 2 例是 C153 与 C159 的真问题） |
+| C159 | **可提现余额是负数兜 0 的派生数**，`apply` 闸门读的是现算聚合（`balanceOf`），与 `DL-A2`/`DS-A8` 共用 `OccupyingSum` 一处口径；冲销找不到对应正向行时**不记负向行**——那笔佣金从没进过账，凭空冲一笔会让全场 `commission_total` 变负，那是更难解释的账 | e2e「账本最终对得上」（`closed=1000 / total=500 / balance=0`，负向行必 `is_close`）；冒烟「账自洽：`balance = max(0, 已结算 − 占用)`」 |
+
+### 20.2 与源系统的差异（D 系列续编）
+
+| # | 变更 | 理由/缓解 |
+|---|---|---|
+| D52 | **冲销分两段**：未结算行直接减（带 `GREATEST(…,0)`，减到 0 为止），已结算行**不回改**，改成插一条等额负向流水（`is_close=TRUE`、`num=0`） | 那条正向行的钱早进过 `balance`，回改历史行会让"页面上看到过的余额"和账本对不上。负向行走同一张表、同一组 `SUM(CASE WHEN is_close …)`，聚合式不改一行就把已结算总额拉回正确位置；对账时两行都在，能讲清发生了什么。缓解：退款占比按**行成交额**算（`1000×8900/17800=500`），与订单头 `total_rebate` 的冲销同一个分子分母，两处判据不漂 |
+| D53 | **提现状态机在 service 判 + 条件更新兜并发**，不给表加"状态机列"或流转日志表 | `transit(id, from, to)` 的 `WHERE status=#{from}` 让"两个人同时点通过"只有一次生效，第二次 0 行→422「该申请已被处理」；非法目标（`applied`）400 走校验面，跨态与终态 422 走业务面——与 §15 券、M1-1 退款那两处一致 |
+| D54 | **`DL-A3` 的 `closed_fee` 只在"实际改到的行数==预览行数"时才给数**，否则给 0 | 先 `closePreview` 取数、再 `closeBatch` 置位是两条语句，并发下预览有数、更新 0 行。出参报预览的钱等于报一笔没发生的结算；`closed_count` 取 `UPDATE` 的受影响行数才是真话 |
+| D55 | **定时结算做成 `@Scheduled` 固定延迟的一个 Job（`CommissionSettleJob`），不还原源系统的 `cron` 表与任务中心** | 与 M0-6 超时关单、M1-3 拼团结算同一条纪律：条件更新 + 可配 `ecx.schedule.*`，测试与冒烟把 initial-delay 拉到 1 小时以免抢跑（`settleDueAll` 与 `runNow()` 给用例直接调）。源系统任务中心的启停/重试/通知一并划 P2 |
