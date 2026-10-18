@@ -38,7 +38,7 @@ class BootSmokeTest {
         assertTrue(ctx.containsBean("db"), "expect com.ecshopx.kotlin.service.tx.Db bean named 'db'")
     }
 
-    @Test fun `sql init 建表 70 张`() {
+    @Test fun `sql init 建表 71 张`() {
         val ds = ctx.getBean(DataSource::class.java)
         ds.connection.use { c ->
             c.createStatement().use { st ->
@@ -48,7 +48,8 @@ class BootSmokeTest {
                         "WHERE table_schema='public' AND table_type='BASE TABLE'"
                 ).use { rs ->
                     rs.next()
-                    assertTrue(rs.getInt(1) == 70, "expect 70 base tables, got ${rs.getInt(1)}")
+                    // 71 = 原来的 70 张 + M1-4 第三批的 `distribution_distributor_salesman_role`（SM-A6 岗位表）
+                    assertTrue(rs.getInt(1) == 71, "expect 71 base tables, got ${rs.getInt(1)}")
                 }
             }
         }

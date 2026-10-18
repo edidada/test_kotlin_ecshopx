@@ -309,8 +309,10 @@ check("账自洽：balance = max(0, 已结算 − 占用)",
       s5["balance"] == max(0, s5["commission_closed"] - s5["withdraw_occupying"]), s5)
 
 # ===== 9. 收尾：还原佣金基数与库存 =====
-back = patch_item(old_rebate)
-check("items.rebate 还原为 %s" % old_rebate, back["rebate"] == old_rebate, back["rebate"])
+# 还原到 seed 真值 0（schema 默认），不是"开跑前读到的值"：一次崩在中途的跑动会把 500 留在常驻库，
+# 按读到的值还原就等于把污染固化成"下一轮的原态"。
+back = patch_item(0)
+check("items.rebate 还原到 seed 真值 0", back["rebate"] == 0, back["rebate"])
 check("改费率不回溯已落流水（D46）：本案两条行金额仍是 ±%s" % REBATE,
       abs(logs_of(oid)["list"][1]["rebate"]) == REBATE or abs(logs_of(oid)["list"][0]["rebate"]) == REBATE,
       logs_of(oid)["list"])
