@@ -30,7 +30,15 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
  *
  * （顺带一条 Kotlin 才有的坑：块注释里不能出现"斜杠紧跟两个星号"的那种 ant 风格路径字面量 ——
  *  Kotlin 的块注释可以嵌套，那一段会被当成又开了一个注释，编译器只报 "Unclosed comment"，
- *  不告诉你是哪一行开的头。）
+ *  不告诉你是哪一行开的头。M2-1 写网关链时又撞了它的孪生：**斜杠紧跟一个星号**同样会开嵌套，
+ *  所以这一族的注释里只写 `单段子路径`，不写字面量。）
+ *
+ * M2-1 第四批补第零条：`openapiChain`（`/api/openapi` 与它的单段子路径，鉴权 = `app_key + sign`）。
+ * 它必须排在 `@Order(0)` 之前 —— 理由与 `staffChain` 那一条**完全同构**：
+ * `/api/openapi` 是 `adminChain` 那个 `/api` 前缀的子集，排在它后面就永远轮不到，
+ * 症状还是 401「Unauthenticated.」而不是「这条链没匹配上」，排查成本一模一样（C174 在同一文件里重演）。
+ * 这条链放行的是**开放面本身**；后台管理开发者的那六条在 `/api/setting/openapi` 前缀下，
+ * 靠路径本身就分开了，不需要任何豁免表（§25.3 那段裁定就是为这件事写的）。
  */
 @Configuration
 @EnableWebSecurity
@@ -40,6 +48,22 @@ class SecurityConfig(
     private val salesmen: SalesmanService,
     private val mapper: ObjectMapper,
 ) {
+
+    @Bean
+    @org.springframework.core.annotation.Order(-1)
+    fun openapiChain(http: HttpSecurity): SecurityFilterChain {
+        http
+            // 两条入口各写一条 matcher，不用 `/**`：这一面只有 `/api/openapi` 与它的**单段**子路径
+            // （`/api/openapi/ecx.order.get`），`*` 恰好只吃一段，多段的 `/api/openapi/a/b` 落回 adminChain。
+            // 后台那六条在 `/api/setting/openapi` 下（§25.3），永远不会被这两条 matcher 命中。
+            .securityMatcher("/api/openapi", "/api/openapi/*")
+            .csrf { it.disable() }
+            .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
+            .authorizeHttpRequests { it.anyRequest().permitAll() }
+            // 不挂任何 Jwt*Filter：这一面的身份是 `app_key + sign`，由 OpenapiGatewayService 自己判
+            .exceptionHandling { it.authenticationEntryPoint { _, res, _ -> write(res, 401, "Unauthenticated.") } }
+        return http.build()
+    }
 
     @Bean
     @org.springframework.core.annotation.Order(0)

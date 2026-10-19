@@ -81,3 +81,29 @@ ecx:
     root: data/storage
     url-prefix: /storage
     max-size: 5242880         # 5MB，与 spring.servlet.multipart.max-file-size 对齐
+  openapi:
+    # M2-1 §25.5。全部走 @Value，本仓没有 @ConfigurationProperties 的先例、不为这一批开
+    enabled: true
+    # debug=true 跳过闸门 3..8（时间窗/签/密钥/nonce），租户直接取系统默认 1。
+    # **默认必须是 false**：开着它整个开放面就是匿名面。§25.6 门槛①专门断这一条的默认值。
+    debug: ${ECX_OPENAPI_DEBUG:false}
+    # 源系统 `abs(time()-strtotime(ts)) > 60*10`，逐字对得上
+    timestamp-window-seconds: 600
+    nonce-ttl-seconds: 600
+    # true = 固定 status/code/message/data 四键信封（源系统 HandleResponseMiddleware 的常态）；
+    # false = 成功直出 data 本体，失败仍回信封（否则对接方无从判断错）
+    wrap-response: ${ECX_OPENAPI_WRAP:true}
+  webhook:
+    # 出站总开关：关掉只是不投递，事件仍照常落 outbox（打开后一次补齐），与"不发事件"是两件事
+    enabled: ${ECX_WEBHOOK_ENABLED:true}
+    # 照抄源系统 Guzzle 的 timeout=>2；对端慢就让它慢，不占着投递线程
+    timeout-ms: 2000
+    max-attempts: 5
+    # 退避 = min(2^attempts, 32) × base，所以最长排到 16 分钟，够跨过对端一次发布窗口
+    backoff-base-seconds: 30
+    batch-limit: 20
+  schedule:
+    # 投递作业：首轮延迟给大值，避免启动风暴；间隔 30 秒与 backoff-base 同量级。
+    # 测试里不靠这两个值跑投递（定时作业在测试里的行为就是"永远不跑"），由 e2e 直接调投递函数
+    webhook-deliver-initial-delay-ms: 60000
+    webhook-deliver-ms: 30000
