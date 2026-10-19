@@ -1142,3 +1142,146 @@ schema 末尾追加两条列（第三批落地时一次给全，MySQL/H2 同一�
 | D69 | **`trade_rate` 加店铺归属两列**：源系统评价表只有 `goods_id/item_id`，加盟体系里"这条差评是谁家的"是运营的第一筛，所以本批 ALTER 出 `distributor_id`/`shop_id`，落评价时从订单行带下来（与 C177"归属在落单那刻定死"同一条纪律，不回改历史行）。代价：老库上这两列靠 `ADD COLUMN IF NOT EXISTS` 补，列不存在时那一行根本装配不出来——症状是 **500 而不是出参少一列** | 冒烟「本批 ALTER 的三列在老库上真的补上了（列不存在时这一行根本装配不出来，500 而不是出参少键）」；e2e 用例 8/9 |
 | D70 | **一单一申请（`orders_invoice.order_id` 收紧 + 加 uk）**：源系统那一列允许"逗号分隔多订单"，本项目收紧成单个订单号并建 `uk_invoice_order(company_id, order_id)`，`invoice_amount` 只对着这一单的实付算；`pending` 态二次申请因此走 upsert 而不是插行。代价：多单合开做不了，属 P2（放开时去掉 uk、金额改按 `order_id` 列表求和） | §23.3-8 INV-R1 的落地。验证：冒烟「金额只对着这一单的实付算（INV-R1 一单一申请）」「pending 态二次申请 = upsert 同一条」；e2e 用例 13 |
 | D71 | **充值代客单不走支付**（`CZ-A3`）：源系统的后台充值同样是"直接改余额 + 记一条流水"，本项目把它落成一条 `deposit_trade(trade_type=recharge, status=SUCCESS)`，单号 `CZ` 前缀、`rel_id` 指向自己那张 trade——**不开第二条入账腿**，所以账实相符那条恒等式对代客充值同样成立，不需要为它单开判据 | 冒烟「CZ-A3 代客充值不走支付、当场入账」「代客充值单号 CZ 前缀（号段发号在常驻库上有行）」「代客充值：Δ余额 == Δ成功动账」；e2e 用例 3 |
+
+
+## 25. P2 端点规格 —— 开放能力：openapi 网关 + Webhook 出站（M2-1 开发前补齐，追加于 §24 之后，不回改上文）
+
+盘点结论（本轮只读调研得出，读的是 `thirdparty/ECShopX` 原文与本项目源码，不是推断）：**入向有网关、出向没有 Webhook**。
+
+1. 源系统的开放接口是一个 **Lumen/Dingo 形态的单入口网关**，不是 148 条路由：`routes/thirdparty/openapi.php` 只注册了三条 `ANY`（`/api/openapi`、`/api/openapi/{method}`、内部那条 `openapi/exc.operator.resetpwd`），中间件是 `OpenapiCheck` + `HandleResponseMiddleware`；`method` 名 → 控制器动作的映射写在 `Traits/OpenapiRoutes.php` 的一张常量表里（`v1.0` 47 条、`v2.0` 101 条，键形如 `ecx.order.deliver`）。
+2. **验签只有一处**（`Middleware/OpenapiCheck.php`）：必传 `version/timestamp/app_key` → `debug` 开关可跳过全部校验 → `abs(time()-strtotime(timestamp)) > 60*10` → 缺 `sign` → 按 `app_key` 查 `openapi_developer` 取 `app_secret` → 比签 → 防重放（`nonce`/`request_id` 二者其一必填，`CacheOpenapiNonceStore` 以 `sha256(nonce)` 为键 `add(key,1,600)`）。闸门顺序就是错误码顺序，照抄。
+3. **应答信封不是淘宝式**（里程碑原话"淘宝式应答包裹"与源系统不符，见 §25.6 与后续 D 系列）：`HandleResponseMiddleware` 固定成 `{"status":"success","code":"E0000","message":"成功","data":原值?:null}`，失败 `{"status":"fail","code":"E".sprintf("%04d",code),"message":…,"data":null}`，**HTTP 恒 200**。全仓搜不到 `error_code`/`sub_code`/`result` 三个字段。所谓"开关"在源系统只有一处：`getResponseTypeByVersionAndMethod()` 的豁免表（`1.0` 的 `ecx.wxapp.qrcode` → `image` 不包裹）。
+4. 密钥表就一张：`openapi_developer`（`developer_id/company_id/app_key/app_secret/external_base_uri/external_app_key/external_app_secret` + 时间戳，`idx_company_id`）。**没有 status 列、没有 token 表、没有 API 日志表**——意味着源系统"吊销一个 app_key"只能删行，而删行会把历史出站配置一起抹掉。本项目补 `status`（见 25.5）。
+5. **出向没有通用 Webhook**：`ThirdPartyBundle\Providers\EventServiceProvider.php` 那张 `事件 → 监听器` 映射是逐家硬编码（MarketingCenter / Shuyun / SystemLink 的 OMS·聚水潭·旺店通），HTTP 客户端 `new Client(['timeout'=>2])`，`MarketingCenter\Request::call()` 里 `catch(\Exception){return [];}` ——**同步、fire-and-forget、零重试、零留痕**。留痕表只有 `systemlink_oms_queuelog`（`company_id/api_type(request|response)/worker/params/result/status(running|success|fail)/runtime/msg_id`）这一张，形状可以借，语义要重做。
+6. 出站签名的实样在 `MarketingCenter/Request.php`：把 `data/timestamp/app_key/version/method` 拼成 form、`sign = strtoupper(md5(secret + assemble(参数) + secret))` 再 POST 到对端 `/api/openapi` ——**与入向同一个 `assemble`**，所以本项目这支签名函数必须能同时服务两个方向（25.4）。
+7. Kotlin 侧现状：`grep` 全仓 `ApplicationEventPublisher|@EventListener|@TransactionalEventListener|@Async` **零命中**；`service/tx/Db.kt:30` 的 `afterCommit()` 是现成挂点但至今没有调用方；`SecurityConfig` 四条链的位次是 `0 staff(/api/admin/**) → 1 front(/api/h5app/**) → 2 admin(/api/**) → 3 storage`，而 `/api/openapi` 是 `/api/**` 的子集——**这条链必须排在 2 之前**，否则 C174 那一课在同一个文件里重演一遍。
+
+### 25.1 网关面（前缀 `/api/openapi`，鉴权 = `app_key` + `sign`，不进 JWT 链）
+
+| ID | 方法 | 路径 | 说明 |
+|---|---|---|---|
+| OA-G1 | ANY | `/api/openapi` | 单入口：`method` 取自查询参数（或表单字段）`method`；`version` 缺省 `1.0`；`HandleResponse` 用的也是这两个 query 位（源系统同形，实现期别从 body 里读 version） |
+| OA-G2 | ANY | `/api/openapi/{method}` | 同上，`method` 取自路径末段；此时 `version` 只能从 query 拿。两条入口共用同一个分发函数与同一套闸门，**不写第二条链** |
+
+**验签闸门顺序与错误码**（逐条照抄 `OpenapiCheck`，顺序即契约——先缺参再超时再缺签再错签，重排会让对接方的排障顺序错）：
+
+| 位次 | 判据 | 码 | message |
+|---|---|---|---|
+| 1 | `version`/`timestamp`/`app_key` 任一缺失 | `E4001` | `版本号必填` / `timestamp必填` / `app_key必填` |
+| 2 | `ecx.openapi.debug=true` → 跳过 3..8，`company_id` 取系统默认租户 1 | — | — |
+| 3 | `abs(now − timestamp) > ecx.openapi.timestamp-window-seconds`（默认 600） | `E4002` | `timestamp 不合法` |
+| 4 | 缺 `sign` 或空串 | `E4004` | `缺少 sign` |
+| 5 | 按 `app_key` 查不到**或查到但 `status=0`** | `E4003` | `app_key 不正确` |
+| 6 | 签不对 | `E4004` | `sign 不合法` |
+| 7 | 缺 `nonce` 且缺 `request_id` | `E4001` | `缺少 nonce 或 request_id` |
+| 8 | `nonce` 已用过（TTL 600 内重复） | `E4002` | `nonce 已使用` |
+| 9 | 入参自带 `company_id` 且不等于密钥所属租户 | `E4001` | `company_id 与密钥所属企业不一致`（fail-closed，源系统 `Filter/BaseFilter::resolveCompanyId` 同判据） |
+| 10 | `version` 在注册表里不存在 / `method` 在该版本不存在 / HTTP verb 与注册不符 | `E4006` / `E4005` / `E4005` | `该版本号不存在API` / `找不到API` / `找不到API`（verb 不符在源系统就是 `API_NOT_FOUND`，同码照抄） |
+| 11 | 业务异常（委托的 service 抛 `BizException`） | `E5000` | 原 message 透出，`data:null` |
+
+**签名算法**（`service/openapi/SignService.kt`，入向校验与出向包裹共用同一支函数，`assemble` 的规则一条都不许"顺手改"）：
+
+```
+sign = uppercase( md5( secret + assemble(params) + secret ) )
+assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）后，逐项拼 "键 + 值"：
+  · 值为 null 的项整体跳过（键也不出现）
+  · 布尔 → "1"/"0"
+  · 值是对象/数组 → 递归 assemble（同样排序；列表按 "0"、"1"、"2" 的字符串序参与，因此 10 会排在 2 之前）
+  · 值是数字 → 用请求里的字面量文本，不做二次解析（JSON 的 `1.0` 与 `1` 是不同的串，PHP 侧按字符串拼接）
+  · `sign` 自身不参与
+参与签名的参数集 = query 参数 ∪ 请求体字段（源系统 `$request->toArray()` 就是合并后的全集；只签 body 或只签 query 都对不上对方的签）
+```
+
+**应答信封**：成功 `{"status":"success","code":"E0000","message":"成功","data":{…}|null}`；失败 `{"status":"fail","code":"E40xx","message":"…","data":null}`；**HTTP 状态恒 200**（含 4001..5000），与 `ecx.compat.force-ok-status` 无关——这一面的状态码语义由信封里的 `code` 承担，不是本项目全局那条兼容开关能改的。`data` 空值一律 `null` 而不是 `[]`（源系统注释就为这件事写过一句"在其他语言里 data 属于对象"）。
+
+### 25.2 首批 method 清单（19 条 / 6 族，命名与 verb 沿用源系统 `OpenapiRoutes`）
+
+注册表是 `service/openapi/OpenapiMethodRegistry.kt` 里的一张表：`version → method → (verb, 委托函数)`。**新增一条 method 只该动这张表 + 一个委托函数**，不许再开第二个入口。首批只收已有实现撑得住的（`exc.operator.resetpwd` 那种内部面、`ecx.image.*`/`ecx.wxapp.*`/`ecx.jurisdiction.*` 依赖未落地的第三方凭据面，都留 M2-3 逐族补）。
+
+| ID | method | 版本 | verb | 委托实现 | 强制筛/口径 |
+|---|---|---|---|---|---|
+| OA-M1 | `ecx.order.list` | 1.0/2.0 | GET | `OrderQueryService.list(raw, companyId, userId, ALL)` | `user_id` **必填**（按会员取单，缺 → `E4001`）；两个版本都注册、指向同一委托（源系统两版分开实现，本项目不为同名 method 写两套读口） |
+| OA-M2 | `ecx.orders.sold.get` | 2.0 | GET | 同上，`userId=null` | 全租户搜索面，接 `status`/`distributor_id`/`time_start_*`；**与 M1 的差别只在这条不锁会员** |
+| OA-M3 | `ecx.order.get` | 2.0 | GET | `OrderQueryService.detail(...)` | `order_id` 或 `order_bn` 其一必填；跨租户与不存在**同回 `E5301`**，不回答"这一单在不在" |
+| OA-M4 | `ecx.order.deliver` | 2.0 | POST | `OrderFlowService.ship(orderId, form, operatorId=null, operator="openapi:{developer_id}")` | 留痕里写明是开放接口发的货（`operator` 前缀 `openapi:`），与运营/员工两条面区分开；状态机不放开任何态 |
+| OA-M5 | `ecx.order.writeoff` | 2.0 | POST | `WriteOffService.writeOff(companyId, orderId, code, scope, operatorId=0, operator="openapi:{developer_id}")` | 取货码必填；`scope` 用密钥所属租户 + `distributor_id` 入参（不传 = 全租户自提点） |
+| OA-M6 | `ecx.product.sku_list` | 1.0 | GET | `ItemService.skuList(raw, companyId)` | 与 GOODS-7 同一装配，出参逐字段一致（门槛②比这个） |
+| OA-M7 | `ecx.items.entity.get` | 2.0 | GET | `ItemService.list(raw, companyId, front=false)` | 后台口径（含未上架），`status`/`category_id`/`keywords` 透传 |
+| OA-M8 | `ecx.item.entity.get` | 2.0 | GET | `ItemService.adminDetail` + 本批给 `ItemsMapper` 新增的 `findByBn` | 按 `item_bn` **精确**取 SPU（现库只有 `LIKE` 那一条，模糊匹配会让"查一个拿到十个"） |
+| OA-M9 | `ecx.member.query` | 1.0 | GET | `MembersMapper.findByMobile` | `mobile` 必填；**出参手机号恒掩码**（数据出境面没有"看全值"这个权限位，见 25.6 的 MASK 裁定） |
+| OA-M10 | `ecx.member.detail` | 2.0 | GET | `MemberService.profile(companyId, userId)` | 同上掩码 |
+| OA-M11 | `ecx.member.list` | 2.0 | GET | 本批给 `MembersMapper` 新增的 `count`/`page` 一对（同一份筛选字典） | `keyword`/`grade_id`/`created` 区间；`PageHelper.paginate` 双 SQL 同筛（C194 那条纪律在这一面同样成立） |
+| OA-M12 | `ecx.member_point.detail` | 2.0 | GET | `PointService.overview(userId, companyId)` | 与 PT-F1 同装配 |
+| OA-M13 | `ecx.member_point_log.list` | 2.0 | GET | `PointService.adminLogs(companyId, raw, full=false)` | `user_id` 必填、时间段透传；**`full` 恒 `false`**（同 M9 的出境掩码） |
+| OA-M14 | `ecx.member_point.update` | 2.0 | POST | `PointService.adjust(companyId, form)` | 与 PT-A2 同一条动账口，`remark` 必填、负数钳到 0；不另开"开放接口专用加分"腿 |
+| OA-M15 | `ecx.member.recharge.trade.get` | 2.0 | GET | `DepositService.adminTrades(companyId, raw, full=false)` | `user_id` 选填；`NOTPAY` 单出得来但不进任何对账式（C189） |
+| OA-M16 | `ecx.discountcard.list` | 1.0/2.0 | GET | `CouponService.list(companyId, raw)` | 券模板列表（不是会员已领的），与 `ecx.userdiscount.list` 分开——后者要会员维度，留 M2-3 |
+| OA-M17 | `ecx.discountcard.send` | 2.0 | POST | `CouponService.send(companyId, CouponSendForm)` | `coupon_id` + `user_ids[]`；幂等判据仍是既有的"同一会员同一券不重发"，网关不另加一层 |
+| OA-M18 | `ecx.distributor.list` | 2.0 | GET | `DistributorService.list(companyId, raw, scope=ALL)` | 只出租户内已审核通过且在营业的店（`is_valid=1`），与前台 DS-F1 同判据 |
+| OA-M19 | `ecx.distributor.detail` | 2.0 | GET | `DistributorService.detail` | 越租户 → `E5401`（同"找不到"形状） |
+
+### 25.3 后台面（前缀 `/api`，鉴权 = 运营 JWT + `@RequiresResource`，写路径 `@Audited`）
+
+后台这六条走 `/api/setting/openapi/*`（源系统 `routes/api/openapi.php` 里 `GET /api/setting/openapi/developer` 的同一条前缀），**不是** `/api/openapi/*`：网关那条链要 `permitAll`（它的鉴权由 `app_key + sign` 自己承担），而 `/api/openapi/*` 与"`/api/openapi/developers` 是后台的一条例外"**在安全匹配器里没法共存** —— 前者一放行，后台那六条就一起匿名了。前缀错开之后这件事不需要任何豁免表，路径本身就是判据（C174 那条"链的位次就是这条链的难点"的同族坑）。
+
+| ID | 方法 | 路径 | 说明 |
+|---|---|---|---|
+| OP-A1 | GET | `/api/setting/openapi/developers` | 开发者列表（`keyword?`/`status?`，分页）：行含 `app_key`（**全值出**，它是身份不是秘密）、`app_secret` **永不出**（只在 A2 的响应里出现一次，见 25.4-C1）、`external_base_uri` 脱敏到 host |
+| OP-A2 | POST | `/api/setting/openapi/developer` | 新建：`{name(Y), remark?, external_base_uri?, external_app_key?, external_app_secret?}` → 服务端发 `app_key`/`app_secret`（**只有这一条响应的 `data` 里带 secret**，改密钥同理），`status` 默认 1 |
+| OP-A3 | PUT | `/api/setting/openapi/developer/{id}` | 改档案与出站三列 + `status` 启停；**不接受 `app_key` 入参**（身份不可改，改身份等于把历史投递记录的归属换人） |
+| OP-A4 | POST | `/api/setting/openapi/developer/{id}/reset_secret` | 重置入向密钥：新值当场出一次，旧值**下一个请求即 `E4004`**（没有宽限期——密钥泄露的处置要的是"立刻"，宽限期是运营上的幻觉） |
+| OP-A5 | GET | `/api/setting/openapi/methods` | 已注册 method 目录（对接文档面）：`{version, method, verb, 说明}`，只读、来自注册表不来自库 |
+| OP-A6 | GET | `/api/setting/openapi/developer/{id}/stats` | 该开发者的调用与投递概况：网关调用计数/失败计数 + 出站 `success/fail/pending` 三态数（读 25.5 新增的两张表，**不在网关侧写调用日志**，理由见 25.4 末条） |
+| WH-A1 | GET | `/api/webhook/subscriptions` | 订阅列表（`developer_id?`/`topic?`/`status?`，分页） |
+| WH-A2 | POST | `/api/webhook/subscription` | 新建：`{developer_id(Y), topic(Y), url(Y http/https)}`；**该开发者的 `external_app_secret` 未配置 → 422**（没出站密钥就没有能验得通的推送）；`url` 不是 https 且非本机回环 → 422（生产形态里明文推 HMAC 载荷等于把签名白送） |
+| WH-A3 | PUT | `/api/webhook/subscription/{id}` | 改 `url`/`topic`/`status`；改址**不追改历史记录**（已经在路上的那一条仍打到旧 url，重推时才读新址） |
+| WH-A4 | DELETE | `/api/webhook/subscription/{id}` | 删订阅：直接删（订阅是配置不是账），但 `webhook_delivery_log` 的行**留着**——它们是对接方"我收到了"的证据 |
+| WH-A5 | GET | `/api/webhook/deliveries` | 投递记录（`topic?`/`status?`/`msg_id?`/`developer_id?`/时间段，分页）：行含 `attempts`/`last_http_status`/`next_try_at`/`runtime` |
+| WH-A6 | GET | `/api/webhook/delivery/{id}` | 详情：请求体（`payload`）、最后一次响应体、签名头（`X-Ecx-Signature` 出**当次实际值**，不是重算值——排"对方说验不过"只有这一个办法） |
+| WH-A7 | POST | `/api/webhook/delivery/{id}/retry` | 手动重推：行重置为 `pending`、`next_try_at=now`、`attempts` **不清零**（清零会让"这一条到底试过几次"失去意义），投递时 `msg_id` 不变 |
+| WH-A8 | GET | `/api/webhook/topics` | 事件目录 + 每个 topic 的载荷字段说明（读注册表，与 OP-A5 同一个纪律：文档面从代码出，不另维护一份会漂的表） |
+| WH-A9 | POST | `/api/webhook/test` | 发一条测试事件到指定 `url`：`{url(Y), developer_id(Y), topic?=webhook.test}`，签名与正式推送同一套；**落一条 `delivery_log`**（测试也要留痕，否则对接方拿"测试通了"当证据时对不上） |
+
+### 25.4 事件与出站（Webhook）
+
+**发布 seam**：`service/openapi/EventPublisher.kt`，写路径**在事务内**落 outbox 行（不是 `Db.afterCommit` 里发 HTTP——提交后进程崩了事件就丢了；outbox 的意义就是"事件与业务变更同事务、同生死"），投递动作**在事务外**：`afterCommit` 里唤醒一次即时投递，`@Scheduled` 兜后续与重试。
+
+| topic | 挂点（现有类/方法） | 载荷 `data` |
+|---|---|---|
+| `order.created` | `OrderCreateService.create()` 提交后 | `{order_id, order_bn, user_id, distributor_id, shop_id, pay_fee, status, created}` |
+| `order.paid` | `OrderFlowService.markPaid()` **CAS 命中那一支** | `{order_id, order_bn, pay_fee, pay_type, pay_time}` |
+| `order.shipped` | `OrderFlowService.ship()` | `{order_id, ship_sn, logistics_id, delivered}` |
+| `order.completed` | `OrderFlowService.confirmReceipt()` | `{order_id, finish_time}` |
+| `order.closed` | `cancelByUser()` / `timeoutCancel()` 状态迁移命中后 | `{order_id, reason, closed_at}` |
+| `goods.created` / `goods.updated` / `goods.deleted` | `ItemService.create()/update()/delete()` | `{item_id, item_bn, goods_name, price, store, status}` |
+| `refund.finished` | `RefundService.confirmByCallback()` | `{refund_id, order_id, refund_fee, finished_at}` |
+| `webhook.test` | 只有 WH-A9 | `{echo: 入参原样, sent_at}` |
+
+**载荷信封**（POST 到订阅 `url`，`Content-Type: application/json`）：`{msg_id, topic, company_id, developer_id, occurred_at, data:{…}}`。
+
+**两层签名**（对接方可以任选一支验，本项目 e2e 两支都验）：
+- `X-Ecx-Signature: sha256=<hex( HMAC-SHA256( external_app_secret, timestamp + "\n" + rawBody ) )>` + `X-Ecx-Timestamp` + `X-Ecx-Msg-Id` + `X-Ecx-Event` —— 里程碑要求的 HMAC 头，覆盖**原始字节**，不受 JSON 重排影响。
+- 体内 `sign` 字段 = `strtoupper(md5(secret + assemble(信封参数含 data 递归) + secret))` —— 与入向、与 PHP 侧 `MarketingCenter\Request` 同一支函数，让 PHP 形态的接收端不改代码就能验。`sign` 由发送侧计算并**加入信封后再序列化**，接收方按"去掉 `sign` 后重组"比对。
+
+**投递状态机**：`pending → running → success` / `→ pending`（可重试失败，`next_try_at = now + min(2^attempts,32) × backoff_base`）/ `→ fail`（`attempts ≥ max_attempts` 的终态，不再自动排，只能 WH-A7 手动重推）。超时 `ecx.webhook.timeout-ms`（默认 2000，照抄源系统 Guzzle 的 `timeout=>2`）；非 2xx 与连接失败都算可重试失败，HTTP 200 但响应体不是 `success` **不算失败**（对端应答格式不由本项目裁定）。
+
+**幂等与重复**：`msg_id` 在"一个业务事件 × 一个订阅"这一层唯一（`SeqName.WEBHOOK_MSG` 发号），接收方靠它去重；同一事件的多次重试与手动重推**都用同一个 `msg_id`**（换号会让对端把同一件事收到两次且无从判重）。同一 topic 两条订阅各自成行、互不影响。
+
+**调用侧不落日志表**（`OP-A6` 的网关计数走内存计数器 + `operator_logs` 里没有一条 openapi 行）：源系统连一张 API 日志表都没有，本项目**不在这一批造**——理由是网关每次调用都插一行日志会把 P2 的开放面变成写放大源，配额与计量属 M2-4 生产化（那时要的是"每租户每天调用量"的聚合，不是逐次流水）。这条裁定写出来是为了让后面那批知道现在为什么没有。
+
+### 25.5 数据与配置追加（写实现前先定形状，全部幂等）
+
+- **`openapi_developer`**（新表，形状对齐源系统 `Entities/OpenapiDeveloper.php` 再加一列）：`developer_id BIGINT AUTO_INCREMENT PRIMARY KEY, company_id BIGINT NOT NULL, app_key VARCHAR(64) NOT NULL, app_secret VARCHAR(64) NOT NULL, name VARCHAR(64), remark VARCHAR(255), status TINYINT NOT NULL DEFAULT 1, external_base_uri VARCHAR(255), external_app_key VARCHAR(64), external_app_secret VARCHAR(64), created BIGINT NOT NULL DEFAULT 0, updated BIGINT NOT NULL DEFAULT 0` + `uk_openapi_app_key(app_key)` + `idx_openapi_company(company_id)`。`status` 是本项目补的（源系统没有吊销手段）。
+- **`webhook_subscription`**：`id PK, company_id, developer_id, topic VARCHAR(64), url VARCHAR(255), status TINYINT DEFAULT 1, created, updated` + `uk_webhook_sub(developer_id, topic, url)` + `idx_webhook_sub_topic(company_id, topic)`。
+- **`webhook_delivery_log`**（outbox，借 `systemlink_oms_queuelog` 的形、换它的语义）：`id PK, company_id, developer_id, subscription_id, msg_id VARCHAR(40), topic VARCHAR(64), url VARCHAR(255), payload CLOB, status VARCHAR(16) NOT NULL DEFAULT 'pending', attempts INT NOT NULL DEFAULT 0, next_try_at BIGINT NOT NULL DEFAULT 0, last_http_status INT NOT NULL DEFAULT 0, last_error VARCHAR(255), response_body CLOB, runtime INT NOT NULL DEFAULT 0, created, updated` + `idx_webhook_due(status, next_try_at)` + `idx_webhook_msg(msg_id)` + `idx_webhook_company_created(company_id, created)`。
+- 发号：`SeqName` 追加 `WEBHOOK_MSG("webhook_msg", "WH")`，`sql/schema.sql` 同批补 `INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('webhook_msg', 0)`（C166 那条纪律：缺行是 500 不是 422）。
+- 权限码从 **65** 起（现最大 = 64）：`65 openapi.lists`、`66 openapi.update`（含 A2/A3/A4）、`67 webhook.lists`、`68 webhook.update`、`69 webhook.push`（重推与测试事件）、目录码 **70 `openapi_center`**。**role 2 一条都不配**：开发者密钥与推送地址是整个租户对外的口子，店铺运营连"看有哪些密钥"都不该有（D57/C167 同一条划分的延伸）。
+- `app_key`/`app_secret` 的形状：`ak_` + 16 位十六进制 / `sk_` + 32 位十六进制（`SecureRandom`，不从 `md5(passport_uid)` 派生——源系统那支派生在演示库里等于把密钥公开）。**seed 里的是演示假密钥**，只用于本地自签自验，与 bcrypt 那批演示口令同一惯例。
+- 配置（`application.yml` 的 `ecx.*` 块追加，全部走 `@Value`，本仓没有 `@ConfigurationProperties` 的先例、不为这一批开）：`ecx.openapi.enabled`=`true`、`ecx.openapi.debug`=`${ECX_OPENAPI_DEBUG:false}`、`ecx.openapi.timestamp-window-seconds`=`600`、`ecx.openapi.nonce-ttl-seconds`=`600`、`ecx.openapi.wrap-response`=`true`、`ecx.webhook.enabled`=`${ECX_WEBHOOK_ENABLED:true}`、`ecx.webhook.timeout-ms`=`2000`、`ecx.webhook.max-attempts`=`5`、`ecx.webhook.backoff-base-seconds`=`30`、`ecx.webhook.batch-limit`=`20`，作业走既有命名 `ecx.schedule.webhook-deliver-initial-delay-ms`/`ecx.schedule.webhook-deliver-ms`（缺省给大值，测试里像 `order-timeout` 那样推到 1 小时，由 e2e 自己直接调投递函数——**这条不是偷懒**：定时作业在测试里的行为就是"永远不跑"，断它等于不断）。
+
+### 25.6 门槛用例（进 e2e 与冒烟，任一条红就不算交付）
+
+1. **签名链正反十二式**：签对的请求 `E0000` 出数据；**改一个字节**（值、键顺序、布尔、嵌套数组任一处）→ `E4004`；缺 `sign`/缺 `app_key`/缺 `version`/缺 `nonce` → 按 25.1 位次各回各码；`timestamp` 偏移 ±601 秒 → `E4002`、±599 秒 → 通过（**边界两个方向都要测**，只测超窗等于没测窗口）；同一 `nonce` 连打两次 → 第二次 `E4002` 且**业务侧没有副作用**（重放在这里必须挡在委托之前，不是靠委托幂等兜）；`status=0` 的密钥 → `E4003`；`debug=true` 时不验签（并断默认必须是 `false`）。签名的**跨语言一致性**另测一次：同参数同密钥用 PHP 的 `assemble` 语义（含列表序 `"0","1","10","2"`、布尔 `1/0`、null 整体跳过）逐字对。
+2. **分发与租户边界**：未知 `version` → `E4006`；未知 `method` → `E4005`；verb 与注册不符 → `E4005`（**不是 405**，源系统就这码，改了就漂）；`ecx.order.get` 的出参与 `ORDER-9` 同一条单的出参**逐字段相同**（同一委托同一装配函数，这是"网关只是另一张脸"的唯一证明方式）；seed 的第二个租户密钥（`company_id=2`，库里没有它的业务数据）读 `ecx.items.entity.get` 得 **0 行**而不是报错，且它在入参里写 `company_id=1` → `E4001`（fail-closed）；`M9/M13/M15` 三面的手机号在网关面**恒掩码**，与 `datapass.pass` 无关。
+3. **出站链**：e2e 起一个本机假接收服务器（复用 `SimAliPayServer`/`SimWxPayServer` 的夹具惯例，命名 `SimWebhookReceiver`）——支付结清后收到 `order.paid`，**HMAC 头与体内 `sign` 两支都验通**、载荷字段逐个对；服务器先 500 一次再 200 → 记录走到 `success` 且 `attempts=2`、`next_try_at` 按 `2^n×30` 排过；服务器始终 500 → 走到终态 `fail` 且不再自动排，`WH-A7` 手动重推后**同 `msg_id`** 再打一次；订阅 `status=0` 时事件不投（`pending` 都不生成）；`markPaid` 的 CAS 未命中（重复回调）时**不生成第二条事件**；`WH-A9` 测试事件在 `delivery_log` 里查得到。
+4. **不碰账、不碰状态机**：挂了事件发布之后，既有回归必须原样绿——`m15_reconcile_smoke.py` 的账实相符恒等式、`BUCKET-R1` 六桶求和、`m06` 的并发不超卖一条都不能变红；`mvn -B -o verify` 全绿 + 契约测试出参形状钉住 + `tools/m21_openapi_smoke.py` 在 18080 实跑（含用 Python 自己复算一遍签名——**脚本必须能独立算出签**，否则它只是在重复实现里自证）。

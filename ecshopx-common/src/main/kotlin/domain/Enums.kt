@@ -24,6 +24,13 @@ enum class SeqName(val dbValue: String, val prefix: String) {
      * schema 里必须同时有 `('invoice_apply_bn', 0)` 那一行，缺行时 SeqGenerator 抛 500（C166）。
      */
     INVOICE_APPLY_BN("invoice_apply_bn", "FP"),
+
+    /**
+     * 出站消息号（M2-1 §25.4）：一个业务事件 × 一个订阅一个号，
+     * 重试与手动重推**沿用同一个号**（对端靠它判重，换号等于让同一件事被收两次且无从 dedupe）。
+     * schema 里必须同时有 `('webhook_msg', 0)` 那一行，缺行时 SeqGenerator 抛 500（C166）。
+     */
+    WEBHOOK_MSG("webhook_msg", "WH"),
 }
 
 /** 订单主状态（大写态，与 PHP order_status/pay_status 字符串枚举一致，概要设计 §3） */

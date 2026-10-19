@@ -487,3 +487,41 @@ VALUES
 -- 给演示主力商品（item_id=3，PAY/M1 各脚本下单都用它）标 100 分/件，赠分链自此在实跑里看得见。
 -- 只 UPDATE 演示行、不改建表默认值：0 才是"这个商品不送积分"的正确默认。
 UPDATE items SET point = 100 WHERE company_id = 1 AND item_id = 3;
+
+-- ===== M2-1 追加：开放能力权限码 + 演示密钥（docs/04 §25.5，追加于末尾，不回改上文） =====
+-- 65..69 五码分「看 / 改密钥 / 看投递 / 改订阅 / 主动推」四档，另单列一条能"凭空造一次推送"的
+-- `webhook.push`：重推与测试事件都会往外打流量，它和"改订阅配置"不是一回事，混在一个码里
+-- 就等于给看板上的人开了对外发包的口子。
+-- 70 是这批的目录（开放能力）。role 2（店铺运营）**一条都不配**：开发者密钥与推送地址
+-- 是整个租户对外的口子，不是某家店的资产（D57/C167 那条划分的延伸）。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (70,  0, '开放能力',       'openapi_center',      'catalog'),
+  (65, 70, '开发者密钥列表', 'openapi.lists',       'actived'),
+  (66, 70, '开发者密钥维护', 'openapi.update',      'actived'),
+  (67, 70, '订阅与投递查询', 'webhook.lists',       'actived'),
+  (68, 70, '订阅维护',       'webhook.update',      'actived'),
+  (69, 70, '手动重推与测试', 'webhook.push',        'actived');
+
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 65), (1, 66), (1, 67), (1, 68), (1, 69), (1, 70);
+
+-- 演示密钥两把，都是**假密钥**（与那几条 bcrypt 演示口令同一惯例：只用于本地自签自验，不是任何真实凭据）。
+-- developer_id=1 属租户 1，与运营面同一个租户，冒烟脚本据此自己算签（脚本必须能独立算出签，
+-- 否则它只是在重复实现里自证 —— §25.6 第 4 条）。
+-- developer_id=2 属租户 2：库里没有它的 company 行、也没有任何业务数据，存在的唯一理由是把
+-- 「租户取自密钥、不取自入参」这条证出来 —— 它读商品得到 0 行而不是报错，
+-- 而它在入参里写 company_id=1 必须被 fail-closed 挡成 E4001（§25.1 第 9 道闸门）。
+INSERT IGNORE INTO openapi_developer
+  (developer_id, company_id, app_key, app_secret, name, remark, status,
+   external_base_uri, external_app_key, external_app_secret, created, updated)
+VALUES
+  (1, 1, 'ak_1a2b3c4d5e6f7081', 'sk_1a2b3c4d5e6f708192a3b4c5d6e7f809',
+   '演示对接方', '本地演示密钥，非真实凭据', 1,
+   '', 'ek_demo_out_0001', 'esk_2b3c4d5e6f708192a3b4c5d6e7f809', 0, 0),
+  (2, 2, 'ak_2b3c4d5e6f708192', 'sk_2b3c4d5e6f708192a3b4c5d6e7f8091a',
+   '第二租户对接方（越权证明用）', '库里没有它的业务数据，读什么都是 0 行', 1,
+   '', '', '', 0, 0);
+
+-- 演示库里**不种子订阅**：订阅要指向一个真实可达的接收端，
+-- 种子一条指向本机某端口的订阅，会让每一次普通演示都攒出一串投递失败记录（`fail` 终态还不排），
+-- 冒烟与 e2e 各自起假接收服务器、各自通过 WH-A2 现建现删。

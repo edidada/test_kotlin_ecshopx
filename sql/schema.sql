@@ -1434,3 +1434,75 @@ CREATE INDEX IF NOT EXISTS idx_invoice_head ON orders_invoice(company_id, invoic
 -- point_member_log 本来就有 remark（PT-A2 靠它解释差额），deposit_trade 原本没有 ——
 -- 不补这一列，代客充值的理由只能落到 operator_logs 里，对账脚本读流水时看不出这笔和会员自己充的区别。
 ALTER TABLE deposit_trade ADD COLUMN IF NOT EXISTS remark VARCHAR(255);
+
+-- ===== M2-1 追加：开放能力三表（docs/04 §25.5，追加于末尾，不回改上文） =====
+-- 开发者密钥表：形状照源系统 `OpenapiBundle/Entities/OpenapiDeveloper.php`
+-- （company_id / app_key / app_secret / external_base_uri / external_app_key / external_app_secret），
+-- 只多一列 `status` —— 源系统没有吊销手段，"停用一把泄露的密钥"只能删行，
+-- 而删行会把这个开发者的历史出站配置与投递记录的归属一起抹掉。
+CREATE TABLE IF NOT EXISTS openapi_developer (
+  developer_id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id           BIGINT NOT NULL,
+  app_key              VARCHAR(64) NOT NULL,
+  app_secret           VARCHAR(64) NOT NULL,
+  name                 VARCHAR(64),
+  remark               VARCHAR(255),
+  status               TINYINT NOT NULL DEFAULT 1,                 -- 1 启用 / 0 停用（停用即刻 E4003）
+  external_base_uri    VARCHAR(255),
+  external_app_key     VARCHAR(64),
+  external_app_secret  VARCHAR(64),
+  created              BIGINT NOT NULL DEFAULT 0,
+  updated              BIGINT NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_openapi_app_key ON openapi_developer(app_key);
+CREATE INDEX IF NOT EXISTS idx_openapi_company ON openapi_developer(company_id, status);
+
+-- 订阅表：一个开发者 × 一个 topic × 一个 url 一行（同 topic 推两家是合法需求，故唯一键带 url 而不只带 topic）。
+CREATE TABLE IF NOT EXISTS webhook_subscription (
+  id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id   BIGINT NOT NULL,
+  developer_id BIGINT NOT NULL,
+  topic        VARCHAR(64) NOT NULL,
+  url          VARCHAR(255) NOT NULL,
+  status       TINYINT NOT NULL DEFAULT 1,
+  created      BIGINT NOT NULL DEFAULT 0,
+  updated      BIGINT NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_webhook_sub ON webhook_subscription(developer_id, topic, url);
+CREATE INDEX IF NOT EXISTS idx_webhook_sub_topic ON webhook_subscription(company_id, topic, status);
+
+-- 出站 outbox：借源系统 `systemlink_oms_queuelog` 的形（status/params/result/runtime/msg_id），换它的语义 ——
+-- 那张表只是"调用留痕"，这一张是**事件的存放处**：业务变更与本行同事务提交（进程崩了事件不丢），
+-- 投递动作在事务外，重试靠 `status + next_try_at` 两个位排。
+-- `attempts` 手动重推时不清零（清了就没有人知道这一条到底试过几次），`msg_id` 重推不变（对端靠它判重）。
+CREATE TABLE IF NOT EXISTS webhook_delivery_log (
+  id              BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id      BIGINT NOT NULL,
+  developer_id    BIGINT NOT NULL,
+  subscription_id BIGINT NOT NULL,
+  msg_id          VARCHAR(40) NOT NULL,
+  topic           VARCHAR(64) NOT NULL,
+  url             VARCHAR(255) NOT NULL,
+  payload         CLOB,
+  status          VARCHAR(16) NOT NULL DEFAULT 'pending',   -- pending / running / success / fail
+  attempts        INT NOT NULL DEFAULT 0,
+  next_try_at     BIGINT NOT NULL DEFAULT 0,
+  last_http_status INT NOT NULL DEFAULT 0,
+  last_error      VARCHAR(255),
+  response_body   CLOB,
+  -- 当次**实际发出**的两个签名头值（WH-A6 要出的是它们，不是重算值）。
+  -- 重算出来的签不了"对方说验不过"这件事：HMAC 覆盖的是 `ts + "\n" + body`，
+  -- 时间戳一变、密钥一换，重算值与对端收到的那个必然不同 —— 只有留下发出去的那一份才复现得了现场。
+  last_signature  VARCHAR(128),
+  last_ts         BIGINT NOT NULL DEFAULT 0,
+  runtime         INT NOT NULL DEFAULT 0,                   -- 最后一次投递耗时 ms
+  created         BIGINT NOT NULL DEFAULT 0,
+  updated         BIGINT NOT NULL DEFAULT 0
+);
+-- 到期扫描走这条索引：作业每轮就是 `status='pending' AND next_try_at<=now` 的一小截。
+CREATE INDEX IF NOT EXISTS idx_webhook_due ON webhook_delivery_log(status, next_try_at);
+CREATE INDEX IF NOT EXISTS idx_webhook_msg ON webhook_delivery_log(msg_id);
+CREATE INDEX IF NOT EXISTS idx_webhook_company_created ON webhook_delivery_log(company_id, created);
+
+-- 出站消息号段：缺行时 SeqGenerator 抛 500（C166 那条纪律在每一张新号段表上都成立）。
+INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('webhook_msg', 0);

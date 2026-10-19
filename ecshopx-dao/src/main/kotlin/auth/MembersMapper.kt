@@ -81,7 +81,64 @@ interface MembersMapper {
         @Param("userId") userId: Long,
         @Param("companyId") companyId: Long,
     ): Long?
+
+    /**
+     * OA-M11 `ecx.member.list` 的会员分页（M2-1 §25.2）。
+     *
+     * 本仓此前**没有任何会员列表读口**：后台 PT-A1 那张"会员积分列表"是从账本表起行的
+     * （有积分流水的人才有行），M1-4 的员工面按 `salesman_id` 收窄，都不是"租户下有哪些会员"。
+     * 开放接口要给对接方拉会员，这一条就得真建起来。
+     *
+     * 手机号 join 的是 `members.mobile` 本体，昵称取 `members_info.name`（`LEFT`：
+     * 资料没建全的会员也得出现在列表里，否则"我注册了但查不到"）；
+     * 出参掩码由服务层按 §25.6 第 2 条的出境裁定做，**SQL 一律读原列**（MASK-R1）。
+     */
+    @Select("<script>SELECT COUNT(*) FROM members m WHERE 1=1$M_FILTER_SQL</script>")
+    fun count(@Param("f") f: Map<String, Any?>): Long
+
+    @Select(
+        "<script>SELECT m.user_id, m.company_id, m.grade_id, m.mobile, m.disabled, m.source_from, " +
+            "m.salesman_id, m.created, m.updated, i.name AS nickname, i.avatar AS avatar, g.grade_name " +
+            "FROM members m " +
+            "LEFT JOIN members_info i ON i.user_id = m.user_id " +
+            "LEFT JOIN members_grade g ON g.grade_id = m.grade_id " +
+            "WHERE 1=1$M_FILTER_SQL ORDER BY m.user_id DESC LIMIT #{limit} OFFSET #{offset}</script>",
+    )
+    fun page(@Param("f") f: Map<String, Any?>, @Param("offset") offset: Long, @Param("limit") limit: Int): List<MemberListRow>
 }
+
+/** 会员列表行（OA-M11）。`nickname`/`avatar`/`gradeName` 是 join 出来的，可能整列为 null */
+class MemberListRow {
+    var userId: Long = 0
+    var companyId: Long = 0
+    var gradeId: Long = 0
+    var mobile: String? = null
+    var disabled: Boolean = false
+    var sourceFrom: String? = null
+    var salesmanId: Long = 0
+    var created: Long = 0
+    var updated: Long = 0
+    var nickname: String? = null
+    var avatar: String? = null
+    var gradeName: String? = null
+}
+
+/**
+ * 会员列表筛选字典（服务层归一化之后传入，`count` 与 `page` 共用 —— C194 那条纪律）。
+ * `disabled` 是**三态**：不传 = 全出（含停用会员，对接方要的是"这个租户下的会员"），
+ * 传值才筛。这里刻意不设"默认隐藏停用"那道筛：会员账号是对方系统的主数据，
+ * 静默少一批人比多出一批人更难被发现。
+ */
+private const val M_FILTER_SQL = """
+    AND m.company_id = #{f.companyId}
+    <if test="f.keyword != null"> AND (m.mobile LIKE CONCAT('%', #{f.keyword}, '%') OR i.name LIKE CONCAT('%', #{f.keyword}, '%'))</if>
+    <if test="f.mobile != null"> AND m.mobile = #{f.mobile}</if>
+    <if test="f.userId != null"> AND m.user_id = #{f.userId}</if>
+    <if test="f.gradeId != null"> AND m.grade_id = #{f.gradeId}</if>
+    <if test="f.disabled != null"> AND m.disabled = #{f.disabled}</if>
+    <if test="f.createdStart != null"> AND m.created &gt;= #{f.createdStart}</if>
+    <if test="f.createdEnd != null"> AND m.created &lt;= #{f.createdEnd}</if>
+"""
 
 interface MembersAssociationsMapper {
 
@@ -114,7 +171,6 @@ interface MembersAssociationsMapper {
 
 /** 会员等级读取（算价链路用） */
 interface MembersGradeMapper {
-
     @Select("SELECT grade_id, company_id, grade_name, level, growth_value, discount FROM members_grade WHERE grade_id = #{gradeId}")
     fun findById(@Param("gradeId") gradeId: Long): MemberGradeDO?
 

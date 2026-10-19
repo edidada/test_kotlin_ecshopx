@@ -83,6 +83,18 @@ interface ItemsMapper {
     @Select("SELECT $COLS FROM items WHERE item_id = #{id} AND approve_status = 'onsale'")
     fun findOnsaleById(@Param("id") id: Long): ItemDO?
 
+    /**
+     * OA-M8 `ecx.item.entity.get` 用：按 `item_bn` **精确**取 SPU（M2-1 §25.2）。
+     *
+     * 现成的那一条是 `f.itemBn` 的 `LIKE '%…%'`（后台搜索框语义），
+     * 拿它当"按编号取一个"会让对接方查一个拿到十个、取到哪个看数据库心情。
+     * `LIMIT 1` 是兜底：`item_bn` 在本仓不是唯一索引，真出现同编号多行时
+     * 取 `item_id` 最小的那条（最早建的那件），比抛异常更贴近对接方的预期。
+     */
+    @Select("<script>SELECT $COLS FROM items WHERE company_id = #{companyId} AND item_bn = #{itemBn} " +
+        "ORDER BY item_id LIMIT 1</script>")
+    fun findByBn(@Param("companyId") companyId: Long, @Param("itemBn") itemBn: String): ItemDO?
+
     @Select("<script>SELECT " + COLS + " FROM items WHERE is_default = FALSE AND default_item_id IN " +
         "<foreach item=\"i\" collection=\"ids\" open=\"(\" separator=\",\" close=\")\">#{i}</foreach> ORDER BY item_id</script>")
     fun listChildren(@Param("ids") ids: List<Long>): List<ItemDO>
