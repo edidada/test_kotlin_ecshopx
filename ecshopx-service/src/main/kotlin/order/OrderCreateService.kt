@@ -30,9 +30,11 @@ import com.ecshopx.kotlin.service.cart.CartService
 import com.ecshopx.kotlin.service.cart.PriceLine
 import com.ecshopx.kotlin.service.cart.StockSource
 import com.ecshopx.kotlin.service.distribution.StockPool
+import com.ecshopx.kotlin.service.openapi.EventPublisher
 import com.ecshopx.kotlin.service.promotion.ActivityOffer
 import com.ecshopx.kotlin.service.promotion.CouponService
 import com.ecshopx.kotlin.service.promotion.GroupsService
+import com.ecshopx.kotlin.service.webhook.WebhookTopics
 import com.ecshopx.kotlin.service.promotion.yuan
 import com.ecshopx.kotlin.service.seq.SeqGenerator
 import com.ecshopx.kotlin.service.tx.Db
@@ -83,6 +85,7 @@ class OrderCreateService(
     private val members: com.ecshopx.kotlin.dao.auth.MembersMapper,
     private val pickups: com.ecshopx.kotlin.service.distribution.PickupLocationService,
     private val seq: SeqGenerator,
+    private val events: EventPublisher,
     private val db: Db,
     private val mapper: ObjectMapper,
 ) {
@@ -181,10 +184,25 @@ class OrderCreateService(
                 },
             )
             if (cartIds.isNotEmpty()) cartRows.deleteByIds(userId, cartIds)
+            // 事件与订单**同事务**（§25.4）：这一行跟着订单一起提交或一起回滚。
+            // 挂在事务内而不是 afterCommit —— 后者在"提交成功、发送前进程被杀"时会把事件整个丢掉，
+            // 而那正是 outbox 这个模式要解决的问题（没有订阅时它一条 SQL 都不写，所以挂在这里零成本）
+            events.publish(companyId, WebhookTopics.ORDER_CREATED, orderCreatedData(order))
             id
         }
         return orderId
     }
+
+    /** `order.created` 的载荷（字段清单见 `WebhookTopics`；本仓没有 `order_bn` 列，`order_id` 就是单号） */
+    private fun orderCreatedData(o: NormalOrderDO): Map<String, Any?> = linkedMapOf(
+        "order_id" to o.orderId,
+        "user_id" to o.userId,
+        "distributor_id" to o.distributorId,
+        "shop_id" to o.shopId,
+        "pay_fee" to o.totalFee,
+        "status" to o.orderStatus,
+        "created" to o.created,
+    )
 
     /**
      * 活动单归一与全部前置判据（docs/04 §14.3/§14.5）。

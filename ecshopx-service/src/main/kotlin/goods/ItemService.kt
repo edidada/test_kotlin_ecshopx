@@ -22,7 +22,9 @@ import com.ecshopx.kotlin.dao.goods.TagsMapper
 import com.ecshopx.kotlin.dao.paging.PageHelper
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
+import com.ecshopx.kotlin.service.openapi.EventPublisher
 import com.ecshopx.kotlin.service.tx.Db
+import com.ecshopx.kotlin.service.webhook.WebhookTopics
 
 /**
  * 商品域服务（GOODS-1..8）。
@@ -42,6 +44,7 @@ class ItemService(
     private val categories: CategoryService,
     private val sysConfig: SysConfigMapper,
     private val mapper: ObjectMapper,
+    private val events: EventPublisher,
     private val db: Db,
 ) {
 
@@ -134,6 +137,9 @@ class ItemService(
                     barcodes.insert(barcodeRow(child.itemId, code, main.itemId, companyId))
                 }
             }
+            // 只发**主行**事件（子行是对端拿 `item.list` 自己展开的事）：
+            // 一次建品发 N+1 条会把对端的接收队列刷成规格流水，而它要的只是"这个商品上架了"
+            events.publish(companyId, WebhookTopics.GOODS_CREATED, goodsData(main))
             main.itemId
         }
     }
@@ -161,6 +167,7 @@ class ItemService(
                 }
                 sf.itemSpec?.let { replaceAttrs(childId, cur.companyId, it, GoodsViews.ATTR_SPEC) }
             }
+            events.publish(cur.companyId, WebhookTopics.GOODS_UPDATED, goodsData(cur))
             Unit
         }
         categories.invalidate(cur.companyId)
@@ -173,9 +180,22 @@ class ItemService(
         return db.transactional {
             var n = items.softDelete(itemId, TimeSec.now())
             if (it.isDefault) items.listChildren(listOf(itemId)).forEach { c -> n += items.softDelete(c.itemId, TimeSec.now()) }
+            // 载荷只有两个键：删除事件里那些"当时的价格/库存"没有意义（对端拿到也只能当历史看），
+            // 而这一条一旦带上全量字段，就会诱导对接方拿它去覆盖自己的本地档案
+            events.publish(it.companyId, WebhookTopics.GOODS_DELETED, linkedMapOf("item_id" to itemId, "item_bn" to it.itemBn))
             n
         }
     }
+
+    /** `goods.*` 三个 topic 的同一份载荷（字段清单见 `WebhookTopics`；三条事件必须同形，否则对端要为删除单独写一支解析） */
+    private fun goodsData(o: ItemDO): Map<String, Any?> = linkedMapOf(
+        "item_id" to o.itemId,
+        "item_bn" to o.itemBn,
+        "item_name" to o.itemName,
+        "price" to o.price,
+        "store" to o.store,
+        "approve_status" to o.approveStatus,
+    )
 
     // ===== 装配 =====
 

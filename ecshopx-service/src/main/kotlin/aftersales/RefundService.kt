@@ -32,6 +32,7 @@ import com.ecshopx.kotlin.service.pay.PayChannelRegistry
 import com.ecshopx.kotlin.service.pay.RefundRequest
 import com.ecshopx.kotlin.service.seq.SeqGenerator
 import com.ecshopx.kotlin.service.tx.Db
+import com.ecshopx.kotlin.service.webhook.WebhookTopics
 import org.springframework.stereotype.Service
 
 /**
@@ -66,6 +67,7 @@ class RefundService(
     private val registry: PayChannelRegistry,
     private val commissions: com.ecshopx.kotlin.service.distribution.CommissionService,
     private val seq: SeqGenerator,
+    private val events: com.ecshopx.kotlin.service.openapi.EventPublisher,
     private val db: Db,
 ) {
 
@@ -352,6 +354,17 @@ class RefundService(
             reverseCommission(o, itemRow, r.refundFee, r.refundPoint, now)
             log(a.orderId, "system", "refund_success",
                 "退款单 $bn 收到渠道退款回执：现金 ${r.refundFee} 分 / 积分 ${r.refundPoint} 分")
+            // 只在**这一支**发（回执成功）：上面 `!succeeded` 那条走 `CHANGE`、状态不确定的那条已经 return，
+            // 而 `refund.finished` 的语义是"钱已经原路回去了"，早发一条对端就会按未到账的退款记账
+            events.publish(
+                r.companyId, WebhookTopics.REFUND_FINISHED,
+                linkedMapOf(
+                    "refund_id" to bn,
+                    "order_id" to a.orderId,
+                    "refund_fee" to r.refundFee,
+                    "finished_at" to now,
+                ),
+            )
             true
         }
         return linkedMapOf(

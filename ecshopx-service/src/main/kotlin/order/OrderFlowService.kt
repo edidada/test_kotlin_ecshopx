@@ -32,6 +32,7 @@ import com.ecshopx.kotlin.service.distribution.StockPool
 import com.ecshopx.kotlin.service.promotion.CouponService
 import com.ecshopx.kotlin.service.promotion.GroupsService
 import com.ecshopx.kotlin.service.tx.Db
+import com.ecshopx.kotlin.service.webhook.WebhookTopics
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
 
@@ -70,6 +71,7 @@ class OrderFlowService(
     private val points: PointMapper,
     private val seckillGoods: SeckillGoodsMapper,
     private val groups: GroupsService,
+    private val events: com.ecshopx.kotlin.service.openapi.EventPublisher,
     private val db: Db,
     private val mapper: ObjectMapper,
 ) {
@@ -109,10 +111,16 @@ class OrderFlowService(
     fun confirmReceipt(userId: Long, orderId: Long): Map<String, Any?> {
         val o = loadOwned(userId, orderId)
         val t = OrderStatusMachine.require(o.orderStatus, OrderEvent.CONFIRM_RECEIPT)
-        val ok = runTransit(
-            o, t, operatorId = userId, operator = "user:$userId", role = "buyer",
-            text = "会员确认收货，交易完成（实付 ${o.totalFee} 分）",
-        )
+        // 外层再包一次事务不是冗余：`runTransit` 用的是 `PROPAGATION_REQUIRED`，
+        // 这一层把"事件行"并进同一次提交里 —— 收货状态改成了而事件没落库，是推不出去也查不到的一种丢单
+        val ok = db.transactional {
+            val done = runTransit(
+                o, t, operatorId = userId, operator = "user:$userId", role = "buyer",
+                text = "会员确认收货，交易完成（实付 ${o.totalFee} 分）",
+            )
+            if (done) events.publish(o.companyId, WebhookTopics.ORDER_COMPLETED, linkedMapOf("order_id" to o.orderId, "finish_time" to TimeSec.now()))
+            done
+        }
         if (!ok) throw BizException(ErrorCode.BIZ, "订单状态已变更，请刷新后重试")
         return statusView(o, t)
     }
@@ -148,6 +156,17 @@ class OrderFlowService(
                     this.orderId = orderId; operatorRole = "system"; operator = "system"; behavior = t.behavior
                     this.logText = logText ?: "支付结清（${payType ?: "-"}），实付 ${o.totalFee} 分"
                 },
+            )
+            // 只在 **CAS 命中那一支**发（§25.6 门槛③）：上面 `hit == 0` 已经 return，
+            // 所以重复回调的第二次的确一条事件都不生成 —— 这条判据不是靠服务层判重，是靠它挂的位置
+            events.publish(
+                o.companyId, WebhookTopics.ORDER_PAID,
+                linkedMapOf(
+                    "order_id" to orderId,
+                    "pay_fee" to (patch.payFee ?: o.totalFee),
+                    "pay_type" to payType,
+                    "pay_time" to now,
+                ),
             )
             true
         }
@@ -223,6 +242,18 @@ class OrderFlowService(
                     operatorRole = "seller"; behavior = t.behavior
                     logText = "发货：${form.deliveryCorpName ?: form.deliveryCorp ?: "-"} ${form.deliveryCode ?: "-"}，共 ${plan.totalNum} 件"
                 },
+            )
+            // 分包发货每次都是一件独立事件（`delivered=false` 的那几条对端也要收）：
+            // 只发"发齐了"那一条会把中间包裹弄丢，而对端是按包裹收货的
+            events.publish(
+                o.companyId, WebhookTopics.ORDER_SHIPPED,
+                linkedMapOf(
+                    "order_id" to orderId,
+                    "orders_delivery_id" to d.ordersDeliveryId,
+                    "delivery_corp" to form.deliveryCorp,
+                    "delivery_code" to form.deliveryCode,
+                    "delivered" to plan.fullyDelivered,
+                ),
             )
             true
         }
@@ -370,6 +401,12 @@ class OrderFlowService(
                 this.orderId = o.orderId; this.operatorId = operatorId; this.operator = operator
                 operatorRole = role; behavior = t.behavior; logText = reason
             },
+        )
+        // 用户取消与超时关单都汇到这一支（两者都是 CAS 命中之后），所以 `order.closed` 只有一个发布点：
+        // 挂在两个调用方各写一遍，迟早有一边漏掉，而"漏掉的那一半"在测试里通常是并发那条
+        events.publish(
+            o.companyId, WebhookTopics.ORDER_CLOSED,
+            linkedMapOf("order_id" to o.orderId, "reason" to reason, "closed_at" to now),
         )
         true
     }
