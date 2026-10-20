@@ -1321,3 +1321,105 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 | D76 | **不建 API 调用日志表**：`OP-A6` 走进程内计数器（重启归零、多实例各算各的），`operator_logs` 里一条 openapi 行都没有。源系统连一张 API 日志表都没有，本项目也不在这一批造——网关每次调用插一行会把 P2 的开放面变成写放大源；配额与计量属 M2-4（那时要的是"每租户每天调用量"的聚合，不是逐次流水）。代价：这一位的数字**不是账**，写进接口说明里（`stats` 出参带 `note`） | 冒烟「OP-A6 概况…（进程内计数、重启归零）」；`OpenapiContract` 的 stats 行含 `note` 键 |
 | D77 | **后台六条走 `/api/setting/openapi/*`，与网关前缀错开**：`SecurityConfig` 四条链的位次是 `0 staff → 1 front → 2 admin → 3 storage`，而 `/api/openapi` 是 `/api/**` 的子集、网关链必须排在 2 之前。同前缀下"网关 `permitAll` + 后台那六条要鉴权"在安全匹配器里没法共存——放行一条就匿名一片（C174 那一课）。前缀错开之后不需要任何豁免表，**路径本身就是判据** | 冒烟第 8 段三条 403（role 2 无 `openapi.lists`/`webhook.lists`/`webhook.push`）与「网关那条匿名链不吃令牌」；e2e @Order(11) |
 | D78 | **事件目录做成接口而不是硬编码映射**：源系统对应物是 `EventServiceProvider` 里那张 `事件 → 监听器` 常量表，只有代码能读、对接口没有任何面。本项目把同一张表做成 `WH-A8`（topic + 挂点 + 载荷字段 + 一句说明），与 `OP-A5` 同一个纪律：**文档面从代码出**，另维护一份清单必然漂，漂了受害的是对接方 | 冒烟「WH-A8 目录十条、每条带挂点与载荷字段说明」「OP-A5 目录 = 注册表的 19 个 method、2 个版本」；e2e @Order(10)/(20) |
+
+## 27. P2 端点规格 —— 对接族：SystemLink ERP 入站 + 微信开放平台 + 支付渠道 profile（M2-2 开发前补齐，追加于 §26 之后，不回改上文）
+
+盘点结论（只读调研 `thirdparty/ECShopX` 原文与本仓源码所得，不是推断）：
+
+1. **SystemLink 在源系统是四条互不相干的入站链，不是一个网关**：`routes/systemlink/openapi.php`（`SystemLinkOpenapiCheck`）、`ome.php`（`ShopexErpCheck`）、`jushuitan.php`（`JushuitanCheck`）、`adapay.php`（无中间件）。四条前缀都是 `/api/systemlink`，但**鉴权、签名、应答形状各不相同**——把它们当成"同一个对接口"是这一族最容易犯的错。
+2. **签名是三支而不是一支，差异在 `assemble` 而不在公式**：`OpenApiCheck::gen_sign` 与 `ShopexErpCheck::gen_sign` 公式相同（`strtoupper(md5(strtoupper(md5(assemble)).token))`），但前者 `assemble` **不跳过 `null`、不转布尔**，后者**跳过 `null`、布尔转 `1/0`**。同一份参数在两条链上算出的签不同，这是实测结论（见 27.1 那张对照表），不是笔误。token 都取自 `config('common.openapi_gy_token')` / `config('common.oms_token')` 全局配置，**不分租户**。
+3. **OME 那张 17 条 method 常量表里一半是反向写商品/会员/分类**（`ome.items.create`/`ome.user.up`/`ome.category.create`/`ome.item.up`），另一半是 ERP 回传交易状态。本批只收 4 条能落到现有服务上的（27.2），其余留 M2-3 逐族补。
+4. **`store.trade.status.update` 在源系统只读不写**：拿到 `TRADE_CLOSED` 只查 `cancel_status == SUCCESS` 就答 `true`，**一行数据都不改**（注释写"目前由于关闭订单"，代码里没有任何关闭动作）。照抄这一条是为了让对接方"发完就收到成功"的行为不变，不是为了让它真关单——真关单走 `store.trade.refund.add`。
+5. **留痕表 `systemlink_oms_queuelog` 是先落 `running` 行、把 `logId` 传给控制器，控制器结束时补 `result`/`status`**；`runtime` 在源系统是"运行时间(秒)"字符串列。本项目保留同一张表的语义，`runtime` 改用毫秒（与 M2-1 的 `webhook_delivery_log.runtime` 对齐，D 系列记录）。
+6. **微信侧有两条互不相同的凭据链**：第三方平台（component）那条管预授权 URL、授权/取消授权/更新授权事件、authorizer info（`OpenPlatform.php`）；公众号/小程序那条管行业设置、模板增删查与发送（`TemplateMessageService`，按 `authorizerAppId` 构造）、小程序码三种形态（`WeappService::getWxaCode` 有限码 / `createWxaCodeUnlimit` 无限码 / `getWxaUrlLink`·`getWxaUrlSchema` 链接与 scheme）。两条链的 access_token 来源不同，混用会在"授权码换了、消息还发得出去"这种场景下才暴露。
+7. **支付三家的源系统实现是"开户 + 交易 + 分账 + 提现"四条腿**（AdaPay 一家 20 个 Service 文件），而本项目 `PayChannel` 接口只要四件事：下单出参数包、原路退、查单、回调解析。本批只做这四件事——里程碑原话就是"只做 `PayChannel` 实现位，不逐家联调"。
+
+### 27.1 SystemLink 入站（前缀 `/api/systemlink`，鉴权 = 签名，不进 JWT 链）
+
+| ID | 方法 | 路径 | 中间件等价物 | 说明 |
+|---|---|---|---|---|
+| SL-G1 | POST | `/api/systemlink/openapi/{method}` | 签名 A（`openapi_token`） | 站点开通/关闭/续费/查询，4 条 method（27.2 表 SL-M1..M4 的 site 组） |
+| SL-G2 | POST | `/api/systemlink/ome` | 签名 B（`oms_token`）+ IP 白名单 | `method` 从表单字段取；与 SL-G3 共用同一个分发函数 |
+| SL-G3 | POST | `/api/systemlink/ome/{method}` | 同 SL-G2 | `method` 取自路径末段 |
+
+**签名公式（两条链同一支公式）**：`sign = strtoupper(md5(strtoupper(md5(assemble(params))) + token))`，`params` 是"query ∪ 表单/JSON body"去掉 `sign` 之后的**扁平全集**（源系统 `$request->toArray()`）。
+
+**两支 `assemble` 的差异（逐项对照，写实现前先看清）**：
+
+| 输入 | 签名 A（`OpenApiCheck`） | 签名 B（`ShopexErpCheck`） |
+|---|---|---|
+| 键序 | `ksort(..., SORT_STRING)`，键按字节序 | 同 |
+| 拼接 | `键 + 值` 直接串 | 同 |
+| `null` 值 | **保留**，拼成 `键` + 空串 | **整体跳过**（键也不出现） |
+| 布尔值 | **保留**，PHP 里 `true` 串成 `"1"`、`false` 串成 `""` | **显式转** `1` / `0` |
+| 嵌套数组 | 递归 `assemble`（同样排序） | 同 |
+| 列表下标 | 按字符串序参与（`"10"` 排在 `"2"` 之前） | 同 |
+
+**错误应答形状（与 §25 的四键信封不是一套，别混）**：`{"rsp":"fail","code":0,"err_msg":"sign error","data":"<被签参数的 JSON 串>"}`，HTTP 恒 200。业务失败同样是 `rsp=fail`；成功是 `{"rsp":"succ","code":0,"err_msg":"","data":{...}}`（源系统 `api_response('true', …)` 落 `rsp=succ`）。
+
+**IP 白名单（只有 OME 那条有）**：源系统 `whiteIP()` 读 `config('common.ome_ip')` 之类的白名单；本项目改成按租户配置（27.3 的 `ip_whitelist`，逗号分隔、支持 CIDR、空 = 不限制），判据在签名之后——**先证明你是你，再判你从哪来**（顺序反了会把"白名单里的陌生人"和"签名错的自己人"混成一个码）。
+
+### 27.2 入站方法清单（8 条：site 4 + OME 4）
+
+| ID | method | 入口 | 入参 | 委托/口径 |
+|---|---|---|---|---|
+| SL-M1 | `ecapi.site.create` | SL-G1 | `eid`(Y) `shopexid`(Y) `tel`(Y) `company_name`(Y) `days`? | 建 `company` + 超管 operator + `company_license` 一行（`days` 缺省 365×20）；`tel` 已存在 → `账号已开通` |
+| SL-M2 | `ecapi.site.close` | SL-G1 | `eid`(Y) 或 `shopexid`(Y) | `company.is_disabled=1`（不删行：删了历史订单的归属就断了） |
+| SL-M3 | `ecapi.site.renew` | SL-G1 | `eid`/`shopexid`(Y) `days`(Y) | 续费：`expired_at += days×86400`，从"原到期时间"起算而不是从今天起算（少给一天也是少给） |
+| SL-M4 | `ecapi.site.checkisopen` | SL-G1 | `eid`/`shopexid`(Y) | 出 `{is_open, company_id, expired_at, available_days}`；`is_open` = 未停用 **且** 未过期 |
+| SL-M5 | `store.trade.fullinfo.get` | SL-G2/3 | `tid`(Y) | 按 `order_id` 出 OME 形状的 `{trade:{...}}`；`order_class` 不是 normal/groups/seckill → 拒（源系统同判据） |
+| SL-M6 | `store.logistics.offline.send` | SL-G2/3 | `tid`(Y) `company_code`(Y) `logistics_no`(Y) `oid_list`? | 委托 `OrderFlowService.ship`；`delivery_status=DONE` → `订单已发货，请勿重复发货`；`oid_list` 给了就按拆单发（`delivery_type=sep`） |
+| SL-M7 | `store.trade.status.update` | SL-G2/3 | `tid`(Y) `status` `type` `modify` `reason` | **只读不写**（见盘点结论 4）：`status=TRADE_CLOSED && type=status` 且本地 `cancel_status=SUCCESS` → `true`，否则 `订单信息有误` |
+| SL-M8 | `store.items.quantity.list.update` | SL-G2/3 | `list_quantity`(Y，JSON 串 `[{bn,quantity}]`) | 按 `item_bn` 回写 `items.store`；不存在的 bn 进 `no_update` 列表**不整单失败**（ERP 一次推一千个 SKU，一个错的不能拖垮九百九十九个） |
+
+### 27.3 后台面（前缀 `/api`，运营 JWT + `@RequiresResource`，写路径 `@Audited`）
+
+| ID | 方法 | 路径 | 说明 |
+|---|---|---|---|
+| SL-A1 | GET | `/api/setting/systemlink` | 对接设置：`{is_open, openapi_token(掩码), oms_token(掩码), ip_whitelist, updated}` |
+| SL-A2 | PUT | `/api/setting/systemlink` | 保存设置；`token` 传空 = 不改（运营看不到全值，也就没法把它抄回去再存一遍）；改 token 即刻生效 |
+| SL-A3 | GET | `/api/systemlink/logs` | 调用日志列表（`api_type?`/`worker?`/`status?`/时间段，分页）：行含 `runtime`/`msg_id`，**不出 `params`/`result` 两个 CLOB** |
+| SL-A4 | GET | `/api/systemlink/log/{id}` | 详情：带 `params`/`result` 原文（排障只有这一条路） |
+| WX-A1 | GET | `/api/wechat/openplatform/pre_auth_url` | 第三方平台预授权 URL（`redirect_uri` 入参） |
+| WX-A2 | POST | `/api/wechat/openplatform/bind` | 授权码回调绑定（`authorization_code`） |
+| WX-A3 | POST | `/api/wechat/openplatform/direct_bind` | 直连小程序绑定（`app_id` + `app_secret`） |
+| WX-A4 | GET | `/api/wechat/openplatform/authorizer` | 当前租户的授权信息（`app_id`/`nick_name`/`verify_type`/`expires_at`） |
+| WX-A5 | GET | `/api/wechat/templates` | 模板列表（`type=oa` 公众号模板消息 / `type=wxa` 订阅消息模板） |
+| WX-A6 | POST | `/api/wechat/template` | 新增模板（`short_id` 或 `template_id`） |
+| WX-A7 | DELETE | `/api/wechat/template/{id}` | 删模板 |
+| WX-A8 | POST | `/api/wechat/template/send` | 发一条模板消息/订阅消息：`{touser(Y), template_id(Y), page?, data(Y)}` |
+| WX-A9 | POST | `/api/wechat/wxa_code` | 小程序码：`{path, width?, scene?, type=code|unlimit|link|schema}` 四形态一张口 |
+| WX-G1 | ANY | `/api/wechat/notify/{appid}` | 公众号/小程序事件回调（消息、关注/取关、模板消息送达） |
+| WX-G2 | ANY | `/api/wechat/openplatform/notify/{appid}` | 第三方平台事件回调（`component_verify_ticket` / `authorized` / `unauthorized` / `updateauthorized`），AES 解密后分发 |
+
+### 27.4 支付渠道 profile（`PayChannel` 实现位，不逐家联调）
+
+| ID | 渠道 | `pay_type` | profile 值 | 落地范围 |
+|---|---|---|---|---|
+| PAY-X1 | AdaPay（汇付天下） | `adapay` | `adapay` | `pay`（出 `payment.create` 参数包）/ `refund` / `queryTrade` / `closeTrade` / `parseNotification`（`payment.succeeded` 回调） |
+| PAY-X2 | 银商（BsPay） | `bspay` | `bspay` | 同上四件事（`/v2/trade/payment` + `/v2/trade/refund` + 回调验签） |
+| PAY-X3 | 汇付（HfPay） | `hfpay` | `hfpay` | 同上四件事（`merchantPayment` + 退款 + 回调） |
+
+三家的共同约定（写进实现，避免每家各写一套）：`pay()` 只出参数包不结清（`settled=false`），结清只认回调；`refund()` 返回 `pendingCallback`（三家退款都是异步受理）；`parseNotification()` 必须验签，验不过返回 `null`（控制器回 FAIL，**不动账**）；配置读 `pay_channel_config` 表（`company_id + channel` 一行，密钥列加密留给 M2-4）。
+
+### 27.5 数据与配置追加（写实现前先定形状，全部幂等）
+
+- **`systemlink_setting`**（新表）：`id PK, company_id, is_open TINYINT DEFAULT 0, openapi_token VARCHAR(64), oms_token VARCHAR(64), ip_whitelist VARCHAR(512), created, updated` + `uk_systemlink_company(company_id)`。token 是本项目补的（源系统在 `config/common.php` 里全局一份，多租户共用一个 token 等于谁都能替谁开站点）。
+- **`systemlink_oms_queuelog`**（借源系统同形）：`id PK, company_id, api_type VARCHAR(16)('request'|'response'), worker VARCHAR(64), params CLOB, result CLOB, status VARCHAR(16)('running'|'success'|'fail'), runtime INT(ms), msg_id VARCHAR(40), created, updated` + `idx_oms_log_company_created(company_id, created)` + `idx_oms_log_worker(worker, status)`。
+- **`company_license`**（新表）：`id PK, company_id, eid VARCHAR(64), passport_uid VARCHAR(64), issue_id VARCHAR(64), available_days INT, active_at BIGINT, expired_at BIGINT, goods_code VARCHAR(64), product_code VARCHAR(64), source VARCHAR(32), created, updated` + `uk_license_company(company_id)`。源系统这张表在 `authorization` 包里（不在 `src/` 下），本项目按最小可用列自建。
+- **`wx_app`**（新表）：`id PK, company_id, app_id VARCHAR(64), app_secret VARCHAR(128), app_type VARCHAR(8)('oa'|'wxa'), authorizer_refresh_token VARCHAR(255), nick_name VARCHAR(64), verify_type INT, principal_name VARCHAR(128), status TINYINT DEFAULT 1, expires_at BIGINT, created, updated` + `uk_wx_app(company_id, app_id)`。
+- **`wx_message_log`**（新表）：`id PK, company_id, app_id, touser VARCHAR(128), template_id VARCHAR(128), page VARCHAR(255), data CLOB, status VARCHAR(16)('pending'|'success'|'fail'), errcode INT, errmsg VARCHAR(255), mock TINYINT, created, updated` + `idx_wx_msg_company_created(company_id, created)`。
+- **`pay_channel_config`**（新表）：`id PK, company_id, channel VARCHAR(16), merchant_no VARCHAR(64), app_id VARCHAR(64), api_key VARCHAR(128), notify_url VARCHAR(255), extra CLOB, status TINYINT DEFAULT 1, created, updated` + `uk_pay_channel(company_id, channel)`。
+- 发号：`SeqName` 追加 `OMS_MSG("oms_msg", "OMS")`（队列留痕的 `msg_id`），`sql/schema.sql` 同批补号段行（C166 那条纪律）。
+- 权限码从 **71** 起：`71 systemlink.lists`、`72 systemlink.update`、`73 wechat.lists`、`74 wechat.update`、`75 wechat.push`（发模板消息/取码）、目录码 **76 `systemlink_center`**、**77 `wechat_center`**。role 2 一条都不配（对外凭据与推送口子同 §25.5 的划分）。
+- 配置：`ecx.systemlink.enabled`=`true`、`ecx.systemlink.require-ip-whitelist`=`${ECX_SYSTEMLINK_REQUIRE_IP:false}`、`ecx.wx.profile`=`${ECX_WX_PROFILE:mock}`（`mock` 不出网、落 `wx_message_log`；`real` 走微信开放平台）、`ecx.wx.api-base`=`https://api.weixin.qq.com`、`ecx.wx.component-app-id`/`ecx.wx.component-app-secret`/`ecx.wx.component-token`/`ecx.wx.component-aes-key`（第三方平台四件套，缺省空）、`ecx.pay.active-channel-profile` 扩展支持 `adapay`/`bspay`/`hfpay`（逗号叠加）。
+
+### 27.6 门槛用例（进 e2e 与冒烟，任一条红就不算交付）
+
+1. **两支签名的差异必须被证出来**：同一份含 `null` 与布尔值的参数，签名 A 与签名 B 算出的串**不同**（手写期望串钉死，不拿产品代码自签自验）；改一个字节 → `sign error`；缺 `sign` → `sign error`；token 换了即刻失效。
+2. **IP 白名单在签名之后**：签名错 + IP 不在白名单 → 回 `sign error`（不是 `ip access denied`）；签名对 + IP 不在白名单 → `ip access denied`；白名单空 = 不限制。
+3. **留痕两行**：一次成功的 OME 调用落 `request` + `response` 两行，`status=success`、`runtime>=0`、`msg_id` 同值；失败落 `fail` 且 `result` 里有错因；`SL-A3` 列表**不出** `params`/`result`。
+4. **四件事的业务口径**：`store.logistics.offline.send` 后订单 `delivery_status=DONE` 且 `orders_delivery` 有一行、再发一次回"请勿重复发货"；`store.trade.status.update` 在 `cancel_status=SUCCESS` 时答 true、否则 `订单信息有误`、且**两种情况订单行都不变**；`store.items.quantity.list.update` 一个不存在的 bn 只进 `no_update`、其余照改；site 四条的 create→checkisopen→renew→close 全链（`expired_at` 从原到期时间加）。
+5. **微信侧**：mock profile 下发模板消息落 `wx_message_log`（`mock=1`、`status=success`）且**不出网**（本机无外网也能绿）；`type=unlimit` 取码在 mock 下返回可解析的 PNG 字节头；第三方平台回调的 `component_verify_ticket` 落 `wx_app`（解密失败 → 400 且不落库）；未绑定租户发消息 → 422 且 `wx_message_log` 不落行（"没配置"与"发失败"不是一件事）。
+6. **支付三渠道**：三个 profile 各自 `pay()` 出参数包且 `settled=false`；回调验签错 → 控制器 FAIL 且订单不变；验签对 → 结清；`refund()` 回 `pendingCallback`；`queryTrade()` 在模拟服务器上拿到 `SUCCESS` 后补单作业能把订单推进。
+7. **不碰既有面**：`mvn -B -o verify` 全绿 + 既有 `m06`/`m11`/`m15`/`m21` 四张冒烟在同库上复跑全绿（新增入站链不改任何既有写路径的行为）。
