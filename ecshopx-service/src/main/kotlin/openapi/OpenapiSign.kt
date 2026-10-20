@@ -118,9 +118,21 @@ class OpenapiNonceStore {
         sweep(now)
         val key = sha256Hex(nonce)
         val expiry = now + ttlSeconds
-        // compute 是原子的：两个并发请求打同一个 nonce 时，只有一个能把自己的 expiry 写进去
-        val stored = seen.compute(key) { _, old -> if (old != null && old > now) old else expiry }
-        return stored == expiry
+        // 判"这个位归谁"，不判"返回值等不等于我算的 expiry"。
+        // 之前写的是 `stored == expiry`，而**同一秒内**重放同一个 nonce 时两次算出的 expiry 完全相同，
+        // 第二次拿到旧值就等于拿到新值 → 放行，防重放在"脚本连发"这个最典型的场景下形同虚设
+        // （M2-1 e2e 门槛①的重放用例抓出来的真缺陷，不是测试写歪）。
+        // `compute` 对同一个键是原子的，所以并发撞同一个 nonce 时只有一个线程能把 `taken` 置起来。
+        var taken = false
+        seen.compute(key) { _, old ->
+            if (old == null || old <= now) {
+                taken = true
+                expiry
+            } else {
+                old
+            }
+        }
+        return taken
     }
 
     private fun sweep(now: Long) {

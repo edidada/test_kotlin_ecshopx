@@ -4,6 +4,7 @@ import com.ecshopx.kotlin.common.security.Mask
 import com.ecshopx.kotlin.dao.auth.MemberListRow
 import com.ecshopx.kotlin.dao.auth.MembersMapper
 import com.ecshopx.kotlin.dao.goods.ItemsMapper
+import com.ecshopx.kotlin.dao.order.OrdersMapper
 import com.ecshopx.kotlin.dao.paging.PageHelper
 import com.ecshopx.kotlin.common.api.PageQuery
 import com.ecshopx.kotlin.service.asset.DepositService
@@ -53,6 +54,7 @@ class OpenapiMethodRegistry(
     orders: OrderQueryService,
     flow: OrderFlowService,
     writeOff: WriteOffService,
+    private val ordersMapper: OrdersMapper,
     items: ItemService,
     itemsMapper: ItemsMapper,
     members: MemberService,
@@ -96,15 +98,25 @@ class OpenapiMethodRegistry(
             id = "OA-M3", method = "ecx.order.get", verb = GET, versions = setOf(V2),
             summary = "订单详情", requiredAny = listOf("order_id", "order_bn"),
             notFound = OpenapiError(OpenapiCode.ORDER_NOT_FOUND, "订单不存在"),
-        ) { req, caller -> orders.detail(orderIdOf(req), null) },
+        ) { req, caller ->
+            // 归属先于委托判（见 [requireOwnedOrder]）：`detail` 是站内共用的装配函数，它按单号取数、
+            // 不认租户，后台面靠 `scope` 收窄、开放面没有 scope 可收
+            val id = orderIdOf(req)
+            requireOwnedOrder(caller, id)
+            orders.detail(id, null)
+        },
 
         Entry(
             id = "OA-M4", method = "ecx.order.deliver", verb = POST, versions = setOf(V2),
             summary = "发货", required = listOf("order_id"),
             notFound = OpenapiError(OpenapiCode.ORDER_NOT_FOUND, "订单不存在"),
         ) { req, caller ->
+            val orderId = req.requireLong("order_id")
+            // 写面更要先判归属：`ship` 与 `detail` 同一个形状（按 id 操作），
+            // 少这一句就是"别的租户能发货"，而那件事在只读面上是看不出来的
+            requireOwnedOrder(caller, orderId)
             flow.ship(
-                req.requireLong("order_id"),
+                orderId,
                 OrderDeliveryForm(
                     orderId = req.long("order_id"),
                     deliveryCorp = req.str("delivery_corp"),
@@ -302,6 +314,21 @@ class OpenapiMethodRegistry(
 
     private fun pageQuery(req: OpenapiRequest): PageQuery =
         PageQuery.of(req.int("page"), req.int("pageSize") ?: req.int("page_size"))
+
+    /**
+     * 订单归属闸门（§25.6 门槛②的实现处）。
+     *
+     * `OrderQueryService.detail` 与 `OrderFlowService.ship` 都是**按单号操作**的站内装配函数：
+     * 后台面靠 `DistributorScope` 收窄、会员面靠 `userId` 校验，唯独开放面两个都没有——
+     * 租户位来自密钥行，不来自入参。所以归属必须在委托之前判，而且**不存在与跨租户回同一个答**
+     * （`E5301 订单不存在`）：把"这单存在但不是你的"说出口，网关就成了别的租户的单号探测器。
+     */
+    private fun requireOwnedOrder(caller: OpenapiCaller, orderId: Long) {
+        val o = ordersMapper.findById(orderId)
+        if (o == null || o.companyId != caller.companyId) {
+            throw OpenapiException(OpenapiCode.ORDER_NOT_FOUND, "订单不存在")
+        }
+    }
 
     /**
      * 订单号取数（§25.2 OA-M3）。
