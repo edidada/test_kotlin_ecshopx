@@ -1504,7 +1504,55 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 5. **每日加次幂等**：`loginaddtimes` 首 +N、二刷不改值；加次把原来"用完"的转盘救活一抽。
 6. **后台留痕**：`getturntable_log/byid` 看得到前台抽的行；`getturntable_count/byid` 三个数与流水一致；下架后前台抽取 422 且配置其余字段不丢。
 
-### 29.2 砍价域（本批后补）
+### 29.2 砍价域
+
+交付面：后台 **6 条** + 前台 **5 条**（`service/promotion/BargainService` + `dao/promotion/BargainMappers.kt`）、
+三张新表（`bargain_promotions`/`user_bargain`/`user_bargain_log`，基表数 83→86）、
+权限码 **81/82**（同挂营销中心目录 27，role 2 一条都不配）、SecurityConfig 前台链补两条 frontnoauth 白名单位。
+
+后台（JWT + 权限码，写路径 `@Audited`）：
+
+| 方法 | URL | 说明 | 权限码 |
+|---|---|---|---|
+| POST | `/api/promotions/bargains` | 创建（`item_price` 缺省取商品现价；floor<price、steps≥1 硬校验） | 82 `promotions.bargain.update` |
+| GET | `/api/promotions/bargains` | 列表翻页（含停用行） | 81 `promotions.bargain.lists` |
+| GET | `/api/promotions/bargains/{bargain_id}` | 详情 | 81 |
+| PUT | `/api/promotions/bargains/{bargain_id}` | 编辑（覆盖式；`disabled` 同走这条） | 82 |
+| PUT | `/api/promotions/bargains/termination/{bargain_id}` | 终止（停发刀、留行留刀史） | 82 |
+| DELETE | `/api/promotions/bargains/{bargain_id}` | 删除（已有会员参与 → 业务错；保护位 D-IC5） | 82 |
+
+前台（`/api/h5app/wxapp/promotion`）：
+
+| 方法 | URL | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/promotion/bargains` | jwt | 未停用活动行（joined_users 聚合） |
+| POST | `/promotion/userbargain` | jwt | 参与砍价（body `bargain_id`；每会员每活动一份刀，uk 兜双击） |
+| GET | `/promotion/userbargain?id=` | frontnoauth | 详情 + 刀史（分享页照抄位） |
+| POST | `/promotion/bargainlog` | frontnoauth | 帮砍一刀（`user_bargain_id`；游客 helper_id=0） |
+| GET | `/promotion/bargainfriendwxappcode?user_bargain_id=` | jwt | 委托 WxAcodeService（A9 复用 unlimit，scene=`ub:{id}`），回二进制 PNG |
+
+模型与判据：
+
+- **刀是定长的**：每刀减 `ceil((item_price − floor_price) / steps)` 分，末刀钳到地板价（页面可预告）；
+  `reached` 是资格位（after ≤ floor 即翻），`steps_left = steps − 刀史行数` 派生不落列。
+- **uk(company,bargain,user)** = "同一活动同一会员一份刀"；重复参与回业务错"已参与过该砍价"。
+- **删除守卫**：有 `user_bargain` 在 → 删除拒绝（"已有用户参与，不能删除（可终止下架）"），终止是下架位。
+- 成单链路（按底价下单）**不接**（C224）：`order_class='bargain'` 已在 schema 预留，接入单独立批。
+
+差异表（§29.2 追加）：
+
+| ID | 差异 | 理由 |
+|---|---|---|
+| C224 | **成单链路不接**：源系统砍到底可"按底价下单"，是把快照参数送进下单链的一跳；本批承诺位到"资格位"为止，接入要动 cart/checkout，单独立批 | 最小集 |
+| C225 | **刀长定量化**：源系统每刀金额带随机成分（砍价表格配置区间）；本项目定长 ceil，随机性留给抽奖域（两域不同味，可解释性优先） | 可解释性 |
+| C226 | **friend 幂等取宽**：同一好友重复帮砍不拦（刀数上限托底）；源系统进店维度的判重依赖登录态，frontnoauth 语义下没有可靠的判重键 | 取宽 |
+
+门槛用例（并入 `M23EndToEndTest` @Order(9)..）：
+
+1. **后台 CRUD+终止**：建（floor≥price → 422；steps=0 → 422）→ 列表/详情 → 终止翻 `disabled` → 前台列表消失。
+2. **参与+帮砍全链**：参与（current=原价、steps_left=10）→ 重复参与 422 → 帮砍 10 刀（定长 890 分）→ 第 10 刀后 `reached`、current=底价 → 再砍 422"已砍到底价"；每刀 `user_bargain_log` 一行。
+3. **分享码**：GET PNG → 字节头 89 50 4E 47（mock 不出网）。
+4. **删除守卫**：参与过的活动删除 → 422；无参与的新建+删除 → `deleted=true`。
 ### 29.3 加价购扩展与人群折扣（本批后补）
 ### 29.4 次卡 / rights 族（本批后补）
 ### 29.5 浏览 / 搜索增强与遗留 method（本批后补）

@@ -1673,3 +1673,48 @@ CREATE TABLE IF NOT EXISTS user_lottery_log (
   updated     BIGINT       NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_lottery_user ON user_lottery_log(company_id, user_id, id);
+
+-- ===== M2-3 追加：砍价域（docs/04 §29.2，追加于末尾，不回改上文） =====
+-- 价格一律分（与全仓价格列同一单位）。`order_class='bargain'` 的成单链路本批不接（C224），
+-- schema 第 508 行那段通配注释里的预留位次与本表互不牵涉。
+CREATE TABLE IF NOT EXISTS bargain_promotions (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id  BIGINT       NOT NULL,
+  item_id     BIGINT       NOT NULL,
+  item_price  BIGINT       NOT NULL,                 -- 起始价（分）；创建时缺省取商品现价
+  floor_price BIGINT       NOT NULL,                 -- 底价（分），必须低于 item_price
+  steps       INT          NOT NULL,                 -- 总刀数（每刀减价 = ceil((item-floor)/steps)）
+  disabled    TINYINT      NOT NULL DEFAULT 0,       -- 0 进行 / 1 终止下架（terminate 的位）
+  created     BIGINT       NOT NULL DEFAULT 0,
+  updated     BIGINT       NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_bargain_admin ON bargain_promotions(company_id, id);
+
+-- 一份刀：同一活动同一会员一行（uk 即幂等担保）；current_price 是刀动到哪的账头，
+-- 剩余刀数不落列 —— 由 user_bargain_log 行数派生（Interaction 那批 DAO 注记 1 的同一条纪律）。
+CREATE TABLE IF NOT EXISTS user_bargain (
+  id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id    BIGINT       NOT NULL,
+  user_id       BIGINT       NOT NULL,
+  bargain_id    BIGINT       NOT NULL,
+  current_price BIGINT       NOT NULL,
+  status        VARCHAR(16)  NOT NULL DEFAULT 'going',  -- going / reached
+  created       BIGINT       NOT NULL DEFAULT 0,
+  updated       BIGINT       NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_user_bargain ON user_bargain(company_id, bargain_id, user_id);
+
+-- 刀史：每刀一条（谁砍的、砍了多少、砍到哪），frontnoauth 帮砍页的回显行。
+-- 无唯一键：好友重复进页面只是浏览，不重复出刀由"刀数上限"托底（与源系统对 friend 判重的取宽）。
+CREATE TABLE IF NOT EXISTS user_bargain_log (
+  id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id     BIGINT       NOT NULL,
+  user_bargain_id BIGINT      NOT NULL,
+  user_id        BIGINT       NOT NULL DEFAULT 0,      -- 0 = frontnoauth 的游客帮砍
+  cut_fee        BIGINT       NOT NULL,
+  before_price   BIGINT       NOT NULL,
+  after_price    BIGINT       NOT NULL,
+  created        BIGINT       NOT NULL DEFAULT 0,
+  updated        BIGINT       NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_ubg_log ON user_bargain_log(company_id, user_bargain_id, id);

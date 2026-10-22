@@ -20,6 +20,10 @@ object ActivityCodes {
     const val CHECKIN_LISTS = "promotions.checkin.lists"
     const val TURNTABLE_LISTS = "promotions.turntable.lists"
     const val TURNTABLE_UPDATE = "promotions.turntable.update"
+
+    /** M2-3 批B 砍价域（§29.2）：读 81（列表详情）/ 改 82（创建编辑终止删除） */
+    const val BARGAIN_LISTS = "promotions.bargain.lists"
+    const val BARGAIN_UPDATE = "promotions.bargain.update"
 }
 
 /**

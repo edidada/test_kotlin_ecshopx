@@ -59,7 +59,9 @@ class BootSmokeTest {
                     //      改这张表的数量必须同步改这里，否则 M2 的表在真实环境建不出来而测试还绿着。
                     // 83 = 再加 M2-3 互动域 3 张：`user_checkin`（签到，uk(g,u,day) 幂等担保）、
                     //      `user_lottery_times`（每日加次领取态）、`user_lottery_log`（抽奖流水）。
-                    assertTrue(rs.getInt(1) == 83, "expect 83 base tables, got ${rs.getInt(1)}")
+                    // 86 = 再加 M2-3 批B 砍价域 3 张：`bargain_promotions`（活动）、
+                    //      `user_bargain`（一份刀，uk(g,a,u)）、`user_bargain_log`（刀史）。
+                    assertTrue(rs.getInt(1) == 86, "expect 86 base tables, got ${rs.getInt(1)}")
                 }
             }
         }

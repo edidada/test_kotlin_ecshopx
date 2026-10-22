@@ -155,7 +155,14 @@ class SecurityConfig(
                     "/api/h5app/wxapp/distributor/pickuplocation",
                     // SM-F1 扫码进店看"这是谁的店"，同样是登录前的动作
                     "/api/h5app/wxapp/salesperson",
-                ).permitAll()
+                )
+                    // M2-3 砍价：详情与帮砍是分享给朋友点开的（源系统 frontnoauth:h5app，
+                    // 附录 §Bargain 那两行）。**方法级收窄**：GET userbargain 是围观、POST bargainlog
+                    // 是出刀；同一 URL 的 POST userbargain（参与，jwt 面）绝不能被这条白名单松绑。
+                    .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/h5app/wxapp/promotion/userbargain")
+                    .permitAll()
+                    .requestMatchers(org.springframework.http.HttpMethod.POST, "/api/h5app/wxapp/promotion/bargainlog")
+                    .permitAll()
                     .anyRequest().authenticated()
             }
             .addFilterBefore(JwtMemberFilter(jwt), UsernamePasswordAuthenticationFilter::class.java)

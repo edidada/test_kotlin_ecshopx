@@ -60,6 +60,11 @@ class M23EndToEndTest {
     private var admin = ""
     private var viewer = ""
 
+    /** 批B 砍价 payloads 的行号（Order(9)/Order(10) 先后落） */
+    private var bargain1 = 0L
+    private var bargain2 = 0L
+    private var ubg2 = 0L
+
     // ================= 门槛①②（签到幂等 + 别名一致性 + 周面板） =================
 
     @Test @Order(1) fun `令牌就绪`() {
@@ -261,12 +266,107 @@ class M23EndToEndTest {
         ), "user 2 的账实恒等式")
     }
 
+    // ================= 批B 砍价域门槛①..④ =================
+
+    /** 建一个确定性砍价：item_price=9900、floor=1000、10 刀（每刀 890 分整除） */
+    private val BARGAIN_BODY = mapOf<String, Any?>(
+        "item_id" to 3, "item_price" to 9900, "floor_price" to 1000, "steps" to 10,
+    )
+
+    @Test @Order(9) fun `砍价门槛一 后台CRUD与终止`() {
+        // 建（floor>=price → 422；steps=0 → 422）
+        expect("POST", "/api/promotions/bargains", mapOf(
+            "item_id" to 3, "item_price" to 1000, "floor_price" to 1000, "steps" to 10,
+        ), 422, admin)
+        expect("POST", "/api/promotions/bargains", mapOf(
+            "item_id" to 3, "item_price" to 9900, "floor_price" to 1000, "steps" to 0,
+        ), 422, admin)
+        val d = expect("POST", "/api/promotions/bargains", BARGAIN_BODY, 200, admin).path("data")
+        bargain1 = d.path("bargain_id").asLong()
+        assertTrue(bargain1 > 0)
+        assertEquals(9900L, d.path("item_price").asLong())
+        assertEquals(1000L, d.path("floor_price").asLong())
+        // 终止翻 disabled；前台列表不再有这一行
+        val t = expect("PUT", "/api/promotions/bargains/termination/$bargain1", null, 200, admin).path("data")
+        assertTrue(t.path("disabled").asBoolean())
+        val front = okGet("/api/h5app/wxapp/promotion/bargains", mapOf("page" to 1, "page_size" to 10))
+        assertFalse(front.path("list").stream().anyMatch { n -> n.path("bargain_id").asLong() == bargain1 },
+            "已终止的活动不进前台列表")
+    }
+
+    @Test @Order(10) fun `砍价门槛二 参与与定长帮砍全链`() {
+        val d = expect("POST", "/api/promotions/bargains", BARGAIN_BODY, 200, admin).path("data")
+        bargain2 = d.path("bargain_id").asLong()
+        // 前台列表可见（未停用）
+        val front = okGet("/api/h5app/wxapp/promotion/bargains", mapOf("page" to 1, "page_size" to 10))
+        assertEquals(bargain2, front.path("list").get(0).path("bargain_id").asLong())
+        // 参与：current=原价、steps_left=10
+        val join = ok("POST", "/api/h5app/wxapp/promotion/userbargain", mapOf("bargain_id" to bargain2))
+        ubg2 = join.path("user_bargain_id").asLong()
+        assertTrue(ubg2 > 0)
+        assertEquals(9900L, join.path("current_price").asLong())
+        assertEquals(10, join.path("steps_left").asInt())
+        // 重复参与 → 422（uk 幂等）
+        expect("POST", "/api/h5app/wxapp/promotion/userbargain", mapOf("bargain_id" to bargain2), 422, tok)
+        // 帮砍 10 刀：每刀 890 分；第 10 刀后 reached、current=底价
+        repeat(10) { n ->
+            val cut = ok("POST", "/api/h5app/wxapp/promotion/bargainlog", mapOf("user_bargain_id" to ubg2))
+            assertEquals(890L, cut.path("cut_fee").asLong(), "第 ${ n + 1 } 刀定长")
+            if (n == 9) {
+                assertTrue(cut.path("reached").asBoolean(), "第 10 刀达底")
+                assertEquals(1000L, cut.path("current_price").asLong())
+                assertEquals("reached", cut.path("status").asText())
+            } else {
+                assertFalse(cut.path("reached").asBoolean())
+            }
+        }
+        // 刀史行数=10、再砍 → 已砍到底价
+        assertEquals(10L, jdbc.queryForObject(
+            "SELECT COUNT(*) FROM user_bargain_log WHERE company_id = 1 AND user_bargain_id = ?",
+            Long::class.java, ubg2,
+        ) ?: -1L)
+        expect("POST", "/api/h5app/wxapp/promotion/bargainlog", mapOf("user_bargain_id" to ubg2), 422, tok)
+            .let { b -> assertTrue(b.path("message").asText().contains("已砍到底价")) }
+        // 详情（frontnoauth 直看，无人也要能看）
+        val det = callGet("/api/h5app/wxapp/promotion/userbargain", mapOf("user_bargain_id" to ubg2), null)
+            .let { bodyOf(it) }.path("data")
+        assertEquals("reached", det.path("status").asText())
+        assertEquals(10, det.path("logs").size())
+    }
+
+    @Test @Order(11) fun `砍价门槛三 分享码是PNG字节`() {
+        val res = mvc.perform(get("/api/h5app/wxapp/promotion/bargainfriendwxappcode")
+            .param("user_bargain_id", ubg2.toString()).header("Authorization", "Bearer $tok")).andReturn()
+        assertEquals(200, res.response.status)
+        assertEquals("image/png", res.response.getHeader("Content-Type")?.split(';')?.firstOrNull())
+        val bytes = res.response.contentAsByteArray
+        assertEquals(0x89.toByte() == bytes[0] && bytes[1] == 0x50.toByte() && bytes[2] == 0x4E.toByte() && bytes[3] == 0x47.toByte(),
+            true, "PNG 字节头（mock 同 A9，不出网）")
+    }
+
+    @Test @Order(12) fun `砍价门槛四 删除守卫`() {
+        // 有参与 → 不能删
+        expect("DELETE", "/api/promotions/bargains/$bargain2", null, 422, admin).let { b ->
+            assertTrue(b.path("message").asText().contains("不能删除"))
+        }
+        // 无参与 → 删得掉
+        val fresh = expect("POST", "/api/promotions/bargains", BARGAIN_BODY, 200, admin).path("data")
+        val freshId = fresh.path("bargain_id").asLong()
+        val del = expect("DELETE", "/api/promotions/bargains/$freshId", null, 200, admin).path("data")
+        assertTrue(del.path("deleted").asBoolean())
+    }
+
     // ================= 调用件 =================
 
     private fun utf8(b: ByteArray) = String(b, Charsets.UTF_8)
 
     private fun call(method: String, url: String, token: String?, body: Map<String, Any?>? = null): MvcResult {
-        val req = if (method == "GET") get(url) else post(url)
+        val req = when (method) {
+            "GET" -> get(url)
+            "POST" -> post(url)
+            "PUT" -> org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put(url)
+            else -> org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete(url)
+        }
         token?.let { req.header("Authorization", "Bearer $it") }
         body?.let { req.contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(it)) }
         return mvc.perform(req).andReturn()

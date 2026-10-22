@@ -573,3 +573,12 @@ INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_co
 
 INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
   (1, 78), (1, 79), (1, 80);
+
+-- ===== M2-3 批B 追加：砍价域权限码（docs/04 §29.2，追加于末尾） =====
+-- 81 读 / 82 改，同挂营销中心目录 27。role 2 不配 —— 能动底价就能送钱（与 point.update 同一划分）。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (81, 27, '砍价列表与详情', 'promotions.bargain.lists',  'actived'),
+  (82, 27, '砍价创建与维护', 'promotions.bargain.update', 'actived');
+
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 81), (1, 82);
