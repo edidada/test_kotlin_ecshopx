@@ -290,8 +290,10 @@ class M23EndToEndTest {
         val t = expect("PUT", "/api/promotions/bargains/termination/$bargain1", null, 200, admin).path("data")
         assertTrue(t.path("disabled").asBoolean())
         val front = okGet("/api/h5app/wxapp/promotion/bargains", mapOf("page" to 1, "page_size" to 10))
-        assertFalse(front.path("list").stream().anyMatch { n -> n.path("bargain_id").asLong() == bargain1 },
-            "已终止的活动不进前台列表")
+        assertTrue(
+            front.path("list").none { it.path("bargain_id").asLong() == bargain1 },
+            "已终止的活动不进前台列表",
+        )
     }
 
     @Test @Order(10) fun `砍价门槛二 参与与定长帮砍全链`() {
