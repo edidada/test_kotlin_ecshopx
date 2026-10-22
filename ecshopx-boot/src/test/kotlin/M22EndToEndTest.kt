@@ -154,6 +154,11 @@ class M22EndToEndTest {
         assertEquals("gy_openapi_demo_token_1", row["openapi_token"], "演示密钥用 seed 假值")
         assertEquals("gy_oms_demo_token_1", row["oms_token"])
         assertEquals("", row["ip_whitelist"], "默认不限 IP")
+        // SL-A1 的两把 token 恒掩码（C218）：出参认得"配了哪一版"，抄不走全值
+        val maskView = ok("GET", "/api/setting/systemlink", body = null, asWho = admin)
+        assertEquals("gy_o****_1", maskView.path("openapi_token").asText(), "openapi_token 掩码形态")
+        assertEquals("gy_o****_1", maskView.path("oms_token").asText(), "oms_token 掩码形态")
+        assertNotEquals("gy_openapi_demo_token_1", maskView.path("openapi_token").asText(), "全值不出")
     }
 
     @Test @Order(2) fun `门槛一 两支 assemble 逐串钉死`() {
@@ -392,7 +397,7 @@ class M22EndToEndTest {
         )
         val resp = call("POST",
             "/api/wechat/openplatform/notify/wxcomp22?signature=$sig&timestamp=$ts&nonce=n2",
-            mapOf("InfoType" to "component_verify_ticket", "ComponentVerifyTicket" to "t22_ticket_1"))
+            null, mapOf("InfoType" to "component_verify_ticket", "ComponentVerifyTicket" to "t22_ticket_1"))
         assertEquals(200, resp.response.status)
         assertEquals("success", utf8(resp.response.contentAsByteArray), "G2 应答是裸文本 success")
         assertEquals("t22_ticket_1", state.latestTicket(), "component_verify_ticket 进进程内状态（不落租户表）")
@@ -402,7 +407,7 @@ class M22EndToEndTest {
         )
         val respU = call("POST",
             "/api/wechat/openplatform/notify/wxcomp22?signature=$sig3&timestamp=$ts&nonce=n3",
-            mapOf("InfoType" to "unauthorized", "AuthorizerAppId" to "wx_direct_22"))
+            null, mapOf("InfoType" to "unauthorized", "AuthorizerAppId" to "wx_direct_22"))
         assertEquals(200, respU.response.status)
         assertEquals(0, ok("GET", "/api/wechat/openplatform/authorizer", null, admin).path("status").asInt(),
             "unauthorized 事件把授权行翻停用")
@@ -430,7 +435,7 @@ class M22EndToEndTest {
         )).path("package").asText().removePrefix("prepay_id=")
         assertTrue(tradeId.isNotBlank(), "支付参数包里的支付单号：$tradeId")
         val fee = jdbc.queryForObject("SELECT total_fee FROM trade WHERE trade_id = ?", Long::class.java, tradeId)
-        assertTrue(utf8(notifyFormFee(tradeId, fee)).contains("SUCCESS"), "mock 渠道表单回调应答 SUCCESS")
+        assertTrue(notifyFormFee(tradeId, fee).contains("SUCCESS"), "mock 渠道表单回调应答 SUCCESS")
         assertEquals("PAYED", orderCol(order, "pay_status"), "回调后一步结清")
 
         // SL-M5 fullinfo：发货之前就查得出整单（订单在，只是没发走）

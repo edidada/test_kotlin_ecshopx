@@ -1423,3 +1423,16 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 5. **微信侧**：mock profile 下发模板消息落 `wx_message_log`（`mock=1`、`status=success`）且**不出网**（本机无外网也能绿）；`type=unlimit` 取码在 mock 下返回可解析的 PNG 字节头；第三方平台回调的 `component_verify_ticket` 落 `wx_app`（解密失败 → 400 且不落库）；未绑定租户发消息 → 422 且 `wx_message_log` 不落行（"没配置"与"发失败"不是一件事）。
 6. **支付三渠道**：三个 profile 各自 `pay()` 出参数包且 `settled=false`；回调验签错 → 控制器 FAIL 且订单不变；验签对 → 结清；`refund()` 回 `pendingCallback`；`queryTrade()` 在模拟服务器上拿到 `SUCCESS` 后补单作业能把订单推进。
 7. **不碰既有面**：`mvn -B -o verify` 全绿 + 既有 `m06`/`m11`/`m15`/`m21` 四张冒烟在同库上复跑全绿（新增入站链不改任何既有写路径的行为）。
+
+## 28. 实现期语义补充（M2-2 #82..#86：SystemLink 入站 + 微信开放平台 + 支付渠道实现位落地时确认，追加于 §27 之后，不回改上文）
+
+| ID | 差异 | 证据 |
+|---|---|---|
+| C212 | **`component_verify_ticket` 不落库**（修正 §27.6 门槛⑤的原话"落 wx_app"）：它是**平台级**凭据、只在进程内换 `component_access_token` 用，而 `wx_app` 是租户级表，放不下它；`wx_app` 落的是**事件**——`authorized`/`updateauthorized`/`unauthorized` 写授权行（status 翻 0/1）。ticket 走进程内 `WxComponentState`（同部署一般只有一个 component_appid，取"最近一次的 ticket"即可），重启丢一次票 = 下一条回调 10 分钟内就补上，微信的原语就是这么设计的 | e2e「ticket 进进程内状态（不落租户表）」「unauthorized 事件把授权行翻停用→重新绑定恢复 status=1」 |
+| C213 | **模板注册表在进程内**：源系统的模板存**微信侧**（`template/get_all_private_template` 就是查微信的家底），本项目没有"模板表"这回事；mock 注册表只在进程内（重启即空，下次 `A6` 再建一次就是），真链 profile 的模板增删查直接打微信 | 冒烟/e2e「A5 能看到新模板」；`WxTemplateService` mock 分支注释 |
+| C214 | **SL-M2 站点关闭的判据收敛为 `company.status='closed'`**：源系统写的是 `company.is_disabled=1`，本项目沿用 `status` 这一位（'normal'→'closed'），语义同为"不删行，历史订单的归属不断"；`checkisopen` 的判据即 `status=='normal' && 未过期` | e2e「site 全链」——close 后 `checkisopen.is_open` 翻 false；数据仍在 |
+| C215 | **三家聚合支付共用一套签名约定的实现位**（"不逐家联调"的落点）：`sign = hex(HMAC-SHA256(api_key, canonical))`，`canonical` = 除 `sign` 外全部参数按 key 字节序排 `k=v&` 连拼（与 SystemLink 两支 assemble 同一"键字节序"的形状）。**换签名公式是逐家联调时的事，但"验签挡在动账之前"这个位次是三家共用的约定，换公式不许把这一位换掉**——和 M1-2 真渠道里"结清归 PayService、验签归渠道"的分工同一条纪律 | `ThirdPartyChannels.kt` 的 `ChannelSign`；订单 `notifyBody` 的手算 sign（e2e 门槛⑥） |
+| C216 | **三渠道回执报文形态与状态归一**：回调是 JSON `{"merchant_no","out_trade_no","amount","status","transaction_id",…,"sign"}`；三家原话各不相同（`success`/`paid`/`succeeded`），`parseNotification` 一次收口成 `SUCCESS`/`CLOSED`——渠道原话不进订单表。`out_refund_no` 出现即视为退款回执进行映射；查单只认配置 `extra` 里给了 `query_url` 的形态（e2e 假服务器/仿真网关用），没给就 `null` 退出补单轮询（真链 SDK 逐家联调是 M2-4 的事） | e2e「回调把支付单结清」「错签不动账」「refund() 回 pendingCallback」；`ThirdPartyChannels.kt` 注释 |
+| C217 | **`no_update` 语义与"整体不失败"的位次配平**：`store.items.quantity.list.update` 的 `total` 是行列数不是成功数、`updated` 是可识别行的绝对回写数（`setStore` 直接写值，不同比对现库存）、不认识的 bn 只进 `no_update`——一个错的 SKU 不能拖垮九百九十九个（§27.2 SL-M8 的原话），但其**前提**是签名与白名单都过了：这两道闸在留痕之前，挡住的是整单 | e2e「一件可识别的 bn 被绝对回写」「不认识的 bn 进 no_update」「绝对回写不是增量」 |
+| C218 | **后建运营 token 恒掩码、留痕在 OME 链独占**：SL-A1/A2 的两把 token 出参永远掩码（`gy_o****_1` 形态），传空=不改；留痕只挂 OME（`ecapi.site.*` 是平台侧对本站的操作，源系统也不记）——这是"哪条链需要排障证据"的分工，不是漏写留痕 | e2e「token 恒掩码」断言（SL-A1 出参形状）；`SystemLinkSettingService` maskToken |
+| C219 | **踩坑①（KDoc 内字面量 `/*` 触发嵌套块注释 → 整文件语法错）在本族第三次复现**：注释里的示例路径一律写 `{method}` 占位形态（`/api/systemlink/openapi/{method}`），不写通配串。`mvn -DskipTests` 只跳执行、`test-compile` 仍编译测试源——测试正文里同样不得出字面量通配（e2e 的注释也用 `{method}` 形态，C199 已钉） | `fix(m2-2)` commit d34174f（CI 编译失败现场：`Unclosed comment`）与 §26 踩坑①；本族注释全部改用 `{method}` 形态 |
