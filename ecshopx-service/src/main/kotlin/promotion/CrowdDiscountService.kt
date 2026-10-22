@@ -77,7 +77,7 @@ class CrowdDiscountService(
         val draft = toDo(companyId, form).apply {
             this.id = old.id
             created = old.created
-            disabled = form.disabled ?: old.disabled
+            disabled = form.disabled as? Boolean ?: old.disabled
         }
         validate(draft)
         rows.update(draft)
