@@ -1788,3 +1788,15 @@ CREATE TABLE IF NOT EXISTS user_rights_log (
   updated     BIGINT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_user_rights_log_right ON user_rights_log(company_id, right_id);
+
+-- ===== M2-3 批E：sys_jurisdiction 地区库（docs/04 §29.5 差异 C237）=====
+-- 体量差异见 C237：源系统是全量国内三级库（数千行），本项目 seed 只收演示租户的开业地域；
+-- 表形状不变，部署侧可以把真数据整表灌进来。
+CREATE TABLE IF NOT EXISTS sys_jurisdiction (
+  id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+  parent_id  BIGINT NOT NULL DEFAULT 0,               -- 0=省级行
+  name       VARCHAR(64) NOT NULL,
+  level      TINYINT NOT NULL DEFAULT 1,              -- 1省 2市 3区县
+  sort       INT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_jurisdiction_parent ON sys_jurisdiction(parent_id);

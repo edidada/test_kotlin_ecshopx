@@ -82,6 +82,30 @@ class UploadService(
     /** 绝对路径解析（静态资源映射与测试断言共用，避免两处拼法漂移） */
     fun absolutePath(relative: String): Path = Paths.get(root).toAbsolutePath().normalize().resolve(relative)
 
+    /**
+     * 图片库翻页（M2-3 批E：`ecx.image.list` 的委托体，与后台 SUP-2 台账同一张脸）。
+     * `url` 由本类的 prefix 拼装（与 [store] 同一拼法，换 OSS 时两处一起变）。
+     */
+    fun page(companyId: Long, pq: com.ecshopx.kotlin.common.api.PageQuery): com.ecshopx.kotlin.common.api.PageResult<Map<String, Any?>> =
+        com.ecshopx.kotlin.dao.paging.PageHelper.paginate(
+            pq,
+            count = { files.countByCompany(companyId) },
+            query = { offset, limit -> files.pageByCompany(companyId, offset, limit) },
+            map = { rows ->
+                rows.map { r ->
+                    linkedMapOf<String, Any?>(
+                        "id" to r.id,
+                        "file_name" to (r.fileName ?: ""),
+                        "url" to "$prefix/${r.filePath}",
+                        "path" to r.filePath,
+                        "file_type" to (r.fileType ?: ""),
+                        "file_size" to r.fileSize,
+                        "created" to r.created,
+                    )
+                }
+            },
+        )
+
     /** 原始名只留可打印字符并截断，防脏名把 XSS 带进后台列表 */
     private fun sanitize(name: String?): String =
         (name ?: "image").map { if (it.isLetterOrDigit() || it in ".-_ ") it else '_' }.joinToString("").take(100)

@@ -65,7 +65,9 @@ class BootSmokeTest {
                     //      `crowd_discount_log`（下单事务里写的优惠日志）。
                     // 90 = 再加 M2-3 批D 次卡 2 张：`user_rights`（次卡账头，used_count CAS 配额）、
                     //      `user_rights_log`（grant/consume/transfer/delay 动账流水）。
-                    assertTrue(rs.getInt(1) == 90, "expect 90 base tables, got ${rs.getInt(1)}")
+                    // 91 = 再加 M2-3 批E 地区库 1 张：`sys_jurisdiction`（ecx.jurisdiction.get 的数据源，
+                    //      精简 seed，C237）。
+                    assertTrue(rs.getInt(1) == 91, "expect 91 base tables, got ${rs.getInt(1)}")
                 }
             }
         }

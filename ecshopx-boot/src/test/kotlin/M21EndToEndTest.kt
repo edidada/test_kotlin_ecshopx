@@ -647,7 +647,7 @@ class M21EndToEndTest {
         val catalog = okAdmin("GET", "/api/setting/openapi/methods")
         assertContract(catalog, OpenapiContract.METHODS, "OP-A5 信封")
         assertEquals(listOf("1.0", "2.0"), catalog.path("versions").map { it.asText() })
-        assertEquals(21, catalog.path("list").size(), "19 条 method，其中两条在两版各注册一次")
+        assertEquals(29, catalog.path("list").size(), "24 条 method，M2-1 首批 19 条 + 批E 五族，多版本条目各注册一次")
         catalog.path("list").forEach { assertContract(it, OpenapiContract.METHOD_ROW, "OP-A5 行") }
         assertEquals(
             19, catalog.path("list").map { it.path("method").asText() }.toSet().size,
@@ -939,6 +939,55 @@ class M21EndToEndTest {
         assertTrue(del.path("deleted").asBoolean())
         assertEquals(kept, jdbc.queryForObject("SELECT COUNT(*) FROM webhook_delivery_log WHERE subscription_id = ?", Int::class.java, subCreated), "删订阅不删证据")
         expect("DELETE", "/api/webhook/subscription/$subCreated", null, 404)
+    }
+
+    @Test @Order(21) fun `批E 遗留五族方法 会员券 小程序码 地区 图片库 口令重置`() {
+        // M20 会员维度券列表（与 CP-F3 同一装配；本库没有券域铺数，只证形状与总账为 0）
+        val mine = gw("ecx.userdiscount.list", params = mapOf("user_id" to 1))
+        assertEquals("E0000", code(mine))
+        assertEquals(0L, mine.path("data").path("total_count").asLong(), "没发过券就是 0")
+
+        // M21 小程序码：scene 形态，出参 base64 载体（差异 C236），解码必须还原 PNG 签名
+        val q = gw("ecx.wxapp.qrcode", verb = "POST", version = "1.0", params = mapOf("scene" to "a=1", "type" to "unlimit"))
+        assertEquals("E0000", code(q))
+        assertEquals("image/png", q.path("data").path("content_type").asText())
+        val bytes = java.util.Base64.getDecoder().decode(q.path("data").path("image").asText())
+        assertTrue(bytes.size > 4 && bytes[0] == 0x89.toByte() && bytes[1] == 0x50.toByte(), "解码即 PNG 字节头：${bytes.take(4)}")
+
+        // M22 地区树（精简 seed，C237）：浙江省 → 下挂城市 → 城市再挂区县
+        val tree = gw("ecx.jurisdiction.get")
+        assertEquals("E0000", code(tree))
+        assertTrue(tree.path("data").size() > 0, "seed 至少有省级行")
+        assertEquals("浙江省", tree.path("data").get(0).path("name").asText())
+        assertEquals(2, tree.path("data").get(0).path("children").get(0).path("level").asInt(), "第二级是市")
+
+        // M23 图片上传（base64 载体，C238）→ 静态面可访问 → M24 图片库翻页含该行
+        val png = java.util.Base64.getDecoder().decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        )
+        val up = gw("ecx.image.upload", verb = "POST", version = "2.0", params = mapOf(
+            "file_base64" to java.util.Base64.getEncoder().encodeToString(png), "file_name" to "e2e.png", "content_type" to "image/png",
+        ))
+        assertEquals("E0000", code(up))
+        val url = up.path("data").path("url").asText()
+        assertTrue(url.startsWith("/storage/"), "本地上传的 url 形状：$url")
+        val static = mvc.perform(get(url)).andReturn()
+        assertEquals(200, static.response.status, "上传后立即可访问：$url")
+        val list = gw("ecx.image.list", version = "2.0")
+        assertEquals("E0000", code(list))
+        assertTrue(list.path("data").path("list").any { it.path("url").asText() == url }, "图片库台账含刚传的行")
+
+        // M25 口令重置（源内部面）：临时口令当场出一次，用它重新登录即成功（真写库，不是摆设）
+        val rp = gw("exc.operator.resetpwd", verb = "POST", version = "1.0", params = mapOf("username" to "admin"))
+        assertEquals("E0000", code(rp))
+        val temp = rp.path("data").path("temp_password").asText()
+        assertTrue(temp.isNotBlank(), "临时口令当场出一次")
+        assertEquals("admin", rp.path("data").path("username").asText())
+        assertEquals(200, call("POST", "/api/operator/login", null, mapOf(
+            "username" to "admin", "password" to temp,
+        )).response.status, "拿到临时口令即刻可登录（本轮说明的是真改密而非摆设）")
+        // 越租户/停用账号同回"账号不存在"（E5000 统一形状）——不存在也同码，不当探测面
+        assertEquals("E5000", code(gw("exc.operator.resetpwd", verb = "POST", version = "1.0", params = mapOf("username" to "no-such-user"))))
     }
 
     @AfterAll fun shutdown() {

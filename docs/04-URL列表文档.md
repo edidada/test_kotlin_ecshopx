@@ -1650,5 +1650,35 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 2. **结清发卡与重复回调**：mock wxpay 回调链（PAY-2 → `/api/notify/wxpay`）→ `user_rights` 一行（total=5、used=0、end=now+30d、订单号溯源）+ grant 日志恰一行；同一 trade 第二次回调：卡数不变、used=0（CAS 命中支的判据在位置上）。
 3. **会员三件与员工核销五次**：`getdata {cards=1,times=5}` → 列表/详情 → 现建店员（`POST /api/salesman`）+ `x-wxapp-session` 登录 → 连核 5 次（used_count 逐次 +1、`operator_id` 落人）→ 第 6 次 422「次数已用完」；`used_count == consume 日志行数 == 5`。
 4. **转赠/延期/过期/台账**：user1→user2 转赠（`user_id` 换人、transfers 流水 behavior=transfer）→ 自转赠 422 → 延期 7 天（`end_time += 7d`）、`days=0` 422 → 后台手工发放不限次卡（`remain=null`）→ `viewer` 写 403 → 把补录卡 `end_time` 拨到过去（真实 UPDATE）→ 核销 422「已过期」→ 不存在卡 404。
-### 29.5 浏览 / 搜索增强与遗留 method（本批后补）
+### 29.5 浏览 / 搜索增强与遗留 method（M2-3 批E 已交付）
+
+**浏览足迹/搜索的裁定**：浏览足迹的读/删/清在三件（M1 已交付 `member/browse/items` 族）+ 写入腿在 GOODS-8 详情带令牌时挂 `CollectService.recordBrowse`；搜索面 `keywords` 模糊筛选在 ITEMS/GOODS 两族早已接线（`ItemsMapper` f.keywords）。本批不重复开路由，增强落在**开放面遗留 method 的补齐**——上面两族已经有"站内的那半张脸"，批E 把它们的外侧（openapi）接齐。
+
+**网关 method 续注册（§25.2 遗留五族，`OpenapiMethodRegistry` 末尾追加）**：
+
+| ID | method | 版本 | verb | 委托实现 | 口径 |
+|---|---|---|---|---|---|
+| OA-M20 | `ecx.userdiscount.list` | 1.0/2.0 | GET | `CouponService.myList(userId, companyId, raw)` | 与 CP-F3 同装配（会员维度券，与 OA-M16 模板列表分开——同一域的两把刀不再留 M2-3） |
+| OA-M21 | `ecx.wxapp.qrcode` | 1.0 | POST | `WxAcodeService.generate`（WX-A9 同一委托） | `path/scene/type/width` 透传；出参差异 C236 |
+| OA-M22 | `ecx.jurisdiction.get` | 1.0/2.0 | GET | `JurisdictionService.tree()`（§29.5 新表 `sys_jurisdiction` + 精简 seed） | 差异 C237 |
+| OA-M23 | `ecx.image.upload` | 2.0 | POST | `UploadService.store`（SUP-2 同一条落盘口） | 载体 base64，差异 C238 |
+| OA-M24 | `ecx.image.list` | 2.0 | GET | `UploadService.page`（SUP-2 台账同一张脸） | url 与上传同一拼法（换 OSS 两处一起变） |
+| OA-M25 | `exc.operator.resetpwd` | 1.0 | POST | `OperatorsMapper.updatePassword`（BCrypt，同登录同员） | `username` 必填；临时口令**当场出一次**；越租户/停用/不存在同回 E5000「账号不存在」 |
+
+差异表（§29.5）：
+
+| ID | 差异 | 理由 |
+|---|---|---|
+| C236 | **小程序码走 base64 载体**：源系统豁免表对 v1.0 `ecx.wxapp.qrcode` 回"原图字节不包信封"；本项目网关**统一信封**（单一成功形状是十一条闸门的立足点，为一个 method 开字节流旁路就把 25.1 的形状承诺打散），二进制 `data{content_type, encode=base64, image}`，对端 `base64_decode` 即得字节 | 形状一致性 |
+| C237 | **地区库精简 seed**：源库是全量国内三级（数千行）；本项目 seed 只收演示租户开业地域（浙江/江苏/上海 + 市县若干行），表形状不变，真数据随部署灌入 | 演示范围 |
+| C238 | **图片上传 base64 载体**：开放面单一入口收表单/JSON，不单开 multipart 通道；`file_base64` 必填参与签名（正文即凭证，篡改位也无处可躲） | 验签覆盖完整 |
+| C239 | **`exc.operator.resetpwd` 真改密**：源系统当内部面（SaaS 侧救援口）；本项目保留同一语义——随机临时口令**只在当次响应出现一次**（与 OP-A2 app_secret 同一条"只出一次"纪律），落库哈希与登录同一套 BCrypt | 可验证 |
+
+门槛用例（并入 `M21EndToEndTest` @Order(21)，复用网关签名基建）：
+
+1. **M20**：`ecx.userdiscount.list`（无券铺数）→ `total_count=0` 形状成立。
+2. **M21**：`unlimit` 形态 POST → `data.image` base64 解码即 PNG 字节头（89 50 4E 47）。
+3. **M22**：地区树首省=浙江省、第二级 level=2（seed 结构性断言，不数体量）。
+4. **M23/M24**：上传 1×1 PNG → url `/storage/**` → 静态面 GET 200；图片库翻页含该行。
+5. **M25**：`admin` 重置 → 临时口令出场即可登录成功（真改密的读证）；不存在的 username 同回 E5000。
 ### 29.6 M2-4 生产化（本批后补）

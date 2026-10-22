@@ -40,6 +40,32 @@ interface UploadFilesMapper {
         "FROM upload_files WHERE id = #{id}")
     fun findById(@Param("id") id: Long): UploadFileDO?
 
+    @Select("SELECT id, company_id, user_id, file_name, file_path, file_type, file_size, created " +
+        "FROM upload_files WHERE company_id = #{companyId} ORDER BY id DESC LIMIT #{offset}, #{limit}")
+    fun pageByCompany(@Param("companyId") companyId: Long, @Param("offset") offset: Long, @Param("limit") limit: Int): List<UploadFileDO>
+
     @Select("SELECT COUNT(*) FROM upload_files WHERE company_id = #{companyId}")
     fun countByCompany(@Param("companyId") companyId: Long): Long
+}
+
+/**
+ * `sys_jurisdiction` 地区库（M2-3 批E，`ecx.jurisdiction.get` 的数据源）。
+ *
+ * 差异 C237：源系统这张库是全量国内省/市/区县三级行政区（数千行，来自腾讯地区服务快照）；
+ * 本项目只收**演示租户的开业地域**（浙江/江苏/上海三省级 + 各自的市县若干行）——
+ * 对接方拿它当"返回什么省哪市"的样例足够，真上线运营地区随部署侧数据灌入，代码形状不变。
+ */
+class JurisdictionDO {
+    var id: Long = 0
+    var parentId: Long = 0
+    var name: String = ""
+    var level: Int = 1
+    var sort: Int = 0
+}
+
+@Mapper
+interface JurisdictionMapper {
+
+    @Select("SELECT id, parent_id, name, level, sort FROM sys_jurisdiction ORDER BY level, sort, id")
+    fun listAll(): List<JurisdictionDO>
 }

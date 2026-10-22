@@ -21,6 +21,9 @@ import com.ecshopx.kotlin.service.order.OrderQueryService
 import com.ecshopx.kotlin.service.order.WriteOffService
 import com.ecshopx.kotlin.service.promotion.CouponService
 import com.ecshopx.kotlin.service.promotion.CouponSendForm
+import com.ecshopx.kotlin.common.domain.TimeSec
+import com.ecshopx.kotlin.service.wx.WxAcodeForm
+import org.springframework.security.crypto.bcrypt.BCrypt
 import org.springframework.stereotype.Component
 
 /**
@@ -63,6 +66,10 @@ class OpenapiMethodRegistry(
     deposits: DepositService,
     coupons: CouponService,
     distributors: DistributorService,
+    private val wxCode: com.ecshopx.kotlin.service.wx.WxAcodeService,
+    private val uploads: com.ecshopx.kotlin.service.support.UploadService,
+    private val jurisdictions: com.ecshopx.kotlin.service.support.JurisdictionService,
+    private val operators: com.ecshopx.kotlin.dao.auth.OperatorsMapper,
 ) {
 
     /** 一条 method 的注册项 */
@@ -278,6 +285,66 @@ class OpenapiMethodRegistry(
             summary = "店铺详情", required = listOf("distributor_id"),
             notFound = OpenapiError(OpenapiCode.SHOP_NOT_FOUND, "店铺不存在"),
         ) { req, caller -> distributors.detail(caller.companyId, req.requireLong("distributor_id"), DistributorScope.ALL) },
+
+        // ===== M2-3 批E 续注册（§25.2 遗留五族，OA-M20..M25）=====
+        Entry(
+            id = "OA-M20", method = "ecx.userdiscount.list", verb = GET, versions = setOf(V1, V2),
+            summary = "会员已领券列表（与 CP-F3 同装配）", required = listOf("user_id"),
+        ) { req, caller -> coupons.myList(req.requireLong("user_id"), caller.companyId, req.raw()) },
+
+        Entry(
+            id = "OA-M21", method = "ecx.wxapp.qrcode", verb = POST, versions = setOf(V1),
+            summary = "小程序码（WX-A9 同一委托；出参走 base64 载体，差异 C236）",
+            requiredAny = listOf("path", "scene"),
+            notFound = OpenapiError(OpenapiCode.INTERNAL, "当前租户未绑定应用"),
+        ) { req, caller ->
+            val r = wxCode.generate(
+                caller.companyId,
+                WxAcodeForm(path = req.str("path"), width = req.int("width"), scene = req.str("scene"), type = req.str("type")),
+            )
+            // 源系统对这条方法的豁免表是"v1.0 不包信封、回原图字节"；本项目网关统一信封
+            // （差异 C236），二进制落 base64，`link`/`schema` 形态本来就是 JSON 照原样出
+            r.json ?: linkedMapOf<String, Any?>(
+                "content_type" to r.contentType,
+                "encode" to "base64",
+                "image" to r.binary?.let { java.util.Base64.getEncoder().encodeToString(it) },
+            )
+        },
+
+        Entry(
+            id = "OA-M22", method = "ecx.jurisdiction.get", verb = GET, versions = setOf(V1, V2),
+            summary = "地区库树（省/市/区县三级；精简 seed，差异 C237）",
+        ) { _ -> jurisdictions.tree() },
+
+        Entry(
+            id = "OA-M23", method = "ecx.image.upload", verb = POST, versions = setOf(V2),
+            summary = "图片上传（SUP-2 同一条落盘口；载体 base64，差异 C238）", required = listOf("file_base64"),
+        ) { req, caller ->
+            val bytes = runCatching { java.util.Base64.getDecoder().decode(req.requireText("file_base64")) }
+                .getOrElse { throw OpenapiException(OpenapiCode.PARAM, "file_base64 不合法") }
+            uploads.store(caller.companyId, null, req.str("file_name"), req.str("content_type"), bytes)
+        },
+
+        Entry(
+            id = "OA-M24", method = "ecx.image.list", verb = GET, versions = setOf(V2),
+            summary = "图片库翻页（SUP-2 台账同一张脸）",
+        ) { req, caller ->
+            uploads.page(caller.companyId, pageQuery(req))
+        },
+
+        Entry(
+            id = "OA-M25", method = "exc.operator.resetpwd", verb = POST, versions = setOf(V1),
+            summary = "运营账号重置口令（源内部面；一条随机临时口令直接出响应，差异 C239）",
+            required = listOf("username"),
+            notFound = OpenapiError(OpenapiCode.INTERNAL, "账号不存在"),
+        ) { req, caller ->
+            val op = operators.findByUsername(req.requireText("username").trim())
+                ?.takeIf { it.companyId == caller.companyId && !it.disabled }
+                ?: throw OpenapiException(OpenapiCode.INTERNAL, "账号不存在")
+            val temp = "reset-" + java.util.UUID.randomUUID().toString().take(8)
+            check(operators.updatePassword(op.operatorId, BCrypt.hashpw(temp, BCrypt.gensalt()), TimeSec.now()) == 1)
+            linkedMapOf("user_id" to op.operatorId, "username" to op.username, "temp_password" to temp)
+        },
     )
 
     /** 注册表就是这条链的全部对外面：`method` 解析不出来的错，都从这张表的形状来 */

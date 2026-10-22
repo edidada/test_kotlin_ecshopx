@@ -615,3 +615,18 @@ INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_co
 
 INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
   (1, 85), (1, 86);
+
+-- ===== M2-3 批E 追加：地区库精简 seed（ecx.jurisdiction.get，C237）=====
+-- 直辖市的孩子直接是区（level 2），与省两级结构同树
+INSERT IGNORE INTO sys_jurisdiction (id, parent_id, name, level, sort) VALUES
+  (1, 0, '浙江省', 1, 1),
+  (2, 0, '江苏省', 1, 2),
+  (3, 0, '上海市', 1, 3),
+  (4, 1, '杭州市', 2, 1), (5, 1, '宁波市', 2, 2), (6, 1, '温州市', 2, 3),
+  (7, 2, '南京市', 2, 1), (8, 2, '苏州市', 2, 2),
+  (19, 3, '黄浦区', 2, 1), (20, 3, '浦东新区', 2, 2),
+  (10, 4, '西湖区', 3, 1), (11, 4, '滨江区', 3, 2), (12, 4, '余杭区', 3, 3),
+  (13, 5, '海曙区', 3, 1), (14, 5, '鄞州区', 3, 2),
+  (15, 6, '鹿城区', 3, 1),
+  (16, 7, '玄武区', 3, 1), (17, 7, '鼓楼区', 3, 2),
+  (18, 8, '姑苏区', 3, 1);

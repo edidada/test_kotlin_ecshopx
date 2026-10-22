@@ -20,4 +20,8 @@ interface OperatorsMapper {
 
     @Update("UPDATE operators SET last_login_time = #{now}, updated = #{now} WHERE operator_id = #{id}")
     fun touchLastLogin(@Param("id") id: Long, @Param("now") now: Long): Int
+
+    /** 口令重置（M2-3 批E：`exc.operator.resetpwd` 的写位；调用方负责生成哈希与留痕的"重置"语义） */
+    @Update("UPDATE operators SET password = #{password}, updated = #{now} WHERE operator_id = #{id}")
+    fun updatePassword(@Param("id") id: Long, @Param("password") password: String, @Param("now") now: Long): Int
 }
