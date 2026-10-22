@@ -358,9 +358,159 @@ class M23EndToEndTest {
         assertTrue(del.path("deleted").asBoolean())
     }
 
+    // ================= 批C 加价购 + 人群折扣门槛①..④ =================
+
+    private var plusMkId = 0L
+    private var crowdId = 0L
+
+    /** plus_price_buy 配置：满 50 元可 9.90 换购（圈品 item 3，换购价 990 分） */
+    private fun plusMkBody(ts: Long) = linkedMapOf<String, Any?>(
+        "marketing_type" to "plus_price_buy", "marketing_name" to "满50元换购坚果", "ad_pic" to "/img/plus.jpg",
+        "start_time" to ts - 3600, "end_time" to ts + 86400,
+        "use_bound" to 1, "condition_type" to "totalfee",
+        "condition_value" to listOf(linkedMapOf("full" to "50.00", "price" to "9.90")),
+        "canjoin_repeat" to false, "join_limit" to 0, "free_postage" to false,
+        "promotion_tag" to "加价购", "status" to true,
+    )
+
+    @Test @Order(13) fun `加价购门槛一 配置审核闸与前台换购列表`() {
+        val now = com.ecshopx.kotlin.common.domain.TimeSec.now()
+        // 未知类型 → 422（KNOWN_TYPES 白名单）
+        expect("POST", "/api/marketing/activities", plusMkBody(now)
+            .plus("marketing_type" to "unknown_type"), 422, admin)
+        // 未审核 → 前台 J404：审核闸同促销其它位（T-A5/Z-A2）
+        val id = expect("POST", "/api/marketing/activities", plusMkBody(now), 200, admin)
+            .path("data").path("marketing_id").asLong()
+        plusMkId = id
+        // 圈品 + 每件换购价（price 列挂在圈品行上，与算价链 order 16 同源）
+        ok("PUT", "/api/marketing/activities/$id/items",
+            mapOf("items" to listOf(mapOf("item_id" to 3, "price" to 990, "is_show" to true))), admin)
+        expect("GET", "/api/h5app/wxapp/promotion/pluspricebuy/getItemList", null, 404, tok,
+            mapOf("marketing_id" to id))
+        // 审核通过 → 前台列表可用：换购价 990 / 原价 8900
+        ok("PUT", "/api/marketing/activities/$id/check", mapOf("check_status" to "reviewed"), admin)
+        val list = okGet("/api/h5app/wxapp/promotion/pluspricebuy/getItemList", mapOf("marketing_id" to id))
+        val row = list.path("items").get(0)
+        assertEquals(3L, row.path("item_id").asLong())
+        assertEquals(990L, row.path("price").asLong(), "前台换购价=圈品行 price")
+        assertEquals(8900L, row.path("origin_price").asLong())
+        // jwt 闸：无令牌 401
+        val no = callGet("/api/h5app/wxapp/promotion/pluspricebuy/getItemList", mapOf("marketing_id" to id), null)
+        assertEquals(401, no.response.status)
+    }
+
+    @Test @Order(14) fun `加价购门槛二 换购价进入购物车与下单链`() {
+        // 门槛基数行（手机 199900 ≥ 50 元）+ 换购行（坚果加 is_plus_buy）
+        ok("POST", "/api/h5app/wxapp/cart", mapOf("item_id" to 1, "num" to 1))
+        val plus = ok("POST", "/api/h5app/wxapp/cart",
+            mapOf("item_id" to 3, "num" to 1, "is_plus_buy" to true))
+        val plusRow = plus.path("valid_cart").get(0).path("list")
+            .first { it.path("is_plus_buy").asBoolean() }
+        assertEquals(990L, plusRow.path("price").asLong(), "换购价改了行单价基准")
+        assertEquals(7910L, plusRow.path("activity_price_fee").asLong(), "(8900-990)×1")
+        val info = plusRow.path("activity_info").first { it.path("type").asText() == "plus_price_buy" }
+        assertEquals(990L, info.path("activity_price").asLong())
+        // phone 行是普通行：换购规则不动它（门槛基数由它贡献）
+        val normalRow = plus.path("valid_cart").get(0).path("list").first { !it.path("is_plus_buy").asBoolean() }
+        assertEquals(199900L, normalRow.path("price").asLong())
+        assertTrue(normalRow.path("activity_info").none { it.path("type").asText() == "plus_price_buy" })
+        // 下单（车路径）：行快照落 plus_buy 行、换购价与活动痕迹
+        val oid = ok("POST", "/api/h5app/wxapp/order_new", mapOf(
+            "receiver_name" to "张三", "receiver_mobile" to "13800000001", "receiver_state" to "浙江省",
+            "receiver_city" to "杭州市", "receiver_district" to "西湖区", "receiver_address" to "文三路 1 号",
+            "order_from" to "h5",
+        ), tok).path("order_id").asText().toLong()
+        val row = jdbc.queryForMap(
+            "SELECT order_item_type, price, item_fee, discount_info FROM orders_normal_orders_items " +
+                "WHERE order_id = ? AND item_id = 3", oid,
+        )
+        assertEquals("plus_buy", row["order_item_type"])
+        assertEquals(990L, row["price"])
+        assertEquals(990L, row["item_fee"])
+        val di = mapper.readTree(row["discount_info"] as String)
+        assertTrue(di.any { it.path("type").asText() == "plus_price_buy" }, "优惠快照留 plus 价位")
+    }
+
+    @Test @Order(15) fun `人群折扣门槛一 配置校验闸与全人群8折实跑`() {
+        val now = com.ecshopx.kotlin.common.domain.TimeSec.now()
+        // 校验闸：名字空 / discount 越界 / grade 没给 grade_ids / 圈品空 / 时间窗倒挂
+        expect("POST", "/api/specific/crowd/discount",
+            mapOf("name" to "", "discount" to 80, "start_time" to now), 422, admin)
+        expect("POST", "/api/specific/crowd/discount",
+            mapOf("name" to "人群", "discount" to 0, "start_time" to now), 422, admin)
+        expect("POST", "/api/specific/crowd/discount",
+            mapOf("name" to "等级", "discount" to 90, "crowd_type" to "grade",
+                "crowd_value" to mapOf("grade_ids" to emptyList<Any?>()), "start_time" to now), 422, admin)
+        expect("POST", "/api/specific/crowd/discount",
+            mapOf("name" to "圈品", "discount" to 90, "use_bound" to 1,
+                "item_ids" to emptyList<Any?>(), "start_time" to now), 422, admin)
+        expect("POST", "/api/specific/crowd/discount",
+            mapOf("name" to "时间", "discount" to 90, "start_time" to now, "end_time" to now - 10), 422, admin)
+        // 建：全人群 8 折
+        val d = expect("POST", "/api/specific/crowd/discount",
+            mapOf("name" to "全人群8折", "discount" to 80, "crowd_type" to "all",
+                "use_bound" to 0, "start_time" to now - 3600, "end_time" to 0), 200, admin).path("data")
+        crowdId = d.path("id").asLong()
+        assertEquals("8折", d.path("discount_text").asText())
+        assertTrue(d.path("crowd_value").isObject, "空的 crowd_value 回空对象而不是 null")
+        // 结算实跑：fastbuy 坚果 1 件（8900），折让 = 1780，落在 discount_fee（member 1 无等级折干扰）
+        val oid = fastBuy(3)
+        assertEquals(1780L, jdbc.queryForObject(
+            "SELECT discount_fee FROM orders_normal_orders_items WHERE order_id = ? AND item_id = 3",
+            Long::class.java, oid,
+        ), "人群折让逐行进 discount_fee")
+        // 日志：下单事务里一行（谁、哪单、让多少），与折扣同生死
+        val log = jdbc.queryForMap(
+            "SELECT discount_id, user_id, fee FROM crowd_discount_log WHERE order_id = ?", oid,
+        )
+        assertEquals(crowdId, log["discount_id"])
+        assertEquals(1L, log["user_id"])
+        assertEquals(1780L, log["fee"])
+    }
+
+    @Test @Order(16) fun `人群折扣门槛二 改配置不命中即不折与后台翻页`() {
+        // 改成"金卡（grade 3）8.5 折、圈 item 3"，user 1（grade 1）不再命中
+        val now = com.ecshopx.kotlin.common.domain.TimeSec.now()
+        expect("PUT", "/api/specific/crowd/discount",
+            mapOf("discount_id" to crowdId, "name" to "金卡8.5折", "discount" to 85,
+                "crowd_type" to "grade", "crowd_value" to mapOf("grade_ids" to listOf<Long>(3)),
+                "use_bound" to 1, "item_ids" to listOf<Long>(3),
+                "start_time" to now - 3600, "end_time" to 0), 200, admin)
+        assertEquals(85, okGet("/api/specific/crowd/discountInfo", mapOf("id" to crowdId))
+            .path("discount").asInt())
+        val before = jdbc.queryForObject("SELECT COUNT(*) FROM crowd_discount_log", Long::class.java) ?: -1L
+        // user 1 再下一单：两处判据都脱靶 → 无折、无新日志
+        val oid = fastBuy(3)
+        assertEquals(0L, jdbc.queryForObject(
+            "SELECT discount_fee FROM orders_normal_orders_items WHERE order_id = ? AND item_id = 3",
+            Long::class.java, oid,
+        ))
+        assertEquals(before, jdbc.queryForObject("SELECT COUNT(*) FROM crowd_discount_log", Long::class.java) ?: -2L)
+        // 后台翻页 + 日志页（Order(15) 的那一行）
+        val page = okGet("/api/specific/crowd/discountList", mapOf("page" to 1, "page_size" to 10))
+        assertEquals(crowdId, page.path("list").get(0).path("id").asLong())
+        assertEquals("金卡8.5折", page.path("list").get(0).path("name").asText())
+        val logs = okGet("/api/specific/crowd/discountLogList", mapOf("page" to 1, "page_size" to 10))
+        assertEquals(crowdId, logs.path("list").get(0).path("discount_id").asLong())
+        assertEquals(1780, logs.path("list").get(0).path("fee").asLong())
+        // 写权限闸：viewer 无 84 → 403
+        expect("POST", "/api/specific/crowd/discount",
+            mapOf("name" to "x", "discount" to 90, "start_time" to now), 403, viewer)
+    }
+
     // ================= 调用件 =================
 
     private fun utf8(b: ByteArray) = String(b, Charsets.UTF_8)
+
+    /** fastbuy 快捷下单（批C 人群折扣用）：item 3 坚果，收货人照 M1 矩阵那份六件套 */
+    private fun fastBuy(itemId: Long, num: Long = 1): Long =
+        ok("POST", "/api/h5app/wxapp/order_new", mapOf(
+            "cart_type" to "fastbuy", "order_type" to "normal",
+            "items" to listOf(mapOf("item_id" to itemId, "num" to num)),
+            "receiver_name" to "张三", "receiver_mobile" to "13800000001", "receiver_state" to "浙江省",
+            "receiver_city" to "杭州市", "receiver_district" to "西湖区", "receiver_address" to "文三路 1 号",
+            "order_from" to "h5",
+        )).path("order_id").asText().toLong()
 
     private fun call(method: String, url: String, token: String?, body: Map<String, Any?>? = null): MvcResult {
         val req = when (method) {

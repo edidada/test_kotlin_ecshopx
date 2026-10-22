@@ -33,6 +33,7 @@ import com.ecshopx.kotlin.service.distribution.StockPool
 import com.ecshopx.kotlin.service.openapi.EventPublisher
 import com.ecshopx.kotlin.service.promotion.ActivityOffer
 import com.ecshopx.kotlin.service.promotion.CouponService
+import com.ecshopx.kotlin.service.promotion.CrowdDiscountService
 import com.ecshopx.kotlin.service.promotion.GroupsService
 import com.ecshopx.kotlin.service.webhook.WebhookTopics
 import com.ecshopx.kotlin.service.promotion.yuan
@@ -78,6 +79,7 @@ class OrderCreateService(
     private val configs: SysConfigMapper,
     private val points: PointMapper,
     private val coupons: CouponService,
+    private val crowd: CrowdDiscountService,
     private val rels: RelPromotionMapper,
     private val seckillGoods: SeckillGoodsMapper,
     private val groupsService: GroupsService,
@@ -176,6 +178,11 @@ class OrderCreateService(
             check(orders.insert(order) == 1) { "订单主行插入失败" }
             lines.forEach { l -> orderItems.insert(itemRow(id, userId, companyId, shopId, l, q, snapshot[l.itemId])) }
             snapshotPromotions(id, userId, q, lines, now)
+            // §29.3：人群折扣日志**与订单同事务** —— 它记的是"这笔折让进了哪一单"，
+            // 事后补写对不上账；ctx.crowdApplied 是算价链实算出来的命中与让利（不是配置回放）
+            q.ctx.crowdApplied.forEach { m ->
+                crowd.logDiscount(companyId, m.id, id, userId, m.fee, now)
+            }
             assoc.insert(assocRow(order))
             logs.insert(
                 OrderOperateLogDO().apply {

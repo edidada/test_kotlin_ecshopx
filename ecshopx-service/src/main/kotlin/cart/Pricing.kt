@@ -2,6 +2,8 @@ package com.ecshopx.kotlin.service.cart
 
 import com.ecshopx.kotlin.dao.promotion.CouponUserDO
 import com.ecshopx.kotlin.service.promotion.ActivityOffer
+import com.ecshopx.kotlin.service.promotion.CrowdMatch
+import com.ecshopx.kotlin.service.promotion.CrowdOffer
 import com.ecshopx.kotlin.service.promotion.MarketingOffer
 
 /**
@@ -40,6 +42,14 @@ class PriceLine(
     var plusBuy: Boolean,
     /** 会员折扣分摊到行 */
     var memberDiscount: Long = 0,
+    /**
+     * 人群折扣分摊到行（§29.3 order 25）。
+     *
+     * 它与 [memberDiscount] 一样**进 [discountFee]**（折让是抵扣、不是改价基准），
+     * 单独记一份是为了 `discount_info[]` 能说清"这份折让是人群策略给的"，
+     * 也让 `OrderCreateService` 能照它写 `crowd_discount_log`。
+     */
+    var crowdDiscount: Long = 0,
     /** 活动/满减在行上的优惠（M1-3 起是真金额，进 [feeDeducted]） */
     var discountFee: Long = 0,
     /** 券抵扣分摊到行（D28：逐行分摊，Σ行=组=单） */
@@ -121,6 +131,10 @@ class PriceGroup(
     var activityPriceFee: Long = 0
     var activityPriceRows: List<Map<String, Any?>> = emptyList()
 
+    /** 人群折扣在本组的让利合计与出参行（§29.3 order 25；进 [discountFee] 的口径） */
+    var crowdFee: Long = 0
+    var crowdRows: List<Map<String, Any?>> = emptyList()
+
     /** 满减命中「包邮」档：由 FullReductionRule 写、FreightRule 读（§14.5 的 30→60 依赖） */
     var freePostage: Boolean = false
 
@@ -181,6 +195,21 @@ class PriceContext(
     val pointRatio: Int = 0,
     /** 秒杀/拼团活动价（§14.5 order 15）：由 buildContext 预取，规则链按 (类型, 活动, 商品) 命中 */
     val activityOffers: List<ActivityOffer> = emptyList(),
+    /** 会员 grade_id（0=普通会员），人群折扣"grade 型"；buildContext 预取 */
+    val gradeId: Long = 0,
+    /** 会员注册时间（秒，0=未知），人群折扣 "new_user" 型的判据腿 */
+    val memberCreated: Long = 0,
+    /** 人群折扣（§29.3 order 25）：**命中当前用户**的启用中配置，规则链不再判人 */
+    val crowdOffers: List<CrowdOffer> = emptyList(),
+    /**
+     * **is_plus_buy 行的换购价**（item_id → 分；批C order 16 的取数腿）。
+     *
+     * 行单价基准被它替换，卡口有二：表里**必须有这一行**（加价购活动圈品即行资格）
+     * 且价 > 0。不出现在表里的行就是"没资格换购的那一行"，照常按商品现价算。
+     */
+    val plusItemPrices: Map<Long, Long> = emptyMap(),
+    /** 人群折扣的实际命中（CrowdDiscountRule 写），下单事务里写日志的依据 */
+    var crowdApplied: List<CrowdMatch> = emptyList(),
 ) {
     val checkedLines: List<PriceLine> get() = lines.filter { it.checked }
     val totalFreight: Long get() = groups.sumOf { it.freight }
@@ -190,6 +219,9 @@ class PriceContext(
 
     /** 秒杀/拼团让利合计（展示口径，不参与 [PriceLine.feeDeducted]） */
     val totalActivityPriceFee: Long get() = checkedLines.sumOf { it.activityPriceFee }
+
+    /** 人群折扣让利合计（§29.3 order 25，进 discountFee 的展示口径） */
+    val totalCrowdFee: Long get() = groups.sumOf { it.crowdFee }
 
     /** 结算页与订单详情都要的三张抵扣账 */
     val couponDiscount: Long get() = groups.sumOf { it.couponDiscount }

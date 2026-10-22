@@ -601,7 +601,9 @@ M1-2 接进两条真渠道（微信支付 v3、支付宝）与线下转账审核
 ```
 10 GroupingRule        店铺分组（不变）
 15 ActivityPriceRule   秒杀/活动价覆盖行单价（新增；只改 l.price，下游一律以覆盖后为基准）
+16 PlusBuyPriceRule    加价购换购价（§29.3 批C；同 15 的"改价不进 discountFee"，只动 is_plus_buy 行）
 20 MemberDiscountRule  会员等级折让（不变，逐行 floor）
+25 CrowdDiscountRule   人群折扣折让（§29.3 批C；逐行进 discountFee，换购行不吃，一单一条）
 30 FullReductionRule   满减 / 满折（实装，按组匹配档位；free_postage 命中则组运费=0）
 40 CouponRule          优惠券（实装，按组抵扣 + 逐行分摊）
 50 PointDeductRule     积分抵扣（新增，受 point.deduct.max_ratio 约束）
@@ -1553,7 +1555,65 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 2. **参与+帮砍全链**：参与（current=原价、steps_left=10）→ 重复参与 422 → 帮砍 10 刀（定长 890 分）→ 第 10 刀后 `reached`、current=底价 → 再砍 422"已砍到底价"；每刀 `user_bargain_log` 一行。
 3. **分享码**：GET PNG → 字节头 89 50 4E 47（mock 不出网）。
 4. **删除守卫**：参与过的活动删除 → 422；无参与的新建+删除 → `deleted=true`。
-### 29.3 加价购扩展与人群折扣（本批后补）
+### 29.3 加价购扩展与人群折扣
+
+交付面：算价链新增两规则（order 16 `PlusBuyPriceRule` / order 25 `CrowdDiscountRule`，
+`service/cart/MarketingEngine.kt`，链图八档→十档）、人群折扣域 **5 条**后台
+（`service/promotion/CrowdDiscountService` + `dao/promotion/CrowdMappers.kt`）、
+前台换购列表 **1 条**（`MarketingService.plusBuyItems`）、
+两张新表（`crowd_discount`/`crowd_discount_log`，基表数 86→88）、权限码 **83/84**（挂目录 27，role 2 不配）。
+
+后台（JWT + 权限码，写路径 `@Audited`）：
+
+| 方法 | URL | 说明 | 权限码 |
+|---|---|---|---|
+| POST | `/api/specific/crowd/discount` | 创建（discount 邻 members_grade 口径：85=8.5 折） | 84 `promotions.crowd.update` |
+| PUT | `/api/specific/crowd/discount` | 编辑（body `discount_id`；改完即生效，无重审位——它不是"活动"） | 84 |
+| GET | `/api/specific/crowd/discountList` | 配置翻页 | 83 `promotions.crowd.lists` |
+| GET | `/api/specific/crowd/discountInfo?id=` | 配置详情 | 83 |
+| GET | `/api/specific/crowd/discountLogList` | 优惠日志翻页（下单事务里写下的折让事实，只读） | 83 |
+
+前台（`/api/h5app/wxapp/promotion/pluspricebuy`）：
+
+| 方法 | URL | 鉴权 | 说明 |
+|---|---|---|---|
+| GET | `/pluspricebuy/getItemList?marketing_id=` | jwt | 加价购活动的可换购商品列表（换购价=圈品行 `price` 列） |
+
+模型与判据：
+
+- **加价购（order 16）**：
+  - 资格三件套：行 `is_plus_buy` ＋ 圈品行表里有该 item（`promotions_marketing_activity_items.price>0`，
+    它同时是**每件换购价**的事实源）＋ 组内**普通行小计 ≥ 首档门槛**（`condition_value[].full`；
+    换购行自己不进门槛，与 C30 同口径）；
+  - 改价基准：换购价 < 现价才动价（同 order 15 的 covers 判据），让利记
+    `activityPriceFee`（出参 `activity_price_info` 里 `type=plus_price_buy`），**不进 discountFee**；
+  - 取值确定性：多场加价购同品命中 → 换购价**最低**者优先、同价 `marketing_id` 小者先；
+  - 换购行仍吃会员折（源系统同口径：换购价也可以再打等级折），但不吃人群折与满减。
+- **人群折扣（order 25）**：`crowd_type=all/grade/new_user`（`crowd_value` JSON）×
+  `use_bound=0/1` 圈品；折让 = 行小计×(100−discount)/100 逐行进 `discountFee`
+  （行上留 `crowd_discount`，组级出 `crowd_discount`/`crowd_discount_info`）；换购行不吃。
+  **一单一条**：命中多条时只取折让最大那条（同额 id 小者先）——"折上折"无法对账，全链抵扣都是单条口径。
+- **日志**：`crowd_discount_log` 在 **下单事务内**（`snapshotPromotions` 之后）写
+  （order_id/discount_id/user_id/fee），依据是算价链实算的 `ctx.crowdApplied`——不是配置回放；
+  编辑配置不打折已发出的日志。
+- 用户匹配（grade_id/注册时间）在取数腿（`CrowdDiscountService.offersFor`，
+  `CartService.buildContext` 预取），规则链继续是纯函数（M0-5 的同 ctx 两次逐分相等的承诺不破）。
+
+差异表（§29.3 追加）：
+
+| ID | 差异 | 理由 |
+|---|---|---|
+| C227 | **后台走运营口**：源系统 5 条路由是 `jwt`（会员 JWT 面），本项目归后台（`@RequiresResource` + `@Audited`）——"能动作废折让口径的配置"不该发到会员手里 | 安全 |
+| C228 | **换购价取圈品行 `price` 列**（每行单配），`condition_value[].price` 阶梯价只做展示兜底；多场同品取**最低**换购价 | 确定性 |
+| C229 | **一单一条人群折让**：源系统"定向促销"可多条叠加；本项目取折让最大一条，其余静默不动 | 可解释性 |
+| C230 | **编辑无重审**：人群折扣不是营销活动（不占池、无次卡语义），改完即生效；审计靠 `@Audited` 留痕 | 最小集 |
+
+门槛用例（并入 `M23EndToEndTest` @Order(13)..16）：
+
+1. **配置审核闸与换购列表**：未知 type 422 → 未审核时前台 404 → 圈品（item 3, price=990）→ 审核 → 列表换购价 990/原价 8900；无令牌 401。
+2. **换购价进购物车与下单链**：门槛行（手机 199900）+ `is_plus_buy` 坚果行 → 车内行单价变 990、`activity_price_fee=7910`、activity_info 留 plus 位——**normal 行单价不动**；下单后 `orders_normal_orders_items` 行 `order_item_type=plus_buy`、price=990、discount_info 留痕。
+3. **人群折扣校验闸与实跑**：五路 422（空名/discount 越界/grade 缺 grade_ids/圈品空/时间窗倒挂）→ 建"全人群 8 折" → fastbuy 坚果 1 件 → 行 `discount_fee=1780`、`crowd_discount_log` 一行（fee=1780）。
+4. **改配置后不命中即不折**：改成"金卡 grade 3 圈 item 3" → user 1（grade 1）再下一单 → 折让 0、日志不再增行；后台翻页/详情/日志页回显；viewer 写路径 403。
 ### 29.4 次卡 / rights 族（本批后补）
 ### 29.5 浏览 / 搜索增强与遗留 method（本批后补）
 ### 29.6 M2-4 生产化（本批后补）

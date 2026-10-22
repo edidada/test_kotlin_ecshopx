@@ -4,18 +4,22 @@ import com.ecshopx.kotlin.common.domain.OrderClass
 import com.ecshopx.kotlin.dao.promotion.MarketingBound
 import com.ecshopx.kotlin.service.promotion.ActivityOffer
 import com.ecshopx.kotlin.service.promotion.CouponCheck
+import com.ecshopx.kotlin.service.promotion.CrowdMatch
+import com.ecshopx.kotlin.service.promotion.CrowdOffer
 import com.ecshopx.kotlin.service.promotion.MarketingOffer
 import com.ecshopx.kotlin.service.promotion.MarketingStep
 import com.ecshopx.kotlin.service.promotion.yuan
 import org.springframework.stereotype.Component
 
 /**
- * 算价责任链（详细设计 §7 + docs/04 §14.5）。M1-3 挂八档：
+ * 算价责任链（详细设计 §7 + docs/04 §14.5）。M2-3 批C 起挂十档：
  *
  * ```
  * 10 Grouping        店铺分组
  * 15 ActivityPrice   秒杀/拼团活动价 —— 改 price 基准（D24/D25，让利不进 discountFee）
+ * 16 PlusBuyPrice    加价购换购价 —— 改 is_plus_buy 行 price 基准（§29.3，同 15 的不进 discountFee）
  * 20 MemberDiscount  会员等级折让
+ * 25 CrowdDiscount   人群折扣折让（§29.3，进 discountFee，换购行不吃）
  * 30 FullReduction   满减 / 满折（+ 命中包邮标记）
  * 40 Coupon          优惠券抵扣（单店铺组）
  * 50 PointDeduct     积分抵扣（受 point.deduct.max_ratio 上限）
@@ -148,6 +152,82 @@ class ActivityPriceRule : PriceRule {
 }
 
 /**
+ * 加价购换购价（order 16，docs/04 §29.3）。
+ * 它是链上**第二个改单价基准**的节点，与 order 15 同构但判据完全不同：
+ *  1. **只动挂了换购价的行**：`is_plus_buy` 行 + [PriceContext.plusItemPrices] 命中
+ *     （圈品行表里存在且价 > 0）；普通行、未勾选行一律不动；
+ *  2. **资格门槛按组算**：`condition_value[].full` 比的是**组内普通行的小计**
+ *     （换购行自己不进门槛，与 FullReductionRule 的 C30 同口径）；
+ *  3. **让利记在 activityPriceFee，不进 discountFee** —— 换购价改的是行单价基准，
+ *     记进抵扣会出现"减两遍"并破坏 `Σ行+运费 == 单` 守恒（§14.5，同 order 15 注）；
+ *  4. **换购价不低于现价时不改价**（同 [ActivityPriceRule.covers] 口径），只留痕迹不变价；
+ *  5. **多场加价购同时命中取值确定性**：换购价最低者优先，同价取 marketing_id 小者。
+ */
+@Component
+class PlusBuyPriceRule : PriceRule {
+    override val order = 16
+
+    override fun apply(ctx: PriceContext) {
+        if (ctx.plusItemPrices.isEmpty()) return
+        val offers = ctx.offers.filter { it.plusPricable }
+        if (offers.isEmpty()) return
+        ctx.groups.forEach { g ->
+            val plusLines = g.checkedLines.filter { it.plusBuy && (ctx.plusItemPrices[it.itemId] ?: 0L) > 0L }
+            if (plusLines.isEmpty()) return@forEach
+            val base = g.checkedLines.filter { !it.plusBuy }.sumOf { it.price * it.num }
+            if (base <= 0) return@forEach
+            val best = offers.mapNotNull { o ->
+                val s = o.hit(base) ?: return@mapNotNull null
+                if (s.plusPrice <= 0L) return@mapNotNull null
+                o to s
+            }.sortedWith(
+                compareBy(
+                    { p: Pair<MarketingOffer, MarketingStep> -> p.second.plusPrice },
+                    { p: Pair<MarketingOffer, MarketingStep> -> p.first.marketingId },
+                ),
+            ).firstOrNull() ?: return@forEach
+
+            val offer = best.first
+            val step = best.second
+            var fee = 0L
+            plusLines.forEach { l ->
+                val origin = l.price
+                if (step.plusPrice >= origin) return@forEach
+                val lineFee = (origin - step.plusPrice) * l.num
+                l.price = step.plusPrice
+                l.activityPriceFee = lineFee
+                fee += lineFee
+                l.activityInfo = l.activityInfo + linkedMapOf<String, Any?>(
+                    "id" to offer.marketingId,
+                    "marketing_id" to offer.marketingId,
+                    "type" to "plus_price_buy",
+                    "name" to offer.marketingName,
+                    "rule" to ruleText(origin, step.plusPrice),
+                    "discount_fee" to lineFee,
+                    "activity_price" to step.plusPrice,
+                    "origin_price" to origin,
+                )
+            }
+            if (fee <= 0) return@forEach
+            // 组级让利 = 全部行重算（含 order 15 已写的秒杀/拼团行），避免覆盖
+            g.activityPriceFee = g.checkedLines.sumOf { it.activityPriceFee }
+            g.activityPriceRows = g.activityPriceRows + ofRow(offer.marketingId, offer.marketingName, fee)
+        }
+    }
+
+    private fun ruleText(origin: Long, plusPrice: Long) =
+        "换购价 ${yuan(plusPrice)} 元（原价 ${yuan(origin)} 元）"
+
+    private fun ofRow(id: Long, name: String, fee: Long): Map<String, Any?> = linkedMapOf(
+        "id" to id,
+        "activity_id" to id,
+        "type" to "plus_price_buy",
+        "name" to name,
+        "discount_fee" to fee,
+    )
+}
+
+/**
  * 会员等级折扣：members_grade.discount 是百分比（100=无折扣），
  * 折让 = 行小计 ×(100-discount)/100，向下取整到分（与 PHP 逐行折让一致）。
  */
@@ -163,6 +243,75 @@ class MemberDiscountRule : PriceRule {
             l.discountFee += d
         }
     }
+}
+
+/**
+ * 人群折扣（order 25，docs/04 §29.3）。
+ *
+ * 折让口径与会员折（order 20）同一套算术：`行小计 ×(100-discount)/100` 向下取整进
+ * [PriceLine.discountFee]。四条判据：
+ *  1. **一单一条**：命中多条人群配置时只取折让最大的那条（同额取 id 小者）——
+ *     折叠乘算出的"折上折"没法对账也没法解释，抵扣全链（会员/满减/券/积分）也都是单条口径；
+ *  2. **换购行不吃**：`is_plus_buy` 行的换购价本身就是让利基准（order 16），
+ *     再打人群折等于"换购又折让"双份让利，与 C30 的"换购不进门槛"同一律；
+ *  3. **圈品**：`use_bound=1` 命中行 = 本组行 ∩ cfg.itemIds；空圈品视为没圈（同 FullReductionRule）；
+ *  4. **留痕**（[PriceLine.crowdDiscount] / g.crowdRows / ctx.crowdApplied）：
+ *     `discount_info` 要能说清这笔折让是谁给的，下单事务照 crowdApplied 写 `crowd_discount_log`。
+ */
+@Component
+class CrowdDiscountRule : PriceRule {
+    override val order = 25
+
+    override fun apply(ctx: PriceContext) {
+        val offer = ctx.crowdOffers
+            .sortedWith(compareByDescending<CrowdOffer> { it.discount }.thenBy { it.id })
+            .firstOrNull() ?: return
+        val rate = (100 - offer.discount).coerceIn(0, 100)
+        if (rate <= 0) return
+        var total = 0L
+        ctx.groups.forEach { g ->
+            val targets = g.checkedLines.filter { !it.plusBuy }
+            if (targets.isEmpty()) return@forEach
+            val lines = if (offer.useBound == MarketingBound.ITEMS) targets.filter { it.itemId in offer.itemIds } else targets
+            if (lines.isEmpty()) return@forEach
+            var groupFee = 0L
+            lines.forEach { l ->
+                val d = l.itemFee * rate / 100
+                if (d <= 0) return@forEach
+                l.crowdDiscount = d
+                l.discountFee += d
+                groupFee += d
+                l.activityInfo = l.activityInfo + linkedMapOf<String, Any?>(
+                    "id" to offer.id,
+                    "marketing_id" to offer.id,
+                    "type" to "crowd_discount",
+                    "name" to offer.name,
+                    "rule" to ruleText(offer),
+                    "discount_fee" to d,
+                )
+            }
+            if (groupFee <= 0) return@forEach
+            g.crowdFee = groupFee
+            g.crowdRows = listOf(crowdRow(offer, groupFee))
+            total += groupFee
+        }
+        if (total > 0) ctx.crowdApplied = listOf(CrowdMatch(offer.id, total))
+    }
+
+    /** 折扣参数文案："指定人群 8.5 折"（折让比"减 X 元"好懂，保持与等级折的同形） */
+    private fun ruleText(o: CrowdOffer): String {
+        val zhe = o.discount / 10.0
+        val s = if (zhe % 1 == 0.0) zhe.toInt().toString() else zhe.toString().trimEnd('0')
+        return "指定人群 ${s} 折（${o.name}）"
+    }
+
+    private fun crowdRow(o: CrowdOffer, fee: Long): Map<String, Any?> = linkedMapOf(
+        "id" to o.id,
+        "discount_id" to o.id,
+        "type" to "crowd_discount",
+        "name" to o.name,
+        "discount_fee" to fee,
+    )
 }
 
 /**

@@ -15,14 +15,15 @@ import com.fasterxml.jackson.databind.ObjectMapper
  * 三条容错口径（都是"脏数据不能把算价链打挂"）：
  *  1. 空文本 / 非数组 / 非对象元素 → 该活动**视为未配置**：不报错、不产生优惠（`steps` 为空）；
  *  2. `full<=0` 的档、`minus>full` 的档、`discount` 不在 1..<100 的档 → 单档丢弃，其余档照常生效；
- *  3. 白名单外的 `marketing_type`（加价购/满赠/自选）解析得动但不出金额 —— 认得，P2 再做。
+ *  3. 白名单外的 `marketing_type`（满赠/自选）解析得动但不出金额 —— 认得，更后面再批；
+ *     **加价购例外**：批C 起 `plus_price_buy` 的 `price`（换购价）随档解析出来参与算价（§29.3）。
  *
  * 命中口径固定：**按 `full` 升序取最高命中档**，
  * `canjoin_repeat=true`（上不封顶）再乘 `floor(基数/full)`。
  */
 
 /** 一档阶梯：`full` 与金额都是分，`discount` 是百分数（85=打 8.5 折，0=本档不是折扣档） */
-data class MarketingStep(val full: Long, val minus: Long, val discount: Int)
+data class MarketingStep(val full: Long, val minus: Long, val discount: Int, val plusPrice: Long = 0)
 
 /**
  * 解析完的活动视图，进 [com.ecshopx.kotlin.service.cart.PriceContext] 的就是它。
@@ -45,6 +46,14 @@ data class MarketingOffer(
     val itemIds: Set<Long> = emptySet(),
 ) {
     val pricable: Boolean get() = marketingType in MarketingType.PRICABLE && steps.isNotEmpty()
+
+    /**
+     * 加价购活动的算价资格（§29.3 order 16 的判据之一）：
+     * 类型是 `plus_price_buy`（≠ 本满折 [pricable] 的口径）**且至少一档配出了换购价**。
+     * 满档没价的活动只会被后台表格显示，结算时静默不改价 —— 与满减"解析不出档就不减"同一律。
+     */
+    val plusPricable: Boolean
+        get() = marketingType == MarketingType.PLUS_PRICE_BUY && steps.any { it.plusPrice > 0 }
 
     /** 最高命中档（未达门槛返回 null） */
     fun hit(base: Long): MarketingStep? = steps.lastOrNull { it.full <= base }
@@ -152,8 +161,13 @@ object MarketingRuleParser {
                 if (d <= 0 || d >= 100) null else MarketingStep(full, 0, d)
             }
 
-            // 加价购/满赠/自选：门槛解析出来供展示，金额一律 0（不参与算价）
-            MarketingType.PLUS_PRICE_BUY, MarketingType.FULL_GIFT, MarketingType.SINGLE_GIFT, "self_select" ->
+            // 加价购：`price` 是**换购价**（分，批C 起 order 16 用它改行单价基准）；
+            // 没有/非法换购价的档仍然解析得动（full 供展示），只是不会改价
+            // 满赠/自选：门槛解析出来供展示，金额一律 0（不参与算价）
+            MarketingType.PLUS_PRICE_BUY ->
+                MarketingStep(full, 0, 0, fen(n.get("price")) ?: 0L)
+
+            MarketingType.FULL_GIFT, MarketingType.SINGLE_GIFT, "self_select" ->
                 MarketingStep(full, 0, 0)
 
             else -> null

@@ -61,7 +61,9 @@ class BootSmokeTest {
                     //      `user_lottery_times`（每日加次领取态）、`user_lottery_log`（抽奖流水）。
                     // 86 = 再加 M2-3 批B 砍价域 3 张：`bargain_promotions`（活动）、
                     //      `user_bargain`（一份刀，uk(g,a,u)）、`user_bargain_log`（刀史）。
-                    assertTrue(rs.getInt(1) == 86, "expect 86 base tables, got ${rs.getInt(1)}")
+                    // 88 = 再加 M2-3 批C 人群折扣 2 张：`crowd_discount`（配置）、
+                    //      `crowd_discount_log`（下单事务里写的优惠日志）。
+                    assertTrue(rs.getInt(1) == 88, "expect 88 base tables, got ${rs.getInt(1)}")
                 }
             }
         }

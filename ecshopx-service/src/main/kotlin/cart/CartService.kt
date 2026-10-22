@@ -4,6 +4,7 @@ import com.ecshopx.kotlin.common.api.BizException
 import com.ecshopx.kotlin.common.api.ErrorCode
 import com.ecshopx.kotlin.common.domain.OrderClass
 import com.ecshopx.kotlin.common.domain.TimeSec
+import com.ecshopx.kotlin.dao.auth.MemberDO
 import com.ecshopx.kotlin.dao.auth.MemberGradeDO
 import com.ecshopx.kotlin.dao.auth.MembersGradeMapper
 import com.ecshopx.kotlin.dao.auth.MembersMapper
@@ -30,6 +31,7 @@ import com.ecshopx.kotlin.service.promotion.ActivityOffer
 import com.ecshopx.kotlin.service.promotion.ActivityOfferService
 import com.ecshopx.kotlin.service.promotion.CouponCheck
 import com.ecshopx.kotlin.service.promotion.CouponService
+import com.ecshopx.kotlin.service.promotion.CrowdDiscountService
 import com.ecshopx.kotlin.service.promotion.MarketingOffer
 import com.ecshopx.kotlin.service.promotion.MarketingRuleParser
 import com.ecshopx.kotlin.service.tx.Db
@@ -67,6 +69,7 @@ class CartService(
     private val configs: SysConfigMapper,
     private val coupons: CouponService,
     private val activityOfferService: ActivityOfferService,
+    private val crowd: CrowdDiscountService,
     private val engine: MarketingEngine,
     private val db: Db,
     private val mapper: ObjectMapper,
@@ -232,8 +235,10 @@ class CartService(
     private fun quote(userId: Long, companyId: Long, pendings: List<Pending>, couponCode: String?, usePoint: Boolean): Quote {
         val valid = pendings.filter { it.valid }
         val invalid = pendings.filter { !it.valid }
-        val grade = members.findById(userId)?.gradeId?.let { grades.findById(it) }
-        val ctx = buildContext(companyId, userId, grade, valid, couponCode, usePoint)
+        // 会员档只查一次：grade 进出参、gradeId/created 是人群折扣（§29.3）的两条判据腿
+        val member = members.findById(userId)
+        val grade = member?.gradeId?.let { grades.findById(it) }
+        val ctx = buildContext(companyId, userId, member, grade, valid, couponCode, usePoint)
         engine.price(ctx)
         val ids = pendings.map { it.itemId }.distinct()
         return Quote(
@@ -245,10 +250,11 @@ class CartService(
         )
     }
 
-    /** 唯一建 ctx 的地方：单价取商品主表现价，快照价只用于 is_last_price；活动/券/积分在此预取 */
+    /** 唯一建 ctx 的地方：单价取商品主表现价，快照价只用于 is_last_price；活动/券/积分/人群在此预取 */
     private fun buildContext(
         companyId: Long,
         userId: Long,
+        member: MemberDO?,
         grade: MemberGradeDO?,
         valid: List<Pending>,
         couponCode: String?,
@@ -273,6 +279,7 @@ class CartService(
             )
         }
         val (coupon, couponReason) = couponOf(companyId, userId, couponCode)
+        val offers = pricedOffers(companyId, now, lines.map { it.itemId }.distinct())
         return PriceContext(
             companyId = companyId, userId = userId,
             gradeName = grade?.gradeName ?: "普通会员",
@@ -281,12 +288,37 @@ class CartService(
             availablePoint = pointBalance(companyId, userId),
             templates = freightTemplates(companyId),
             now = now,
-            offers = pricableOffers(companyId, now, lines.map { it.itemId }.distinct()),
+            offers = offers,
             coupon = coupon,
             couponReason = couponReason,
             pointRatio = if (usePoint) pointRatio(companyId) else 0,
             activityOffers = activityOffersOf(companyId, userId, lines, now),
+            // §29.3 的两条取数腿：换购价表 + 已命中本人的人群配置（引擎保持纯函数）
+            gradeId = member?.gradeId ?: 0L,
+            memberCreated = member?.created ?: 0L,
+            crowdOffers = crowd.offersFor(companyId, member?.gradeId ?: 0L, member?.created ?: 0L, now),
+            plusItemPrices = plusItemPrices(companyId, offers, lines.map { it.itemId }.distinct()),
         )
+    }
+
+    /**
+     * 加价购换购价预取（§29.3 order 16 的取数腿）。
+     *
+     * 圈品行表（`promotions_marketing_activity_items.price`）就是换购价与行资格的**同一处事实**：
+     * 表里有这一行且价 > 0，对应 `is_plus_buy` 行才有资格被换成换购价。多场同品的换购价
+     * 取**最低**的一档（会员视角的确定性最小值，与引擎“价低者优先”的择优一致）。
+     */
+    private fun plusItemPrices(
+        companyId: Long,
+        offers: List<MarketingOffer>,
+        itemIds: List<Long>,
+    ): Map<Long, Long> {
+        val plusIds = offers.filter { it.plusPricable }.map { it.marketingId }
+        if (plusIds.isEmpty() || itemIds.isEmpty()) return emptyMap()
+        return marketingItems.listHit(plusIds, itemIds)
+            .filter { it.price > 0 }
+            .groupBy({ it.itemId }, { it.price })
+            .mapValues { (_, prices) -> prices.min() }
     }
 
     /**
@@ -308,17 +340,18 @@ class CartService(
     }
 
     /**
-     * 算价可参与的满减/满折活动（已审核 + 启用 + 在窗 + 类型在白名单）。
+     * 算价可参与的活动（已审核 + 启用 + 在窗 + 类型在白名单）。
      *
-     * 圈品一次批量读：`use_bound=1` 的活动只对本次车里的商品做命中查询，
+     * 取数类型 = 满减满折 + **加价购**（批C 起 `plus_price_buy` 参与算价，§29.3）；
+     * 两类共用一套"圈品一次批量读"的装配：`use_bound=1` 的活动只对本次车里的商品做命中查询，
      * `use_bound=0` 全场活动不看圈品表（PHP 同口径，圈品行只可能配在指定商品活动上）。
      */
-    private fun pricableOffers(
+    private fun pricedOffers(
         companyId: Long,
         now: Long,
         itemIds: List<Long>,
     ): List<MarketingOffer> {
-        val acts = marketing.listPricable(companyId, now, MarketingType.PRICABLE)
+        val acts = marketing.listPricable(companyId, now, MarketingType.PRICABLE + listOf(MarketingType.PLUS_PRICE_BUY))
         if (acts.isEmpty()) return emptyList()
         val boundIds = acts.filter { it.useBound == MarketingBound.ITEMS }.map { it.marketingId }
         val itemHit = if (boundIds.isEmpty() || itemIds.isEmpty()) emptyMap() else
@@ -564,6 +597,8 @@ class CartService(
             this["cart_total_num"] = g.cartTotalNum
             this["cart_total_count"] = g.cartTotalCount
             this["member_discount"] = g.memberDiscount
+            this["crowd_discount"] = g.crowdFee
+            this["crowd_discount_info"] = g.crowdRows
             this["activity_price_fee"] = g.activityPriceFee
             this["activity_price_info"] = g.activityPriceRows
             this["coupon_discount"] = g.couponDiscount
@@ -664,6 +699,7 @@ class CartService(
             "type" to l.type,
             "grade_name" to q.gradeName(),
             "member_discount" to l.memberDiscount,
+            "crowd_discount" to l.crowdDiscount,
             "activity_price_fee" to l.activityPriceFee,
             "activity_price_info" to l.activityInfo.filter { e -> ACTIVITY_CLASSES.any { it == e["type"] } },
             "activity_info" to l.activityInfo,

@@ -1718,3 +1718,36 @@ CREATE TABLE IF NOT EXISTS user_bargain_log (
   updated        BIGINT       NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_ubg_log ON user_bargain_log(company_id, user_bargain_id, id);
+
+-- ===== M2-3 批C：加价购扩展与人群折扣（docs/04 §29.3，追加于末尾） =====
+-- 人群折扣独立于 promotions_marketing_activity：活动族要审核与一店一活动折让规则，
+-- 人群折扣是"哪些人享多少折"的定向口径。discount 百分比同 members_grade（85=8.5 折）。
+ CREATE TABLE IF NOT EXISTS crowd_discount (
+  id           BIGINT      AUTO_INCREMENT PRIMARY KEY,
+  company_id   BIGINT      NOT NULL,
+  name         VARCHAR(128) NOT NULL,
+  discount     INT         NOT NULL DEFAULT 100,    -- 百分比，85=8.5 折，100=无折扣
+  crowd_type   VARCHAR(16) NOT NULL DEFAULT 'all',  -- all / grade / new_user
+  crowd_value  VARCHAR(256) NOT NULL DEFAULT '',    -- JSON：grade→{"grade_ids":[..]}；new_user→{"days":7}
+  use_bound    TINYINT     NOT NULL DEFAULT 0,      -- 0 全场 / 1 指定商品
+  item_ids     VARCHAR(512) NOT NULL DEFAULT '',    -- 圈品（逗号分隔 item_id）
+  disabled     TINYINT     NOT NULL DEFAULT 0,
+  start_time   BIGINT      NOT NULL DEFAULT 0,
+  end_time     BIGINT      NOT NULL DEFAULT 0,
+  created      BIGINT      NOT NULL DEFAULT 0,
+  updated      BIGINT      NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_crowd_active ON crowd_discount(company_id, disabled, start_time, end_time);
+
+-- 优惠日志：下单事务里写（折扣事实与订单同生死），只读不出改口
+CREATE TABLE IF NOT EXISTS crowd_discount_log (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id  BIGINT   NOT NULL,
+  discount_id BIGINT   NOT NULL,
+  order_id    BIGINT   NOT NULL,
+  user_id     BIGINT   NOT NULL,
+  fee         BIGINT   NOT NULL,                    -- 本单这折让多少钱（分）
+  created     BIGINT   NOT NULL DEFAULT 0,
+  updated     BIGINT   NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_crowd_log_order ON crowd_discount_log(company_id, order_id);

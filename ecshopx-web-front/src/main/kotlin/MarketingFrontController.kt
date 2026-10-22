@@ -42,6 +42,20 @@ class MarketingFrontController(private val marketing: MarketingService) {
         @AuthenticationPrincipal p: Principal?,
     ): ApiResponse<Map<String, Any?>> = ApiResponse.ok(marketing.itemPromotions(cid(p), id(id)))
 
+    /**
+     * MK-F4 加价购活动的可换购商品列表（docs/04 §29.3，源 `MarketingActivity@getPlusPriceBuyItem`）。
+     * 加购入口页用：`marketing_id` 指路，行价就是每件换购价（与算价链 order 16 同源同值）。
+     */
+    @GetMapping("/api/h5app/wxapp/promotion/pluspricebuy/getItemList")
+    fun plusBuyItems(
+        @RequestParam raw: Map<String, String>,
+        @AuthenticationPrincipal p: Principal?,
+    ): ApiResponse<Map<String, Any?>> {
+        val mid = raw["marketing_id"]?.toLongOrNull()?.takeIf { it > 0 }
+            ?: throw BizException(ErrorCode.VALIDATION, "参数不合法", mapOf("marketing_id" to listOf("必填")))
+        return ApiResponse.ok(marketing.plusBuyItems(cid(p), mid))
+    }
+
     private fun id(raw: String): Long =
         raw.toLongOrNull()?.takeIf { it > 0 } ?: throw BizException(ErrorCode.NOT_FOUND, "资源不存在")
 

@@ -13,6 +13,7 @@ import com.ecshopx.kotlin.dao.promotion.MarketingCheckStatus
 import com.ecshopx.kotlin.dao.promotion.MarketingItemDO
 import com.ecshopx.kotlin.dao.promotion.MarketingItemsMapper
 import com.ecshopx.kotlin.dao.promotion.MarketingType
+import com.ecshopx.kotlin.dao.goods.ItemsMapper
 import com.ecshopx.kotlin.service.tx.Db
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.stereotype.Service
@@ -37,6 +38,7 @@ import org.springframework.stereotype.Service
 class MarketingService(
     private val acts: MarketingActivityMapper,
     private val items: MarketingItemsMapper,
+    private val goodsItems: ItemsMapper,
     private val seckill: SeckillService,
     private val db: Db,
     private val mapper: ObjectMapper,
@@ -292,6 +294,43 @@ class MarketingService(
     }
 
     // ===================== 出参装配 =====================
+
+    /**
+     * 加价购活动的可换购商品列表（§29.3，源 `MarketingActivity@getPlusPriceBuyItem`）。
+     *
+     * 数据源就是圈品行表（`promotions_marketing_activity_items`）：`price` 列**每行**放了
+     * 换购价（分），前台照列陈列（追加主表现价/划线价让页面能画"原价→换购价"）。
+     * 只有已审核 + 启用的加价购活动给数据，未审核有数据（T-A5/Z-A2 审核闸）。
+     */
+    fun plusBuyItems(companyId: Long, marketingId: Long): Map<String, Any?> {
+        val a = activity(marketingId, companyId)
+        if (a.marketingType != MarketingType.PLUS_PRICE_BUY || a.checkStatus != MarketingCheckStatus.REVIEWED || !a.status) {
+            throw BizException(ErrorCode.NOT_FOUND, "加价购活动不存在")
+        }
+        val rows = items.listByMarketing(marketingId).filter { it.status && it.isShow && it.price > 0 }
+        val itemIds = rows.map { it.itemId }.distinct()
+        val itemById = if (itemIds.isEmpty()) emptyMap() else goodsItems.listByIds(itemIds).associateBy { it.itemId }
+        return linkedMapOf(
+            "marketing_id" to marketingId,
+            "marketing_name" to a.marketingName,
+            "condition_text" to MarketingRuleParser.parse(a, mapper).conditionText(),
+            "items" to rows.map { r ->
+                val it = itemById[r.itemId]
+                linkedMapOf(
+                    "item_id" to r.itemId,
+                    "goods_id" to r.goodsId,
+                    "item_name" to (r.itemName ?: it?.itemName ?: ""),
+                    "pics" to (it?.pics ?: ""),
+                    "price" to r.price,
+                    "origin_price" to (it?.price ?: 0L),
+                    "market_price" to (it?.marketPrice ?: 0L),
+                    "store" to (it?.store ?: 0L),
+                    "promotion_tag" to r.promotionTag,
+                )
+            },
+        )
+    }
+
 
     private fun row(a: MarketingActivityDO, itemCount: Int): Map<String, Any?> {
         val offer = MarketingRuleParser.parse(a, mapper)

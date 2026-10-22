@@ -582,3 +582,13 @@ INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_co
 
 INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
   (1, 81), (1, 82);
+
+-- ===== M2-3 批C 追加：人群折扣权限码（docs/04 §29.3，追加于末尾） =====
+-- 83 读（配置与优惠日志）/ 84 改。同挂营销中心目录 27。role 2 不配 —— 折扣一动就是
+-- 全店结算口径（与 point.update / bargain.update 同一条划分）。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (83, 27, '人群折扣配置与日志', 'promotions.crowd.lists',  'actived'),
+  (84, 27, '人群折扣创建与维护', 'promotions.crowd.update', 'actived');
+
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 83), (1, 84);
