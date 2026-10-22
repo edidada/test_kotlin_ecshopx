@@ -57,7 +57,9 @@ class BootSmokeTest {
                     // 80 = 再加 M2-2 支付族 1 张：`pay_channel_config`（三家聚合支付的租户级配置行）。
                     //      计数断言就是"新表有没有进 sql init"的守门，
                     //      改这张表的数量必须同步改这里，否则 M2 的表在真实环境建不出来而测试还绿着。
-                    assertTrue(rs.getInt(1) == 80, "expect 80 base tables, got ${rs.getInt(1)}")
+                    // 83 = 再加 M2-3 互动域 3 张：`user_checkin`（签到，uk(g,u,day) 幂等担保）、
+                    //      `user_lottery_times`（每日加次领取态）、`user_lottery_log`（抽奖流水）。
+                    assertTrue(rs.getInt(1) == 83, "expect 83 base tables, got ${rs.getInt(1)}")
                 }
             }
         }

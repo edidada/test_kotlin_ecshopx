@@ -1627,3 +1627,49 @@ CREATE TABLE IF NOT EXISTS pay_channel_config (
   updated     BIGINT      NOT NULL DEFAULT 0
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uk_pay_channel ON pay_channel_config(company_id, channel);
+
+-- ===== M2-3 追加：互动域（签到 / 大转盘，docs/04 §29.1，追加于末尾，不回改上文） =====
+-- day 一律是 yyyymmdd 整数（Asia/Shanghai 业务日界），不是 Unix 秒 —— "一天"要做唯一键。
+-- 签到的幂等担保长在 uk(company_id, user_id, day) 上：并发双签是重复键失败，不是先查后插。
+CREATE TABLE IF NOT EXISTS user_checkin (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id  BIGINT       NOT NULL,
+  user_id     BIGINT       NOT NULL,
+  day         BIGINT       NOT NULL,                 -- yyyymmdd 整数
+  point       BIGINT       NOT NULL DEFAULT 0,       -- 本次签到实际入账积分（含连签加成）
+  continuous  INT          NOT NULL DEFAULT 1,       -- 截至本日的连续签到天数
+  created     BIGINT       NOT NULL DEFAULT 0,
+  updated     BIGINT       NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_user_checkin ON user_checkin(company_id, user_id, day);
+CREATE INDEX IF NOT EXISTS idx_checkin_admin ON user_checkin(company_id, day);
+
+-- 每日抽奖次数状态行：base_times（配置）+ add_times（本行，loginaddtimes 每日发一次）
+-- C 当日已抽次数不落列 —— 由 user_lottery_log 流水数派生，见 InteractionMappers.kt 注记 3。
+CREATE TABLE IF NOT EXISTS user_lottery_times (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id  BIGINT       NOT NULL,
+  user_id     BIGINT       NOT NULL,
+  day         BIGINT       NOT NULL,                 -- yyyymmdd 整数
+  add_times   INT          NOT NULL DEFAULT 0,       -- 当日已领的登录加次
+  created     BIGINT       NOT NULL DEFAULT 0,
+  updated     BIGINT       NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_lottery_day ON user_lottery_times(company_id, user_id, day);
+
+-- 抽奖流水：每抽一条（含"谢谢参与"）。中积分奖的入账走 PointService.adjust（remark=抽奖），
+-- 这一行是核对 `Σ point = point_member_log` 同一笔的钥匙。
+CREATE TABLE IF NOT EXISTS user_lottery_log (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id  BIGINT       NOT NULL,
+  user_id     BIGINT       NOT NULL,
+  activity_id BIGINT       NOT NULL DEFAULT 1,       -- 每租户一个转盘（配置态），id 恒 1
+  prize_id    VARCHAR(64)  NOT NULL,
+  prize_name  VARCHAR(64)  NOT NULL,
+  prize_type  VARCHAR(16)  NOT NULL,                 -- point / none（§29.1 词表）
+  point       BIGINT       NOT NULL DEFAULT 0,       -- 中积分奖时的入账值，0=非积分奖
+  day         BIGINT       NOT NULL,                 -- yyyymmdd 整数（派生当日剩余次数用）
+  created     BIGINT       NOT NULL DEFAULT 0,
+  updated     BIGINT       NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_lottery_user ON user_lottery_log(company_id, user_id, id);

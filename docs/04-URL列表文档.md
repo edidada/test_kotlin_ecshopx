@@ -1436,3 +1436,76 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 | C217 | **`no_update` 语义与"整体不失败"的位次配平**：`store.items.quantity.list.update` 的 `total` 是行列数不是成功数、`updated` 是可识别行的绝对回写数（`setStore` 直接写值，不同比对现库存）、不认识的 bn 只进 `no_update`——一个错的 SKU 不能拖垮九百九十九个（§27.2 SL-M8 的原话），但其**前提**是签名与白名单都过了：这两道闸在留痕之前，挡住的是整单 | e2e「一件可识别的 bn 被绝对回写」「不认识的 bn 进 no_update」「绝对回写不是增量」 |
 | C218 | **后建运营 token 恒掩码、留痕在 OME 链独占**：SL-A1/A2 的两把 token 出参永远掩码（`gy_o****_1` 形态），传空=不改；留痕只挂 OME（`ecapi.site.*` 是平台侧对本站的操作，源系统也不记）——这是"哪条链需要排障证据"的分工，不是漏写留痕 | e2e「token 恒掩码」断言（SL-A1 出参形状）；`SystemLinkSettingService` maskToken |
 | C219 | **踩坑①（KDoc 内字面量 `/*` 触发嵌套块注释 → 整文件语法错）在本族第三次复现**：注释里的示例路径一律写 `{method}` 占位形态（`/api/systemlink/openapi/{method}`），不写通配串。`mvn -DskipTests` 只跳执行、`test-compile` 仍编译测试源——测试正文里同样不得出字面量通配（e2e 的注释也用 `{method}` 形态，C199 已钉） | `fix(m2-2)` commit d34174f（CI 编译失败现场：`Unclosed comment`）与 §26 踩坑①；本族注释全部改用 `{method}` 形态 |
+
+## 29. 长尾端点与营销扩展规格（M2-3 #87..：逐域小批次交付，本节随批追加，不回改上文）
+
+### 29.1 互动域（签到 / 大转盘）
+
+交付面：前台 **9 条 + 后台 8 条**（`service/promotion/{CheckInService,TurntableService}`）、
+三张新表（`user_checkin`/`user_lottery_times`/`user_lottery_log`，基表数 80→83）、
+权限码 **78..80**（挂在既有"营销中心"目录 27 下，role 2 一条都不配）。
+
+前台（`/api/h5app/wxapp`，会员 JWT）：
+
+| 方法 | URL | 说明 | 约束 |
+|---|---|---|---|
+| POST | `/api/h5app/wxapp/sign` | 签到 | 幂等：同天第二次回业务错"今日已签到"（uk(g,u,day) 兜底） |
+| GET | `/api/h5app/wxapp/sign/weekly/list` | 周面板 | 近 7 天逐日子项 + 汇总（signed_days/week_point/continuous/总数） |
+| POST | `/api/h5app/wxapp/promotion/checkin/create` | 别名=sign | 同一契约、同一幂等判据（D-IC2） |
+| GET | `/api/h5app/wxapp/promotion/checkin/getlist` | 别名=weekly/list | 同一契约（D-IC2） |
+| GET | `/api/h5app/wxapp/promotion/turntableconfig` | 转盘配置 | 奖品池（id/name/type/point/weight）+ 次数规则 |
+| GET | `/api/h5app/wxapp/promotion/getLuckyDrawData` | 转盘状态 | 配置 + `residue`/`drawn_today`/`login_add_claimed` |
+| GET | `/api/h5app/wxapp/promotion/turntable` | 抽奖 | **GET 参与抽取照抄源**（write-on-GET 见差异 C221）；次数不足/未开启 422 业务错 |
+| GET | `/api/h5app/wxapp/promotion/getLuckyDrawLog` | 我的抽奖流水 | 翻页 `page`/`page_size` |
+| GET | `/api/h5app/wxapp/promotion/loginaddtimes` | 登录送次数 | 每日一次 +N；重复领不加、不报错（uk(g,u,day) 冲突即放弃） |
+
+后台（`/api/promotions`，运营 JWT + 权限码）：
+
+| 方法 | URL | 说明 | 权限码 |
+|---|---|---|---|
+| GET | `/api/promotions/checkin/getlist` | 会员签到记录翻页（`user_id`/`day_start`/`day_end`，0=不设界） | 78 `promotions.checkin.lists` |
+| POST / PUT | `/api/promotions/turntableconfig` | 配置覆盖式写（缺字段按缺省）；开启态必须有 weight>0 奖品 | 80 `promotions.turntable.update` |
+| GET | `/api/promotions/turntableconfig` | 配置读 | 80 |
+| GET | `/api/promotions/getturntableList` | 转盘快照（恒一行） | 79 `promotions.turntable.lists` |
+| GET | `/api/promotions/getturntable?id=1` | 详情 | 79 |
+| GET | `/api/promotions/getturntable_log/byid` | 全量抽奖流水翻页 | 79 |
+| GET | `/api/promotions/getturntable_count/byid` | 汇总：笔数/送分合计/参与人数 | 79 |
+| GET | `/api/promotions/down_lucky_draw/byid?id=1` | 下架=关开关，其余配置保原值 | 80（`@Audited`） |
+
+配置与数据模型：
+
+- **签到送分**：走 [PointService.adjust]（全仓唯一"无订单来源"动账口），`remark` 恒为 `签到`；
+  键 `checkin.point`（每日基础，缺省 10）与 `checkin.bonus`（第 7/14/…天加成，缺省 20）。
+  `continuous` 每行落库（昨天那行的 +1，断签从 1 重来）。
+- **送分幂等同事务**：签到行与积分流水在同一事务提交，"行在、分没到"不可能；
+  积分域对账恒等式（M1-5）对这批流水用 `remark` 认源。
+- **次数是派生值**：`residue = base_times(配置) + add_times(当日领取行) − 当日流水数(总不落列)`。
+  `turntable.config`（`sys_config` JSON）：`enable/name/base_times/login_add_times/prizes[{id,name,type(point|none),point,weight}]`。
+- **确定性抽取**：Random 种子由 (company,user,day,当日第几抽) 推导，重放同结果；
+  真随机让"中积分奖"这条门槛没法稳定钉死。
+- 中积分奖同事务落 `user_lottery_log`（`remark=抽奖` 认源），`prize_type=none` 不动分。
+- `day` 列一律 yyyymmdd 整数（Asia/Shanghai 业务日界），不是 Unix 秒——唯一键要的是"一天"。
+
+差异表（追加于 C219 之后）：
+
+| ID | 差异 | 理由 |
+|---|---|---|
+| C220 | **别名口合并**：源系统 `/sign` 族与 `/promotion/checkin/*` 族是两套处理器各写一遍，本项目按同一实现收口（D-IC2）——两份实现两份数据只会让"同天签了两次"在一条路上报错、另一条路上成功 | 一致性 |
+| C221 | **write-on-GET 照抄位**：`GET /promotion/turntable` 与 `GET /down_lucky_draw/byid` 是 GET 挂写动作，源系统原样；本项目照抄不改成 POST/PUT——存量调用端（小程序）只认识 GET，发明 REST 版本等于断链 | 兼容 |
+| C222 | **多活动收敛为单配置**：源转盘是多活动表（`getturntableList` 列表语义），本项目收敛为每租户一个转盘（`activity_id` 恒 1）；列表回一行快照、`total_count=1`。承诺清单里没有"多期转盘"任何一条，建表就是建清单外的承诺；`activity_id` 列留在流水上，将来真拆多活动流水不用迁 | 最小集 |
+| C223 | **抽奖次数三件源**：base 是"人人有份"的配置、add 是当日领取态、当日流水数是已花掉——剩余数是派生值不落列，与积分账户"余额=账头，流水可回放"同构 | 一致性 |
+
+门槛用例（进 `M23EndToEndTest`，独立 H2 `exccm23`）：
+
+1. **签到幂等**：同天第二次 `/sign` → `今日已签到`；送分后的 `point_member_log` 有 `remark=签到` 一行，`Σ change_point == point` 恒等式不破。
+2. **连签加成**：第 7 天的行 `point = base + bonus`、`continuous=7`（前 6 天用 seed/逐日置数铺，不靠改时钟）。
+3. **别名一致性**：`/promotion/checkin/create` 与 `/sign` 冲突时同回"今日已签到"；`checkin/getlist` 出参与 `sign/weekly/list` 同形状。
+4. **抽奖链**：未开启 → 422；开启（配置单奖品 weight 独占）→ 抽中 point 奖 → 流水行 + `remark=抽奖` 送分行 + `residue` 减一；次数耗尽 → 422。
+5. **每日加次幂等**：`loginaddtimes` 首 +N、二刷不改值；加次把原来"用完"的转盘救活一抽。
+6. **后台留痕**：`getturntable_log/byid` 看得到前台抽的行；`getturntable_count/byid` 三个数与流水一致；下架后前台抽取 422 且配置其余字段不丢。
+
+### 29.2 砍价域（本批后补）
+### 29.3 加价购扩展与人群折扣（本批后补）
+### 29.4 次卡 / rights 族（本批后补）
+### 29.5 浏览 / 搜索增强与遗留 method（本批后补）
+### 29.6 M2-4 生产化（本批后补）

@@ -561,3 +561,15 @@ INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_co
 
 INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
   (1, 73), (1, 74), (1, 75), (1, 77);
+
+-- ===== M2-3 追加：互动域权限码（docs/04 §29.1，追加于末尾） =====
+-- 78/79 读、80 改（配置与下架是同一把：改配置本身就是上线/下线动作，分两把只会让
+-- "只给看不给改"的运营在配置页 seeing 一个改不了的表单）。都挂在既有 promotions 目录（27）下。
+-- role 2（店铺运营）一条都不配 —— 转盘配置动的是全店送分口径，同 webhook.push 那条划分。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (78, 27, '会员签到记录',     'promotions.checkin.lists',   'actived'),
+  (79, 27, '大转盘数据与留痕', 'promotions.turntable.lists', 'actived'),
+  (80, 27, '大转盘配置与下架', 'promotions.turntable.update','actived');
+
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 78), (1, 79), (1, 80);
