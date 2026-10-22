@@ -31,6 +31,13 @@ enum class SeqName(val dbValue: String, val prefix: String) {
      * schema 里必须同时有 `('webhook_msg', 0)` 那一行，缺行时 SeqGenerator 抛 500（C166）。
      */
     WEBHOOK_MSG("webhook_msg", "WH"),
+
+    /**
+     * SystemLink 调用留痕号（M2-2 §27.5）：一次入站调用一个号，request 与 response 两行**共用**它。
+     * 两行各自发号的话，"这两行是同一次调用"就只能靠时间戳猜，而对端并发推单时猜不出来。
+     * schema 里必须同时有 `('oms_msg', 0)` 那一行，缺行时 SeqGenerator 抛 500（C166）。
+     */
+    OMS_MSG("oms_msg", "OMS"),
 }
 
 /** 订单主状态（大写态，与 PHP order_status/pay_status 字符串枚举一致，概要设计 §3） */

@@ -157,4 +157,15 @@ interface ItemsMapper {
     @Update("UPDATE items SET store = store + #{num}, sales = CASE WHEN sales >= #{num} THEN sales - #{num} ELSE 0 END, " +
         "updated = #{updated} WHERE item_id = #{itemId}")
     fun restoreStock(@Param("itemId") itemId: Long, @Param("num") num: Long, @Param("updated") updated: Long): Int
+
+    /**
+     * **绝对**回写库存（M2-2 SL-M8，ERP 推送库存同步）。
+     *
+     * 与 [deductStock]/[restoreStock] 的增量语义刻意分开：ERP 说的是"这个 SKU 现在有 N 件"，
+     * 不是"N 件的差额"。用增量写法去实现绝对值，一次漏收的推送就会永久偏移，
+     * 而症状是"库存越跑越少/越跑越多"，谁也说不清从哪一天开始错的。
+     * 这里不碰 `sales`：销量是本站的账，ERP 不负责它。
+     */
+    @Update("UPDATE items SET store = #{store}, updated = #{updated} WHERE item_id = #{itemId}")
+    fun setStore(@Param("itemId") itemId: Long, @Param("store") store: Long, @Param("updated") updated: Long): Int
 }

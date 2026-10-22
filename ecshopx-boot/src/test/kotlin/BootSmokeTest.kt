@@ -38,7 +38,7 @@ class BootSmokeTest {
         assertTrue(ctx.containsBean("db"), "expect com.ecshopx.kotlin.service.tx.Db bean named 'db'")
     }
 
-    @Test fun `sql init 建表 74 张`() {
+    @Test fun `sql init 建表 77 张`() {
         val ds = ctx.getBean(DataSource::class.java)
         ds.connection.use { c ->
             c.createStatement().use { st ->
@@ -50,9 +50,12 @@ class BootSmokeTest {
                     rs.next()
                     // 71 = 原来的 70 张 + M1-4 第三批的 `distribution_distributor_salesman_role`（SM-A6 岗位表）
                     // 74 = 再加 M2-1 的 3 张：`openapi_developer`（密钥行）、`webhook_subscription`（订阅）、
-                    //      `webhook_delivery_log`（出站投递 outbox）。计数断言就是"新表有没有进 sql init"的守门，
+                    //      `webhook_delivery_log`（出站投递 outbox）。
+                    // 77 = 再加 M2-2 的 3 张：`systemlink_setting`（两把 token + 白名单）、
+                    //      `systemlink_oms_queuelog`（调用留痕）、`company_license`（站点授权）。
+                    //      计数断言就是"新表有没有进 sql init"的守门，
                     //      改这张表的数量必须同步改这里，否则 M2 的表在真实环境建不出来而测试还绿着。
-                    assertTrue(rs.getInt(1) == 74, "expect 74 base tables, got ${rs.getInt(1)}")
+                    assertTrue(rs.getInt(1) == 77, "expect 77 base tables, got ${rs.getInt(1)}")
                 }
             }
         }

@@ -1506,3 +1506,62 @@ CREATE INDEX IF NOT EXISTS idx_webhook_company_created ON webhook_delivery_log(c
 
 -- 出站消息号段：缺行时 SeqGenerator 抛 500（C166 那条纪律在每一张新号段表上都成立）。
 INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('webhook_msg', 0);
+
+-- ===== M2-2 追加：SystemLink 对接族（docs/04 §27.5，追加于末尾，不回改上文） =====
+-- 对接设置：一个租户一行。源系统把两把 token 放在 `config/common.php` 里**全局一份**，
+-- 多租户共用一个 token 等于谁都能替谁开站点 —— 所以这里按 company_id 一行，token 各租户各一把。
+CREATE TABLE IF NOT EXISTS systemlink_setting (
+  id            BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id    BIGINT NOT NULL,
+  is_open       TINYINT NOT NULL DEFAULT 0,
+  openapi_token VARCHAR(64),
+  oms_token     VARCHAR(64),
+  ip_whitelist  VARCHAR(512),                              -- 逗号分隔，支持 CIDR；空 = 不限制
+  created       BIGINT NOT NULL DEFAULT 0,
+  updated       BIGINT NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_systemlink_company ON systemlink_setting(company_id);
+
+-- 调用留痕（借源系统 `systemlink_oms_queuelog` 同形）：一次调用落 request + response 两行，
+-- 两行共用同一个 `msg_id`，`runtime` 记在 response 那一行上。
+-- 它是**留痕**不是 outbox —— 写留痕发生在 HTTP 之前与之后各一次，进程中途死掉时
+-- 留下的正是"请求进来了、应答没写完"这个现场，而那正是要查的那件事。
+CREATE TABLE IF NOT EXISTS systemlink_oms_queuelog (
+  id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id BIGINT NOT NULL,
+  api_type   VARCHAR(16) NOT NULL,                         -- request / response
+  worker     VARCHAR(64) NOT NULL,                         -- method 名（store.logistics.offline.send …）
+  params     CLOB,
+  result     CLOB,
+  status     VARCHAR(16) NOT NULL DEFAULT 'running',       -- running / success / fail
+  runtime    INT NOT NULL DEFAULT 0,                       -- 毫秒（源系统是秒，D 系列记差异）
+  msg_id     VARCHAR(40),
+  created    BIGINT NOT NULL DEFAULT 0,
+  updated    BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_oms_log_company_created ON systemlink_oms_queuelog(company_id, created);
+CREATE INDEX IF NOT EXISTS idx_oms_log_worker ON systemlink_oms_queuelog(worker, status);
+
+-- 站点授权：源系统这张表在 `authorization` 包里（不在 `src/` 下），本项目按最小可用列自建。
+-- `eid`/`passport_uid` 是上游（商派云）的租户标识，`ecapi.site.*` 四条都按它们定位租户。
+CREATE TABLE IF NOT EXISTS company_license (
+  id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id     BIGINT NOT NULL,
+  eid            VARCHAR(64),
+  passport_uid   VARCHAR(64),
+  issue_id       VARCHAR(64),
+  available_days INT NOT NULL DEFAULT 0,
+  active_at      BIGINT NOT NULL DEFAULT 0,
+  expired_at     BIGINT NOT NULL DEFAULT 0,
+  goods_code     VARCHAR(64),
+  product_code   VARCHAR(64),
+  source         VARCHAR(32),
+  created        BIGINT NOT NULL DEFAULT 0,
+  updated        BIGINT NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_license_company ON company_license(company_id);
+CREATE INDEX IF NOT EXISTS idx_license_eid ON company_license(eid);
+CREATE INDEX IF NOT EXISTS idx_license_passport ON company_license(passport_uid);
+
+-- 留痕消息号段：缺行时 SeqGenerator 抛 500（C166 那条纪律在每一张新号段表上都成立）。
+INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('oms_msg', 0);

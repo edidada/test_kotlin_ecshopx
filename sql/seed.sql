@@ -525,3 +525,27 @@ VALUES
 -- 演示库里**不种子订阅**：订阅要指向一个真实可达的接收端，
 -- 种子一条指向本机某端口的订阅，会让每一次普通演示都攒出一串投递失败记录（`fail` 终态还不排），
 -- 冒烟与 e2e 各自起假接收服务器、各自通过 WH-A2 现建现删。
+
+-- ===== M2-2 追加：SystemLink 对接族权限码 + 演示设置 + 演示站点授权（docs/04 §27.5，追加于末尾） =====
+-- 71/72 分「看 / 改」两档：看包含调用留痕（含对端发来的业务参数），改是换 token。
+-- 目录 76 单列一张。role 2（店铺运营）一条都不配 —— 两把 token 是整个租户对外的口子，
+-- 拿到就能替这个租户开站点、改库存（§25.5 那条划分的延伸）。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (76, 0, '系统对接',     'systemlink_center', 'catalog'),
+  (71, 76, '对接设置与留痕', 'systemlink.lists',  'actived'),
+  (72, 76, '对接设置维护',   'systemlink.update', 'actived');
+
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 71), (1, 72), (1, 76);
+
+-- 演示设置：两把 token 都是**演示值**（与 M2-1 那两把假密钥同一惯例，只用于本地自签自验）。
+-- `ip_whitelist` 留空 = 不限制，因为冒烟与 e2e 的来源地址在测试里是 127.0.0.1 与容器地址两种；
+-- 白名单那几条判据由 e2e 自己现建现改（改完再改回来），不靠 seed 里的固定值。
+INSERT IGNORE INTO systemlink_setting (company_id, is_open, openapi_token, oms_token, ip_whitelist, created, updated)
+VALUES (1, 1, 'gy_openapi_demo_token_1', 'gy_oms_demo_token_1', '', 0, 0);
+
+-- 演示站点授权：`eid`/`passport_uid` 是上游（商派云）的租户标识，`ecapi.site.*` 四条按它定位租户。
+-- `expired_at` 取 4102444800（2100-01-01）：演示库不该在某个具体日期之后突然"站点过期"。
+INSERT IGNORE INTO company_license
+  (company_id, eid, passport_uid, issue_id, available_days, active_at, expired_at, goods_code, product_code, source, created, updated)
+VALUES (1, 'demo_eid_1', 'demo_shopexid_1', 'shuyun_demo_shopexid_1', 7300, 0, 4102444800, '', '', 'purchased', 0, 0);

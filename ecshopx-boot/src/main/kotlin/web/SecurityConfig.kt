@@ -49,6 +49,29 @@ class SecurityConfig(
     private val mapper: ObjectMapper,
 ) {
 
+    /**
+     * M2-2 追加：SystemLink 入站（`/api/systemlink/openapi` 与它的单段子路径、`/api/systemlink/ome` 与它的单段子路径）。
+     *
+     * 位次理由与 `openapiChain` 完全同构（`/api/systemlink` 也是 `/api` 的子集），但**匹配范围更窄**：
+     * 只放行入站那三个路径，不是整个前缀 —— `SL-A3` 的 `/api/systemlink/logs` 就长在同一个前缀下，
+     * 而那张表里是对端发来的全部业务参数。放行整段等于把调用留痕挂到公网上，
+     * 症状还是"列表页 200 但数据不对"，没人会往安全配置上想。
+     *
+     * 这一面的鉴权由 `SystemLinkInboundService` 自己判（两把 token、两支 `assemble` 语义），
+     * 链内不挂任何 `Jwt*Filter`。
+     */
+    @Bean
+    @org.springframework.core.annotation.Order(-2)
+    fun systemLinkChain(http: HttpSecurity): SecurityFilterChain {
+        http
+            .securityMatcher("/api/systemlink/openapi/*", "/api/systemlink/ome", "/api/systemlink/ome/*")
+            .csrf { it.disable() }
+            .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
+            .authorizeHttpRequests { it.anyRequest().permitAll() }
+            .exceptionHandling { it.authenticationEntryPoint { _, res, _ -> write(res, 401, "Unauthenticated.") } }
+        return http.build()
+    }
+
     @Bean
     @org.springframework.core.annotation.Order(-1)
     fun openapiChain(http: HttpSecurity): SecurityFilterChain {
