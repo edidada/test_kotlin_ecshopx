@@ -156,7 +156,7 @@ class M23EndToEndTest {
 
     private fun accountPoint(): Long = jdbc.queryForObject(
         "SELECT point FROM point_member WHERE company_id = 1 AND user_id = 1", Long::class.java,
-    )
+    ) ?: -1L
 
     @Test @Order(5) fun `门槛四 未开启抽取与开启后第一抽`() {
         // 初始（无配置）：状态页 enable=false；抽取 422
@@ -247,14 +247,14 @@ class M23EndToEndTest {
         val delta = jdbc.queryForObject(
             "SELECT COALESCE(SUM(change_point), 0) FROM point_member_log WHERE company_id = 1 AND user_id = 1",
             Long::class.java,
-        )
+        ) ?: -1L
         assertEquals(160L, delta, "签到 10 与 抽奖三笔 50 = 160")
         assertEquals(1000L + delta, accountPoint(), "Σ change_point == point（对账恒等式）")
         // user 2 同恒等式（新开户：30 = 一次连签送分）
         val delta2 = jdbc.queryForObject(
             "SELECT COALESCE(SUM(change_point), 0) FROM point_member_log WHERE company_id = 1 AND user_id = 2",
             Long::class.java,
-        )
+        ) ?: -1L
         assertEquals(30L, delta2)
         assertEquals(30L, jdbc.queryForObject(
             "SELECT point FROM point_member WHERE company_id = 1 AND user_id = 2", Long::class.java,
