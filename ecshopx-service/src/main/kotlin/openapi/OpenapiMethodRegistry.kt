@@ -314,7 +314,7 @@ class OpenapiMethodRegistry(
         Entry(
             id = "OA-M22", method = "ecx.jurisdiction.get", verb = GET, versions = setOf(V1, V2),
             summary = "地区库树（省/市/区县三级；精简 seed，差异 C237）",
-        ) { _ -> jurisdictions.tree() },
+        ) { _, _ -> jurisdictions.tree() },
 
         Entry(
             id = "OA-M23", method = "ecx.image.upload", verb = POST, versions = setOf(V2),
