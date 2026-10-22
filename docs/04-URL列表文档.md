@@ -1614,6 +1614,41 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 2. **换购价进购物车与下单链**：门槛行（手机 199900）+ `is_plus_buy` 坚果行 → 车内行单价变 990、`activity_price_fee=7910`、activity_info 留 plus 位——**normal 行单价不动**；下单后 `orders_normal_orders_items` 行 `order_item_type=plus_buy`、price=990、discount_info 留痕。
 3. **人群折扣校验闸与实跑**：五路 422（空名/discount 越界/grade 缺 grade_ids/圈品空/时间窗倒挂）→ 建"全人群 8 折" → fastbuy 坚果 1 件 → 行 `discount_fee=1780`、`crowd_discount_log` 一行（fee=1780）。
 4. **改配置后不命中即不折**：改成"金卡 grade 3 圈 item 3" → user 1（grade 1）再下一单 → 折让 0、日志不再增行；后台翻页/详情/日志页回显；viewer 写路径 403。
-### 29.4 次卡 / rights 族（本批后补）
+### 29.4 次卡 / rights 族（M2-3 批D 已交付）
+
+**表（88→90）**：`user_rights`（账头：`user_id`=当前持有人（转赠换人）、`total_count` 0=不限次、`used_count` CAS 配额列、`end_time` 0=长期、`order_id` 发放溯源）+ `user_rights_log`（`behavior=grant/consume/transfer/delay` 四种；`user_id`=操作时持有人、`to_user_id`=转赠收件、`operator_id`=员工/后台、`num` 动账次数）。
+
+**发放链（事实源判据）**：
+- **结清即发卡**：`OrderFlowService.markPaid` 的 CAS 命中支（`events.publish` 之前）调 `RightsService.issueOnPaid` —— 重复回调第二次 `hit==0` 已经 return，卡不发两次（判据不在服务层，在位置上，§25.6 同律）；
+- **判据收窄**：订单明细行对应 items 的 `consume_type='service'` 才发（`item_type='services'` 是更宽的族，判据走窄的）；非服务单走一遍内部判据 0 行直接返回，其它单零额外读写；
+- **次数/有效期随发随拷**：事实源是既有 `items_rel_type`（`num` 次数、`is_not_limit_num`=1 不限、`limit_time` 有效天数）+ `servicelabels`，发放时刻一次性拷进卡行——之后商品改绑定不影响已发的卡；rel 缺失的绑定按"1 次长期"兜底；同商品多行/多件合并一张卡（次数累加）。
+
+**路由（附录 → 本项目落地）**：
+| 面 | 路由 | 鉴权 |
+|---|---|---|
+| RT-F1..F7 会员面 | `GET /api/h5app/wxapp/rights/getdata`（可用卡数+剩余总次数，不限次卡→null）、`GET /api/h5app/wxapp/rights`（翻页）、`GET /api/h5app/wxapp/rights/info?id=`（详情+动账史）、`GET /api/h5app/wxapp/rights/log`、`POST /api/h5app/wxapp/rights/delay`、`PUT /api/h5app/wxapp/transfer/rights`（转赠）、`GET /api/h5app/wxapp/transfer/rights/list`（我的转赠记录） | frontChain 会员 JWT |
+| RT-E1..E2 店员面 | `GET /api/admin/wxapp/right?id=`（扫码画面）、`POST /api/admin/wxapp/right/consume`（核销，`operator_id`=扫码员工） | staffChain（无权限码，§18.7，`x-wxapp-session`） |
+| RT-A1..A3 后台 | `POST /api/rights/admin`（手工发放/补录，`@Audited`）、`GET /api/rights/admin/list`（台账）、`GET /api/rights/admin/logList`（流水） | 权限码 **85**（读）/ **86**（写），挂目录 27，role 1 独占 |
+
+**核销配额（并发口径）**：先查行报**人话文案**（停用/过期/次数用完），再走 `consumeCas` 条件 UPDATE（`used_count=used_count+1 WHERE 不停用 AND (total=0 OR used<total) AND (end=0 OR end>now)`）与并发竞争，0 行=并发输了或状态刚变。恒等式 **`used_count == consume 日志行数`** 是 e2e 门槛；转赠=CAS 换归属（0 行=并发刚转走）；延期=`end_time += days`（永久卡/cards `end_time=0` 422，`days<=0` 422）。
+
+**order_type=service 解封**（M0 guard `orderType != 'normal'` → 501 的 P1 承诺兑现）：只放行 `normal|service`，`groups/seckill` 位仍 501；service 单只两处差异——`orders.order_type` 落列 + 结清发卡，**不改算价链**（运费模板=0 的服务品自然免邮），收货六件套仍要求（C235）。
+
+差异表（§29.4）：
+
+| ID | 差异 | 理由 |
+|---|---|---|
+| C231 | **会员面路由归位 `/api/h5app/wxapp` 前缀**：源系统这族挂在 `/api/rights/*`、`/api/transfer/rights*`（落运营链，语义错位） | 安全/链一致 |
+| C232 | **getdata 语义=可用汇总**：`{cards 可用卡数, times 剩余总次数|null}`；源系统按预约占位含 `right_id/remain/end_time` 简表，翻页明细走 `GET /rights` | 最小集 |
+| C233 | **员工核销不判跨店**：源系统按 distributor 限；本项目只判公司归属（companyId 收口），核销人落 `operator_id` 供回查，店级判据 P 后再补 | 最小集 |
+| C234 | **发放时刻拷贝次数/有效期**：`items_rel_type` 改绑定不追溯已发卡 | 客诉口径可解释 |
+| C235 | **service 单不免运费不改算价**：`template_id=0` 自然免邮；`order_type` 只落列+发卡 | 确定性 |
+
+门槛用例（并入 `M23EndToEndTest` @Order(17)..20）：
+
+1. **order_type 守卫边界**：`order_type=groups` 仍 501；`order_type=service` fastbuy 成单，`orders.order_type` 落列 `'service'`。
+2. **结清发卡与重复回调**：mock wxpay 回调链（PAY-2 → `/api/notify/wxpay`）→ `user_rights` 一行（total=5、used=0、end=now+30d、订单号溯源）+ grant 日志恰一行；同一 trade 第二次回调：卡数不变、used=0（CAS 命中支的判据在位置上）。
+3. **会员三件与员工核销五次**：`getdata {cards=1,times=5}` → 列表/详情 → 现建店员（`POST /api/salesman`）+ `x-wxapp-session` 登录 → 连核 5 次（used_count 逐次 +1、`operator_id` 落人）→ 第 6 次 422「次数已用完」；`used_count == consume 日志行数 == 5`。
+4. **转赠/延期/过期/台账**：user1→user2 转赠（`user_id` 换人、transfers 流水 behavior=transfer）→ 自转赠 422 → 延期 7 天（`end_time += 7d`）、`days=0` 422 → 后台手工发放不限次卡（`remain=null`）→ `viewer` 写 403 → 把补录卡 `end_time` 拨到过去（真实 UPDATE）→ 核销 422「已过期」→ 不存在卡 404。
 ### 29.5 浏览 / 搜索增强与遗留 method（本批后补）
 ### 29.6 M2-4 生产化（本批后补）

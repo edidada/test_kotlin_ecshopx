@@ -68,6 +68,7 @@ class OrderFlowService(
     private val trades: TradeMapper,
     private val rels: RelPromotionMapper,
     private val coupons: CouponService,
+    private val rights: com.ecshopx.kotlin.service.promotion.RightsService,
     private val points: PointMapper,
     private val seckillGoods: SeckillGoodsMapper,
     private val groups: GroupsService,
@@ -151,6 +152,10 @@ class OrderFlowService(
                 orderItems.listByOrder(orderId).forEach { seckillGoods.settle(o.actId, it.itemId, it.num) }
             }
             if (o.orderClass == OrderClass.GROUPS) groups.onOrderPaid(orderId)
+            // 次卡发放（§29.4）：商品 consume_type='service' 的明细行结清即发卡，非服务单内部
+            // 判据 0 行直接返回。挂在同一句 CAS 命中支里（events.publish 之前）——重复回调第二次
+            // hit==0 已经 return，卡不会发两次（判据不在服务层，在位置上）
+            rights.issueOnPaid(o.companyId, orderId, o.userId, orderItems.listByOrder(orderId), now)
             logs.insert(
                 OrderOperateLogDO().apply {
                     this.orderId = orderId; operatorRole = "system"; operator = "system"; behavior = t.behavior

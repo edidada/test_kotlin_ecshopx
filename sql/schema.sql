@@ -1751,3 +1751,40 @@ CREATE TABLE IF NOT EXISTS crowd_discount_log (
   updated     BIGINT   NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_crowd_log_order ON crowd_discount_log(company_id, order_id);
+
+-- ===== M2-3 批D：次卡 / rights（docs/04 §29.4，追加于末尾） =====
+-- 一张次卡是一行"账头"：次数（total_count，0=不限）与有效期（end_time，0=长期）在发放时刻
+-- 从 items_rel_type（次卡标签绑定）拷进来；核销配额由 used_count 的条件 UPDATE（CAS）保证，
+-- 并与 behavior='consume' 的日志行数恒等（同事务各写一行一次）。
+CREATE TABLE IF NOT EXISTS user_rights (
+  id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id   BIGINT NOT NULL,
+  user_id      BIGINT NOT NULL,                        -- 当前持有人（转赠会换人）
+  item_id      BIGINT NOT NULL DEFAULT 0,
+  order_id     BIGINT NOT NULL DEFAULT 0,              -- 发放来源（结清的单；0=手工/补录）
+  label_id     BIGINT NOT NULL DEFAULT 0,
+  rights_name  VARCHAR(255) NOT NULL,
+  total_count  INT NOT NULL DEFAULT 1,                 -- 总次数，0=不限次
+  used_count   INT NOT NULL DEFAULT 0,                 -- 已核销次数（== consume 日志行数）
+  end_time     BIGINT NOT NULL DEFAULT 0,              -- 失效时刻（秒），0=长期有效
+  disabled     TINYINT NOT NULL DEFAULT 0,
+  created      BIGINT NOT NULL DEFAULT 0,
+  updated      BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_user_rights_user ON user_rights(company_id, user_id, disabled);
+
+-- 动账流水：grant（发放）/ consume（核销，每次一行 num=1）/ transfer（转出→to_user_id）/ delay（延期，num=0）
+CREATE TABLE IF NOT EXISTS user_rights_log (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id  BIGINT NOT NULL,
+  right_id    BIGINT NOT NULL,
+  user_id     BIGINT NOT NULL,                         -- 操作那一刻的持有人
+  to_user_id  BIGINT NOT NULL DEFAULT 0,               -- 转赠收件人（其余行为恒为 0）
+  behavior    VARCHAR(16) NOT NULL,                    -- grant/consume/transfer/delay
+  num         INT NOT NULL DEFAULT 0,                  -- 动账次数；transfer/delay 记 0
+  operator_id BIGINT NOT NULL DEFAULT 0,               -- 员工核销人/后台操作者；0=本人在前台自办
+  remark      VARCHAR(255),
+  created     BIGINT NOT NULL DEFAULT 0,
+  updated     BIGINT NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_user_rights_log_right ON user_rights_log(company_id, right_id);

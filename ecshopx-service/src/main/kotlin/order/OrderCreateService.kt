@@ -126,7 +126,10 @@ class OrderCreateService(
     }
 
     private fun doCreate(userId: Long, companyId: Long, form: OrderCreateForm): Long {
-        if (!form.orderType.isNullOrBlank() && form.orderType != "normal") {
+        // §29.4 批D 解封 `service`（次卡/服务单）：结算照走同一条算价链，差异只有两样——
+        // order_type 落列、结清（markPaid）对 consume_type='service' 的商品发次卡；
+        // `groups`/`seckill` 在 order_type 位仍是未开放（活动单走 order_class，不是这里）
+        if (!form.orderType.isNullOrBlank() && form.orderType != "normal" && form.orderType != "service") {
             throw BizException(ErrorCode.NOT_IMPLEMENTED, "该订单类型尚未开放：${form.orderType}")
         }
         val orderClass = OrderClass.normalize(form.orderClass)
@@ -550,6 +553,8 @@ class OrderCreateService(
             receiverCity = recv.city; receiverDistrict = recv.district; receiverAddress = recv.address
             // 活动单头三件套：order_class/act_id 决定这单归哪个活动域，team_id 只有拼团才有
             orderClass = act?.type ?: OrderClass.NORMAL
+            // §29.4：order_type 落列（normal/service；guard 已把其它值挡在 501）
+            orderType = form.orderType ?: "normal"
             actId = act?.id ?: 0
             this.teamId = teamId
             // 超时关单时长走租户配置（seed: order.auto_cancel_minutes=30）；

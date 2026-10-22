@@ -592,3 +592,26 @@ INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_co
 
 INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
   (1, 83), (1, 84);
+
+-- ===== M2-3 批D 追加：次卡（rights）演示数据与权限码（docs/04 §29.4，追加于末尾） =====
+-- 服务标签 + 商品绑定（次卡的次数/有效期事实源），全部"发放链公共facts"放 seed：
+INSERT IGNORE INTO servicelabels (label_id, company_id, label_name, label_price, service_type, created, updated)
+VALUES (1, 1, '健身私教次卡', 0, 'rights', 0, 0);
+
+-- item 4：服务型商品（consume_type='service'），价格 99 元、无运费模板（编码=免邮）
+INSERT IGNORE INTO items (item_id, company_id, goods_id, default_item_id, is_default, item_name, item_bn, price, cost_price, market_price, store, sales, approve_status, audit_status, templates_id, item_type, item_category, consume_type, distributor_id, pics, created, updated) VALUES
+  (4, 1, 4, 4, TRUE, '核心肌群训练服务', 'SKU-SVC-01', 9900, 3000, 12900, 100, 0, 'onsale', 'approved', 0, 'services', NULL, 'service', 1, '["/img/svc.jpg"]', 0, 0);
+
+-- 绑定：限次卡（5 次）+ 30 天有效期（is_not_limit_num=0 限次；limit_time>0 到期）。
+-- 注意 items_rel_type 没有 created/updated 列（发放时刻一次性拷贝进卡行，绑定本身随商品走的活配置）
+INSERT IGNORE INTO items_rel_type (item_id, label_id, label_name, label_price, num_type, num, is_not_limit_num, limit_time) VALUES
+  (4, 1, '健身私教次卡', 0, 'plus', 5, 0, 30);
+
+-- 权限码 85 读（台账与流水）/ 86 改（手工发放）。同挂营销中心目录 27，role 1 独占；
+-- 员工核销走 staffChain（无码，§18.7），运营面补录才要码。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (85, 27, '次卡台账与流水', 'promotions.rights.lists',  'actived'),
+  (86, 27, '次卡手工发放',   'promotions.rights.update', 'actived');
+
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 85), (1, 86);

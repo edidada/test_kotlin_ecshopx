@@ -498,6 +498,139 @@ class M23EndToEndTest {
             mapOf("name" to "x", "discount" to 90, "start_time" to now), 403, viewer)
     }
 
+    // ================= 批D 次卡（rights）门槛①..④ =================
+
+    private var svcOrder = 0L
+    private var cardId = 0L
+    private var staffTok = ""
+    private var staffSid = 0L
+
+    @Test @Order(17) fun `次卡门槛一 order_type守卫与解封`() {
+        // order_type 位：groups 仍未开放（501），service 解封（200）
+        expect("POST", "/api/h5app/wxapp/order_new", mapOf(
+            "cart_type" to "fastbuy", "order_type" to "groups",
+            "items" to listOf(mapOf("item_id" to 4, "num" to 1)),
+        ), 501, tok)
+        svcOrder = ok("POST", "/api/h5app/wxapp/order_new", mapOf(
+            "cart_type" to "fastbuy", "order_type" to "service",
+            "items" to listOf(mapOf("item_id" to 4, "num" to 1)),
+            "receiver_name" to "张三", "receiver_mobile" to "13800000001", "receiver_state" to "浙江省",
+            "receiver_city" to "杭州市", "receiver_district" to "西湖区", "receiver_address" to "文三路 1 号",
+        ), tok).path("order_id").asText().toLong()
+        assertEquals("service", jdbc.queryForObject(
+            "SELECT order_type FROM orders_normal_orders WHERE order_id = ?", String::class.java, svcOrder,
+        ))
+    }
+
+    @Test @Order(18) fun `次卡门槛二 结清发卡与重复回调不发二次`() {
+        val before = jdbc.queryForObject("SELECT COUNT(*) FROM user_rights", Long::class.java) ?: -1L
+        // 微信 mock 渠道走真回调链（PAY-2 → /api/notify/wxpay），markPaid 的 CAS 就是真那一次
+        val trade = ok("POST", "/api/h5app/wxapp/payment", mapOf("order_id" to svcOrder, "pay_type" to "wxpay"), tok)
+            .path("trade_id").asText()
+        val notify = {
+            mvc.perform(
+                post("/api/notify/wxpay").contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                    .param("out_trade_no", trade).param("total_fee", "9900")
+                    .param("transaction_id", "WX-$trade").param("trade_state", "SUCCESS"),
+            ).andReturn().response.contentAsByteArray
+        }
+        assertTrue(utf8(notify()).contains("SUCCESS"), "回调应答")
+        // 发卡事实：item 4 的绑定（5 次 / 30 天）随发随拷
+        val card = jdbc.queryForMap(
+            "SELECT id, user_id, item_id, order_id, rights_name, total_count, used_count " +
+                "FROM user_rights WHERE order_id = ?", svcOrder,
+        )
+        cardId = (card["id"] as Number).toLong()
+        assertEquals(1L, card["user_id"])
+        assertEquals(4L, card["item_id"])
+        assertEquals("核心肌群训练服务", card["rights_name"])
+        assertEquals(5, (card["total_count"] as Number).toInt())
+        assertEquals(0, (card["used_count"] as Number).toInt())
+        // grant 日志恰一行；重复回调（同一 trade 再打一次）不改账、不再发卡
+        assertEquals(1L, jdbc.queryForObject(
+            "SELECT COUNT(*) FROM user_rights_log WHERE right_id = ? AND behavior = 'grant'",
+            Long::class.java, cardId,
+        ))
+        notify()
+        assertEquals(before + 1, jdbc.queryForObject("SELECT COUNT(*) FROM user_rights", Long::class.java))
+        assertEquals(0L, jdbc.queryForObject(
+            "SELECT used_count FROM user_rights WHERE id = ?", Long::class.java, cardId,
+        ))
+    }
+
+    @Test @Order(19) fun `次卡门槛三 getdata列表详情与员工核销五次`() {
+        // getdata：可用 1 张、剩 5 次
+        val data = okGet("/api/h5app/wxapp/rights/getdata")
+        assertEquals(1, data.path("cards").asInt())
+        assertEquals(5L, data.path("times").asLong())
+        // 列表与详情
+        val page = okGet("/api/h5app/wxapp/rights", mapOf("page" to 1, "page_size" to 10))
+        assertEquals(cardId, page.path("list").get(0).path("rights_id").asLong())
+        assertEquals(5L, page.path("list").get(0).path("remain").asLong())
+        val detail = okGet("/api/h5app/wxapp/rights/info", mapOf("id" to cardId))
+        assertEquals("核心肌群训练服务", detail.path("rights_name").asText())
+        // 员工现建 + 登录（员工面的令牌放 x-wxapp-session header，与 M1-4 一致）
+        val staff = ok("POST", "/api/salesman", mapOf(
+            "distributor_id" to 1, "salesman_name" to "会籍顾问王", "mobile" to "13700000017",
+            "password" to "staff" + "123", "is_valid" to "true",
+        ), admin)
+        staffSid = staff.path("salesman_id").asLong()
+        staffTok = data(call("POST", "/api/admin/wxapp/login", null, mapOf(
+            "mobile" to "13700000017", "password" to "staff" + "123",
+        )), "ST-E1").path("token").asText()
+        // 扫码看清卡 → 连核五次，第六次"次数已用完"
+        val seen = staffData("GET", "/api/admin/wxapp/right", mapOf("id" to cardId))
+        assertEquals(cardId, seen.path("rights_id").asLong())
+        repeat(5) { i ->
+            val after = staffData("POST", "/api/admin/wxapp/right/consume", emptyMap(), mapOf("id" to cardId))
+            assertEquals((i + 1).toLong(), after.path("used_count").asLong())
+        }
+        expectStaff("POST", "/api/admin/wxapp/right/consume", mapOf("id" to cardId), 422)
+        // CAS 与日志恒等：used_count（行上）== consume 日志行数（5）
+        assertEquals(5L, jdbc.queryForObject(
+            "SELECT COUNT(*) FROM user_rights_log WHERE right_id = ? AND behavior = 'consume'",
+            Long::class.java, cardId,
+        ))
+        // 核销人（扫码员工）落在 operator_id 上
+        assertEquals(staffSid, jdbc.queryForObject(
+            "SELECT operator_id FROM user_rights_log WHERE right_id = ? AND behavior = 'consume' LIMIT 1",
+            Long::class.java, cardId,
+        ))
+    }
+
+    @Test @Order(20) fun `次卡门槛四 转赠延期与过期核销与后台台账`() {
+        // 转赠：user1 → user2，事实换人；我的转赠记录（user1 转出腿）
+        val moved = ok("PUT", "/api/h5app/wxapp/transfer/rights", mapOf("rights_id" to cardId, "to_user_id" to 2), tok)
+        assertEquals(2L, moved.path("user_id").asLong())
+        assertEquals("transfer", okGet("/api/h5app/wxapp/transfer/rights/list")
+            .path("list").get(0).path("behavior").asText())
+        // 自转赠（user2 已是持有人，再转给自己）→ 422
+        expect("PUT", "/api/h5app/wxapp/transfer/rights", mapOf("rights_id" to cardId, "to_user_id" to 2), 422, tok2)
+        // 延期 7 天（有期限的卡 end_time += 7d）；days<=0 → 422
+        val delayed = ok("POST", "/api/h5app/wxapp/rights/delay", mapOf("rights_id" to cardId, "days" to 7), tok)
+        val cardEnd = jdbc.queryForObject("SELECT end_time FROM user_rights WHERE id = ?", Long::class.java, cardId)
+        assertEquals(cardEnd, delayed.path("end_time").asLong())
+        assertTrue(delayed.path("expired").asBoolean().not())
+        expect("POST", "/api/h5app/wxapp/rights/delay", mapOf("rights_id" to cardId, "days" to 0), 422, tok)
+        // 后台手工发放不限次卡 + 台账/流水；viewer 写 403
+        val grant = ok("POST", "/api/rights/admin", mapOf(
+            "user_id" to 2, "item_id" to 4, "total_count" to 0, "remark" to "客诉补录",
+        ), admin)
+        val freeId = grant.path("rights_id").asLong()
+        assertEquals(0, grant.path("total_count").asInt())
+        assertTrue(grant.path("remain").isNull, "不限次卡 remain=null")
+        assertTrue(okGet("/api/rights/admin/list", mapOf("page" to 1, "page_size" to 10), admin)
+            .path("list").any { it.path("rights_id").asLong() == freeId })
+        assertTrue(okGet("/api/rights/admin/logList", mapOf("page" to 1, "page_size" to 10), admin)
+            .path("list").any { it.path("rights_id").asLong() == freeId && it.path("behavior").asText() == "grant" })
+        expect("POST", "/api/rights/admin", mapOf("user_id" to 2, "item_id" to 4), 403, viewer)
+        // 过期卡核销 422：把补录卡的到期日拨到过去（测钟不造假，走一条真实 UPDATE）
+        jdbc.update("UPDATE user_rights SET end_time = ? WHERE id = ?",
+            com.ecshopx.kotlin.common.domain.TimeSec.now() - 10, freeId)
+        expectStaff("POST", "/api/admin/wxapp/right/consume", mapOf("id" to freeId), 422)
+        // 不存在的卡 404（员工面与会员面同口径）
+        expectStaff("POST", "/api/admin/wxapp/right/consume", mapOf("id" to 99999), 404)
+    }
     // ================= 调用件 =================
 
     private fun utf8(b: ByteArray) = String(b, Charsets.UTF_8)
@@ -555,6 +688,30 @@ class M23EndToEndTest {
         val res = callGet(url, params, token)
         assertEquals(code, res.response.status, "$m $url -> " + utf8(res.response.contentAsByteArray))
         return bodyOf(res)
+    }
+
+    // ===== 批D 员工面调用件：与 call()/callGet() 同构，只是会话 header 换成 x-wxapp-session =====
+
+    /** 员工面调用：GET 携参走 .param，POST 带 JSON body；会话在 `x-wxapp-session`（§18.7） */
+    private fun callStaff(method: String, url: String, params: Map<String, Any?> = emptyMap(), body: Map<String, Any?>? = null): MvcResult {
+        val req = when (method) {
+            "GET" -> get(url).also { q -> params.forEach { (k, v) -> q.param(k, v.toString()) } }
+            "POST" -> post(url)
+            else -> org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put(url)
+        }
+        req.header("x-wxapp-session", staffTok)
+        body?.let { req.contentType(MediaType.APPLICATION_JSON).content(mapper.writeValueAsString(it)) }
+        return mvc.perform(req).andReturn()
+    }
+
+    /** 员工面 200 取 data（label 直接印 URL，报错一眼定位） */
+    private fun staffData(method: String, url: String, params: Map<String, Any?> = emptyMap(), body: Map<String, Any?>? = null): JsonNode =
+        data(callStaff(method, url, params, body), "$method $url")
+
+    /** 员工面期望非 200（核销 422/404 等） */
+    private fun expectStaff(method: String, url: String, body: Map<String, Any?>?, code: Int) {
+        val res = callStaff(method, url, emptyMap(), body)
+        assertEquals(code, res.response.status, "$method $url -> " + utf8(res.response.contentAsByteArray))
     }
 
     /** ymd 整数（Asia/Shanghai 业务日界），与服务层同一推导，铺数/断言共用 */

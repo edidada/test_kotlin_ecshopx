@@ -28,6 +28,10 @@ object ActivityCodes {
     /** M2-3 批C 人群折扣（§29.3）：读 83（配置与日志）/ 改 84（创建编辑删除） */
     const val CROWD_LISTS = "promotions.crowd.lists"
     const val CROWD_UPDATE = "promotions.crowd.update"
+
+    /** M2-3 批D 次卡（§29.4）：读 85（台账与流水）/ 改 86（手工发放/补录） */
+    const val RIGHTS_LISTS = "promotions.rights.lists"
+    const val RIGHTS_UPDATE = "promotions.rights.update"
 }
 
 /**
