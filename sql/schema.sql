@@ -1608,3 +1608,22 @@ CREATE TABLE IF NOT EXISTS wx_message_log (
 );
 CREATE INDEX IF NOT EXISTS idx_wx_msg_company_created ON wx_message_log(company_id, created);
 CREATE INDEX IF NOT EXISTS idx_wx_msg_touser ON wx_message_log(touser, created);
+
+-- ===== M2-2 追加：支付渠道实现位（docs/04 §27.4/27.5，追加于末尾，不回改上文） =====
+-- 配置行：一个租户每家渠道一行。三家（adapay/bspay/hfpay）共用这张表与"四件事"的约定（§27.4 末段）：
+-- pay() 只出参数包不结清、结清只认回调；refund() 回 pendingCallback；parseNotification 必须验签、
+-- 验不过回 FAIL 不动账。`extra` 存各家差异化字段（如 e2e 假服务器的 query_url），密钥列的加密留 M2-4。
+CREATE TABLE IF NOT EXISTS pay_channel_config (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id  BIGINT      NOT NULL,
+  channel     VARCHAR(16) NOT NULL,
+  merchant_no VARCHAR(64),
+  app_id      VARCHAR(64),
+  api_key     VARCHAR(128),
+  notify_url  VARCHAR(255),
+  extra       CLOB,
+  status      TINYINT     NOT NULL DEFAULT 1,
+  created     BIGINT      NOT NULL DEFAULT 0,
+  updated     BIGINT      NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_pay_channel ON pay_channel_config(company_id, channel);
