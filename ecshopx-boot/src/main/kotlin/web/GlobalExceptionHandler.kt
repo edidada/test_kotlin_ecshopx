@@ -38,6 +38,14 @@ class GlobalExceptionHandler(
     fun onNoResource(e: NoResourceFoundException): ResponseEntity<ApiError> =
         respond(ErrorCode.NOT_FOUND, "resource not found", emptyMap())
 
+    /**
+     * M2-2 追加：微信配置性失败 → 422（运营要去看配置，不是程序要去看栈）。
+     * 与 BizException 同一出口，只是来源是"微信侧凭据/票据"这一族。
+     */
+    @ExceptionHandler(com.ecshopx.kotlin.service.wx.WxConfigException::class)
+    fun onWxConfig(e: com.ecshopx.kotlin.service.wx.WxConfigException): ResponseEntity<ApiError> =
+        respond(ErrorCode.BIZ, e.message ?: "微信配置不完整", emptyMap())
+
     @ExceptionHandler(Exception::class)
     fun onOther(e: Exception): ResponseEntity<ApiError> {
         // 500 一律留栈：响应体不暴露内部异常，排障靠日志

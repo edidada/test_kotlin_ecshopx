@@ -60,6 +60,30 @@ class SecurityConfig(
      * 这一面的鉴权由 `SystemLinkInboundService` 自己判（两把 token、两支 `assemble` 语义），
      * 链内不挂任何 `Jwt*Filter`。
      */
+    /**
+     * M2-2 追加：微信回调匿名面（`/api/wechat/notify` 与 `/api/wechat/openplatform/notify` 各自的单段子路径）。
+     *
+     * 与 `systemLinkChain` 同构：`/api/wechat` 也是 `/api` 的子集，而这条链的前缀下
+     * **同时住着 WX-A1..A9 的后台面**——放行不能到整个 `/api/wechat`，只能精确到这两段回调后缀。
+     *
+     * 微信侧的通知没有 JWT，身份由"签名 + （真链）加密体"证明 —— 守卫在 `WxNotifyService`：
+     * 签名与解密判据先于一切分发，解不开回 400 且不落库（§27.6 门槛⑤）。
+     */
+    @Bean
+    @org.springframework.core.annotation.Order(-3)
+    fun wechatNotifyChain(http: HttpSecurity): SecurityFilterChain {
+        http
+            .securityMatcher(
+                "/api/wechat/notify/*",
+                "/api/wechat/openplatform/notify/*",
+            )
+            .csrf { it.disable() }
+            .sessionManagement { it.sessionCreationPolicy(SessionCreationPolicy.STATELESS) }
+            .authorizeHttpRequests { it.anyRequest().permitAll() }
+            .exceptionHandling { it.authenticationEntryPoint { _, res, _ -> write(res, 401, "Unauthenticated.") } }
+        return http.build()
+    }
+
     @Bean
     @org.springframework.core.annotation.Order(-2)
     fun systemLinkChain(http: HttpSecurity): SecurityFilterChain {

@@ -1565,3 +1565,46 @@ CREATE INDEX IF NOT EXISTS idx_license_passport ON company_license(passport_uid)
 
 -- 留痕消息号段：缺行时 SeqGenerator 抛 500（C166 那条纪律在每一张新号段表上都成立）。
 INSERT IGNORE INTO seq_generator (seq_name, current_value) VALUES ('oms_msg', 0);
+
+-- ===== M2-2 追加：微信开放平台族（docs/04 §27.5，追加于末尾，不回改上文） =====
+-- 授权应用：一个租户可以同时挂着公众号（oa）与小程序（wxa），`uk_wx_app(company_id, app_id)` 允许两种并存。
+-- `app_secret` 只进不出（C175 同一纪律）：出参对象里根本没有这一列的对应字段。
+-- 第三方平台那四件套凭据（component-app-id/secret/token/aes-key）是**平台侧**的全局配置，
+-- 不进租户表——它属于 ECX 部署方，不属于任何一个租户。
+CREATE TABLE IF NOT EXISTS wx_app (
+  id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id               BIGINT NOT NULL,
+  app_id                   VARCHAR(64)  NOT NULL,
+  app_secret               VARCHAR(128),
+  app_type                 VARCHAR(8)   NOT NULL DEFAULT 'wxa',      -- oa / wxa
+  authorizer_refresh_token VARCHAR(255),                             -- 第三方平台授权链才有，直连没有
+  nick_name                VARCHAR(64),
+  verify_type              INT          NOT NULL DEFAULT 0,
+  principal_name           VARCHAR(128),
+  status                   TINYINT      NOT NULL DEFAULT 1,
+  expires_at               BIGINT       NOT NULL DEFAULT 0,         -- 秒（company_license 同一语义）
+  created                  BIGINT       NOT NULL DEFAULT 0,
+  updated                  BIGINT       NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_wx_app ON wx_app(company_id, app_id);
+CREATE INDEX IF NOT EXISTS idx_wx_app_app ON wx_app(app_id);
+
+-- 出站消息留痕：**mock 也不豁免落库**（§27.6 门槛⑤，"没配置"与"发失败"必须能分辨）。
+-- `errcode` 是微信原话（40037 模板不存在、43101 未订阅同理原样落），mock 分支产生的模拟 code 也落这一列。
+CREATE TABLE IF NOT EXISTS wx_message_log (
+  id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id  BIGINT       NOT NULL,
+  app_id      VARCHAR(64)  NOT NULL,
+  touser      VARCHAR(128) NOT NULL,
+  template_id VARCHAR(128) NOT NULL,
+  page        VARCHAR(255),
+  data        CLOB,
+  status      VARCHAR(16)  NOT NULL DEFAULT 'pending',   -- pending / success / fail
+  errcode     INT          NOT NULL DEFAULT 0,
+  errmsg      VARCHAR(255),
+  mock        TINYINT      NOT NULL DEFAULT 0,
+  created     BIGINT       NOT NULL DEFAULT 0,
+  updated     BIGINT       NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_wx_msg_company_created ON wx_message_log(company_id, created);
+CREATE INDEX IF NOT EXISTS idx_wx_msg_touser ON wx_message_log(touser, created);

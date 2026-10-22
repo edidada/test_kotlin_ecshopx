@@ -53,9 +53,10 @@ class BootSmokeTest {
                     //      `webhook_delivery_log`（出站投递 outbox）。
                     // 77 = 再加 M2-2 的 3 张：`systemlink_setting`（两把 token + 白名单）、
                     //      `systemlink_oms_queuelog`（调用留痕）、`company_license`（站点授权）。
+                    // 79 = 再加 M2-2 微信族 2 张：`wx_app`（授权应用）、`wx_message_log`（出站消息留痕）。
                     //      计数断言就是"新表有没有进 sql init"的守门，
                     //      改这张表的数量必须同步改这里，否则 M2 的表在真实环境建不出来而测试还绿着。
-                    assertTrue(rs.getInt(1) == 77, "expect 77 base tables, got ${rs.getInt(1)}")
+                    assertTrue(rs.getInt(1) == 79, "expect 79 base tables, got ${rs.getInt(1)}")
                 }
             }
         }

@@ -549,3 +549,15 @@ VALUES (1, 1, 'gy_openapi_demo_token_1', 'gy_oms_demo_token_1', '', 0, 0);
 INSERT IGNORE INTO company_license
   (company_id, eid, passport_uid, issue_id, available_days, active_at, expired_at, goods_code, product_code, source, created, updated)
 VALUES (1, 'demo_eid_1', 'demo_shopexid_1', 'shuyun_demo_shopexid_1', 7300, 0, 4102444800, '', '', 'purchased', 0, 0);
+
+-- ===== M2-2 追加：微信开放平台族权限码（docs/04 §27.5，追加于末尾） =====
+-- 73/74/75 同 §25.5 的三档划分：读、改凭据与模板、**主动连微信发包**（发消息/取码都是出网动作）。
+-- role 2 一条都不配——对外推送口子同 webhook.push 那条划分（§25.5）。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (77, 0, '微信能力',    'wechat_center',   'catalog'),
+  (73, 77, '授权信息与模板列表', 'wechat.lists',  'actived'),
+  (74, 77, '绑定与模板维护',     'wechat.update', 'actived'),
+  (75, 77, '发消息与取码',       'wechat.push',   'actived');
+
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 73), (1, 74), (1, 75), (1, 77);

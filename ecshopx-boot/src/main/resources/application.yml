@@ -107,3 +107,12 @@ ecx:
     # 测试里不靠这两个值跑投递（定时作业在测试里的行为就是"永远不跑"），由 e2e 直接调投递函数
     webhook-deliver-initial-delay-ms: 60000
     webhook-deliver-ms: 30000
+  wx:
+    # M2-2 §27.5。mock（缺省）不出网、不出网也不落库豁免（门槛⑤），real 走微信开放平台。
+    profile: ${ECX_WX_PROFILE:mock}
+    api-base: ${ECX_WX_API_BASE:https://api.weixin.qq.com}
+    # 第三方平台四件套（真链才能通）：缺省空 = mock；token/aes-key 用于回调验签与解密
+    component-app-id: ${ECX_WX_COMPONENT_APP_ID:}
+    component-app-secret: ${ECX_WX_COMPONENT_APP_SECRET:}
+    component-token: ${ECX_WX_COMPONENT_TOKEN:}
+    component-aes-key: ${ECX_WX_COMPONENT_AES_KEY:}
