@@ -29,8 +29,9 @@ import org.springframework.web.bind.annotation.RestController
  * 认的是签名（两条链两支语义），不是任何人的令牌；后台那四条在 `/api/setting/systemlink`
  * 与 `/api/systemlink/logs` 下，走运营 JWT。
  *
- * 安全链只放行**入站那三个路径**（`/api/systemlink/openapi/*`、`/api/systemlink/ome`、
- * `/api/systemlink/ome/*`），不是整个 `/api/systemlink` 前缀 —— 因为 `SL-A3` 的
+ * 安全链只放行**入站那三个路径形态**（`/api/systemlink/openapi/{method}`、
+ * `/api/systemlink/ome`、`/api/systemlink/ome/{method}`），不是整个
+ * `/api/systemlink` 前缀 —— 因为 `SL-A3` 的
  * `/api/systemlink/logs` 就长在同一个前缀下。放行整段前缀等于把调用留痕（里面是
  * 对端发来的全部业务参数）挂到公网上，而症状是"列表页 200 但数据不对"，没人会往安全配置上想。
  *
