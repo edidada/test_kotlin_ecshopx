@@ -186,7 +186,7 @@ sealed class JsonTradeChannel(
             linkedMapOf(
                 "trade_state" to normalizeTradeState(node.path("status").asText("")),
                 "transaction_id" to node.path("transaction_id").asText(tradeId),
-                "total_fee" to node.path("amount").asText(t.totalFee.toString()).toLongOrNull() ?: t.totalFee,
+                "total_fee" to (node.path("amount").asText(t.totalFee.toString()).toLongOrNull() ?: t.totalFee),
             )
         }.getOrNull()
     }
