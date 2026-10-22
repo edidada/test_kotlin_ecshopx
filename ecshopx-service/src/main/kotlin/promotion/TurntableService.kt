@@ -202,7 +202,7 @@ class TurntableService(
         if (cfg["enable"] != true) throw BizException(ErrorCode.BIZ, "大转盘未开启")
         if (residue <= 0) throw BizException(ErrorCode.BIZ, "今日抽奖次数已用完")
         val prize = pick(companyId, userId, day, drawn, cfg["prizes"] as List<Map<String, Any?>>)
-        db.transactional {
+        return db.transactional {
             if (prize["type"] == TYPE_POINT && (prize["point"] as Long) > 0) {
                 points.adjust(
                     companyId,
