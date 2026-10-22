@@ -20,7 +20,7 @@ import org.springframework.web.bind.annotation.RestController
 /**
  * RT-F 会员面次卡（docs/04 §29.4，源 `Action\Rights`/`Action\TransferRights`，jwt 会员 JWT）。
  *
- * 附录里这一族在 `/api/rights/*` 与 `/api/transfer/rights*`（落在运营链上，见 §29.4 差异 C231）；
+ * 附录里这一族挂在 /api/rights 与 /api/transfer/rights 两个前缀下（落在运营链上，见 §29.4 差异 C231）；
  * 本项目的会员面**统一归位 `/api/h5app/wxapp`** 前缀进 frontChain（与砍价/加价购同一条流域）。
  * 三个只读位 + 两个动作位，全是"自己名下"的范围过滤（服务层按 user_id 收口）。
  */
