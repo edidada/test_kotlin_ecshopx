@@ -124,42 +124,40 @@ class StatementService(
             val statementFee = totalFee - refundFee - commissionFee
             val no = statementNo("distributor", distributorId, start)
             if (statements.idByNo(no) != null) continue
-            val sid = statements.insert(
-                com.ecshopx.kotlin.dao.distribution.StatementDO().apply {
-                    statementNo = no
-                    this.companyId = companyId
-                    this.distributorId = distributorId
-                    merchantType = "distributor"
-                    orderNum = rows.size
-                    this.totalFee = totalFee
-                    this.freightFee = freightFee
-                    this.rebateFee = rebateFee
-                    this.refundFee = refundFee
-                    this.statementFee = statementFee
-                    this.commissionFee = commissionFee
-                    startTime = start
-                    endTime = end
-                    statementStatus = "ready"
-                    created = now
-                    updated = now
-                },
-            )
+            val stmt = com.ecshopx.kotlin.dao.distribution.StatementDO().apply {
+                statementNo = no
+                this.companyId = companyId
+                this.distributorId = distributorId
+                merchantType = "distributor"
+                orderNum = rows.size
+                this.totalFee = totalFee
+                this.freightFee = freightFee
+                this.rebateFee = rebateFee
+                this.refundFee = refundFee
+                this.statementFee = statementFee
+                this.commissionFee = commissionFee
+                startTime = start
+                endTime = end
+                statementStatus = "ready"
+                created = now
+                updated = now
+            }
+            statements.insert(stmt)
             for (t in rows) {
                 val oid = t.orderId.toLongOrNull() ?: continue
                 val f = feeBy[oid]
-                details.insert(
-                    com.ecshopx.kotlin.dao.distribution.StatementDetailDO().apply {
-                        statementId = sid
-                        orderId = oid
-                        num = 1
-                        totalFee = t.payFee
-                        rebateFee = f?.totalRebate ?: 0L
-                        refundFee = t.refundedFee
-                        refundNum = if (t.refundedFee > 0) 1 else 0
-                        created = now
-                        updated = now
-                    },
-                )
+                val d = com.ecshopx.kotlin.dao.distribution.StatementDetailDO().apply {
+                    this.statementId = stmt.id          // useGeneratedKeys 回填在 DO 的 id 上
+                    orderId = oid
+                    num = 1
+                    this.totalFee = t.payFee
+                    this.rebateFee = f?.totalRebate ?: 0L
+                    this.refundFee = t.refundedFee
+                    refundNum = if (t.refundedFee > 0) 1 else 0
+                    created = now
+                    updated = now
+                }
+                details.insert(d)
             }
             made++
         }
