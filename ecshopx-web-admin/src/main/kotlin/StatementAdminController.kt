@@ -20,7 +20,7 @@ import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 
 /**
- * 结算对账单后台面（docs/04 §29.6，批F；源 `/api/statement/*` 走运营链，本项目归后台）。
+ * 结算对账单后台面（docs/04 §29.6，批F；源端同名路由族走运营链，本项目归后台）。
  *
  * 源系统这一族是"店铺自己看自己的账"（jwt = 店铺身份）；本项目把它归到运营链——
  * 对账单是**平台与店铺之间的账**，谁有权看哪一张是权限问题，不是身份问题。
