@@ -1732,6 +1732,6 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 门槛用例（并入 `M24EndToEndTest` @Order(1)..4，独立 H2 `exccm24`）：
 
 1. **渠道配置面**：开户（掩码不含原值）→ 落库 `enc-v1:` 前缀 → 服务层读回明文 → 开关往返 → `api_key` 空串不覆盖 → 台账含行 → viewer 读/写都 403。
-2. **结算账期**：下单 → mock 回调结清 → `generate` 窗口一张、重复跑 0 张 → 翻页/详情/确认（幂等确认）→ 账期设置 daily→weekly 往返 + 非法周期 422。
+2. **结算账期**：下单 → mock 回调结清 → `generate` 窗口一张、重复跑 0 张 → 翻页/详情/确认（幂等确认）→ 账期设置 daily→weekly 往返 + 非法周期 400（VALIDATION）。
 3. **调用量聚合**：网关三连（两成 一E5301）+ UNKNOWN 探测 → 倾倒一次 `calls=3/2/1` → 再倾倒 0 差量（不重并）→ OP-A6 aggregate 与表行同数。
 4. 旧面不回归：BootSmoke 表数 91→93。

@@ -116,14 +116,17 @@ interface StatementPeriodSettingMapper {
     ): Int
 }
 
+/** 结算单列清单（SELECT 头共用一份，翻页与详情口径一致） */
+private const val ST_COLS =
+    "id, statement_no, company_id, merchant_id, supplier_id, distributor_id, merchant_type, " +
+        "order_num, total_fee, freight_fee, rebate_fee, refund_fee, statement_fee, commission_fee, " +
+        "start_time, end_time, statement_status, created, updated"
+
 @Mapper
 interface StatementsMapper {
 
     @Select(
-        "SELECT id, statement_no, company_id, merchant_id, supplier_id, distributor_id, merchant_type, " +
-            "order_num, total_fee, freight_fee, rebate_fee, refund_fee, statement_fee, commission_fee, " +
-            "start_time, end_time, statement_status, created, updated " +
-            "FROM statements WHERE id = #{id} AND company_id = #{companyId}",
+        "SELECT $ST_COLS FROM statements WHERE id = #{id} AND company_id = #{companyId}",
     )
     fun find(
         @Param("companyId") companyId: Long,
@@ -133,12 +136,7 @@ interface StatementsMapper {
     @Select("SELECT id FROM statements WHERE statement_no = #{no}")
     fun idByNo(@Param("no") no: String): Long?
 
-    /** ST-A1 全量可选筛选（f.* 缺省即不启用）；常数列清单与 SELECT 头共用 */
-    const val COLS =
-        "id, statement_no, company_id, merchant_id, supplier_id, distributor_id, merchant_type, " +
-            "order_num, total_fee, freight_fee, rebate_fee, refund_fee, statement_fee, commission_fee, " +
-            "start_time, end_time, statement_status, created, updated"
-
+    /** ST-A1 全量可选筛选（f.* 缺省即不启用）；常数列清单在文件顶层（private const val ST_COLS） */
     class Filter {
         var companyId: Long = 0
         var merchantType: String? = null
@@ -148,7 +146,7 @@ interface StatementsMapper {
 
     @Select(
         "<script>" +
-            "SELECT $COLS FROM statements " +
+            "SELECT $ST_COLS FROM statements " +
             "WHERE company_id = #{f.companyId} " +
             "<if test='f.merchantType != null'>AND merchant_type = #{f.merchantType}</if> " +
             "<if test='f.distributorId != null'>AND distributor_id = #{f.distributorId}</if> " +
