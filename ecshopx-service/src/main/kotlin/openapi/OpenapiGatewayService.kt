@@ -250,9 +250,16 @@ class OpenapiMetrics {
     private val counts = ConcurrentHashMap<Long, Cell>()
     private val errors = ConcurrentHashMap<String, AtomicLong>()
 
+    /** dev → 归属租户（账期聚合用；闸门就失败的 UNKNOWN 桶不归属任何租户，不入账） */
+    private val companyByDev = ConcurrentHashMap<Long, Long>()
+
+    /** 已并入过账的基线（差量并入：进程内读口的语义不被聚合动作改变） */
+    private val flushed = ConcurrentHashMap<Long, Pair<Long, Long>>()
+
     /** 网关在认出调用方之后绑一次；闸门阶段认不出来时计数落在 [UNKNOWN] 桶 */
     fun bind(caller: OpenapiCaller) {
         current.set(caller.developerId)
+        companyByDev[caller.developerId] = caller.companyId
     }
 
     /** 未预期异常的种类计数（只给运维看排障分布，不进任何对外面） */
@@ -283,6 +290,31 @@ class OpenapiMetrics {
         counts.clear()
         errors.clear()
         current.remove()
+        flushed.clear()
+        companyByDev.clear()
+    }
+
+    /**
+     * 差量并入账期聚合表（批F §29.6，D76 收口）。
+     *
+     * **不消费计数器**——进程内读口（`snapshot`）的语义保持"本进程自启动以来"，
+     * 聚合动作只把【当前值 − 上次并入基线】的差量交给 accumulate 回调。
+     * 归属租户的判断用 [companyByDev]（bind 时缓存过一次）；认不出租户（UNKNOWN 桶、
+     * 进程重启后没再绑过）的差量不并——**账租户的加不得，宁可少记**。
+     */
+    fun drainTo(accumulate: (companyId: Long, calls: Long, success: Long, fails: Long) -> Unit) {
+        for ((dev, c) in counts) {
+            if (dev == UNKNOWN) continue
+            val companyId = companyByDev[dev] ?: continue
+            val s = c.success.get()
+            val f = c.fail.get()
+            val (s0, f0) = flushed[dev] ?: (0L to 0L)
+            val ds = s - s0
+            val df = f - f0
+            if (ds <= 0 && df <= 0) continue
+            accumulate(companyId, ds + df, maxOf(ds, 0), maxOf(df, 0))
+            flushed[dev] = s to f
+        }
     }
 
     private class Cell {

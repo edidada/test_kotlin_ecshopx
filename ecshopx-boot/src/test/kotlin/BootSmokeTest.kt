@@ -67,7 +67,9 @@ class BootSmokeTest {
                     //      `user_rights_log`（grant/consume/transfer/delay 动账流水）。
                     // 91 = 再加 M2-3 批E 地区库 1 张：`sys_jurisdiction`（ecx.jurisdiction.get 的数据源，
                     //      精简 seed，C237）。
-                    assertTrue(rs.getInt(1) == 91, "expect 91 base tables, got ${rs.getInt(1)}")
+                    // 93 = 再加 M2-4 批F 两张：`statement_period_setting`（账期设置，任务只跑 distributor 位，
+                    //      C244）与 `openapi_call_stats`（网关调用量租户-日聚合，D76 收口）。
+                    assertTrue(rs.getInt(1) == 93, "expect 93 base tables, got ${rs.getInt(1)}")
                 }
             }
         }

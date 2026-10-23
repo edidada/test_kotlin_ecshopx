@@ -32,6 +32,18 @@ object Mask {
     }
 
     /**
+     * 密钥/口令的掩码（前 4 后 4，中间等长打星）。
+     *
+     * 为什么单独一条而不是复用 [taxNo]：密钥的**长度本身是敏感信息**——
+     * 给人看"长度"就等于告诉对方"这是 16 位还是 32 位"，而税务号长度是公开规格。
+     * 短于 8 位不是合法密钥形态，整体打星——**不把"我认不出格式"当成"可以不掩"**。
+     */
+    fun secret(v: String?): String? {
+        val m = v?.takeIf { it.isNotBlank() } ?: return v
+        return if (m.length < 8) "*".repeat(m.length) else "${m.take(4)}${"*".repeat(m.length - 8)}${m.takeLast(4)}"
+    }
+
+    /**
      * 纳税人识别号（M1-5 `INV-A1`/`INV-A3`，MASK-R1 同一判据）。
      *
      * 留前 4 位（登记管理局区划 + 机构类别，运营看一眼就知道是哪家地税管辖的）

@@ -1224,7 +1224,9 @@ CREATE TABLE IF NOT EXISTS statement_details (
   total_fee        BIGINT NOT NULL DEFAULT 0,
   rebate_fee       BIGINT NOT NULL DEFAULT 0,
   refund_fee       BIGINT NOT NULL DEFAULT 0,
-  refund_num       INT NOT NULL DEFAULT 0
+  refund_num       INT NOT NULL DEFAULT 0,
+  created          BIGINT NOT NULL DEFAULT 0,
+  updated          BIGINT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_stadetail ON statement_details(statement_id);
 
@@ -1619,7 +1621,7 @@ CREATE TABLE IF NOT EXISTS pay_channel_config (
   channel     VARCHAR(16) NOT NULL,
   merchant_no VARCHAR(64),
   app_id      VARCHAR(64),
-  api_key     VARCHAR(128),
+  api_key     VARCHAR(255),
   notify_url  VARCHAR(255),
   extra       CLOB,
   status      TINYINT     NOT NULL DEFAULT 1,
@@ -1800,3 +1802,32 @@ CREATE TABLE IF NOT EXISTS sys_jurisdiction (
   sort       INT NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_jurisdiction_parent ON sys_jurisdiction(parent_id);
+
+-- ===== M2-4 批F 追加：结算账期设置 + 网关调用量日聚合（docs/04 §29.6）=====
+-- 账期设置：一个租户每种结算对象一行；period_type=daily/weekly/monthly。
+-- 本批任务只跑 distributor（店铺）账位——supplier 在本项目的数据链上还没有可对账的
+-- 供货量事实源（orders.supplier_id 恒 0，C244），位次先留在这里。
+CREATE TABLE IF NOT EXISTS statement_period_setting (
+  id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id   BIGINT NOT NULL,
+  merchant_type VARCHAR(16) NOT NULL,                    -- distributor/supplier
+  period_type  VARCHAR(16) NOT NULL DEFAULT 'daily',
+  created      BIGINT NOT NULL DEFAULT 0,
+  updated      BIGINT NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_statement_period ON statement_period_setting(company_id, merchant_type);
+
+-- D76 收口：网关调用计量的"账"落这里（进程内计数器每分钟把增量并入）。
+-- 键粒度=租户×自然日（Asia/Shanghai 业务日界 yyyymmdd）；并发位：多实例各自增量并入同一行，
+-- 未知租户（闸门就失败的探测）不入租户账，仍只在进程内 UNKNOWN 桶里。
+CREATE TABLE IF NOT EXISTS openapi_call_stats (
+  id         BIGINT AUTO_INCREMENT PRIMARY KEY,
+  company_id BIGINT NOT NULL,
+  day        INT NOT NULL,                              -- yyyymmdd
+  calls      BIGINT NOT NULL DEFAULT 0,
+  success    BIGINT NOT NULL DEFAULT 0,
+  fails      BIGINT NOT NULL DEFAULT 0,
+  created    BIGINT NOT NULL DEFAULT 0,
+  updated    BIGINT NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_openapi_stats ON openapi_call_stats(company_id, day);

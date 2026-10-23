@@ -4,6 +4,7 @@ import com.ecshopx.kotlin.common.api.BizException
 import com.ecshopx.kotlin.common.api.ErrorCode
 import com.ecshopx.kotlin.common.api.PageQuery
 import com.ecshopx.kotlin.common.api.PageResult
+import com.ecshopx.kotlin.dao.openapi.OpenapiCallStatsMapper
 import com.ecshopx.kotlin.dao.openapi.OpenapiDeveloperDO
 import com.ecshopx.kotlin.dao.openapi.OpenapiDeveloperMapper
 import com.ecshopx.kotlin.dao.paging.PageHelper
@@ -53,6 +54,7 @@ class OpenapiDeveloperService(
     private val deliveries: WebhookDeliveryMapper,
     private val registry: OpenapiMethodRegistry,
     private val metrics: OpenapiMetrics,
+    private val callStats: OpenapiCallStatsMapper,
     private val db: Db,
 ) {
 
@@ -170,13 +172,19 @@ class OpenapiDeveloperService(
      * OP-A6 概况。
      *
      * 网关那两位来自 [OpenapiMetrics]（**进程内、重启归零**，§25.4 末条的裁定），
-     * 出站那三位来自 `webhook_delivery_log`（表里有什么就是什么）。
-     * 两者不同源这件事在出参里写成两个键组，不混成一个"总调用数" —— 混了就没人知道哪一半是估的。
+     * 出站那三位来自 `webhook_delivery_log`（表里有什么就是什么），
+     * 聚合那位来自 `openapi_call_stats`（批F §29.6，任务每分钟并入的租户-日账）。
+     * 三个数字**不同源**这件事在出参里写成三个键组，不混成一个"总调用数"——
+     * 混了就没人知道哪一半是估的。
      */
     fun stats(companyId: Long, developerId: Long): Map<String, Any?> {
         val d = need(companyId, developerId)
         val gw = metrics.snapshot(developerId)
         val byStatus = deliveries.statsByDeveloper(companyId, developerId).associate { (it.status ?: "") to it.cnt }
+        val today = com.ecshopx.kotlin.common.domain.TimeSec.TZ.let { z ->
+            java.time.LocalDateTime.ofInstant(java.time.Instant.ofEpochSecond(com.ecshopx.kotlin.common.domain.TimeSec.now()), z)
+        }.let { it.year * 10000 + it.monthValue * 100 + it.dayOfMonth }
+        val agg = callStats.find(companyId, today)
         return linkedMapOf(
             "developer_id" to d.developerId,
             "app_key" to d.appKey,
@@ -187,7 +195,14 @@ class OpenapiDeveloperService(
                 "success" to (byStatus["success"] ?: 0),
                 "fail" to (byStatus["fail"] ?: 0),
             ),
-            "note" to "gateway 计数在本进程内、重启归零；delivery 计数来自 webhook_delivery_log",
+            "aggregate" to linkedMapOf(
+                "day" to today,
+                "calls" to (agg?.calls ?: 0L),
+                "success" to (agg?.success ?: 0L),
+                "fails" to (agg?.fails ?: 0L),
+            ),
+            "note" to "gateway 计数在本进程内、重启归零；delivery 计数来自 webhook_delivery_log；" +
+                "aggregate 来自 openapi_call_stats（每分钟并入的租户-日聚合，是账）",
         )
     }
 

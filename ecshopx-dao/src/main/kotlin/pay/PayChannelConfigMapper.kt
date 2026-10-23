@@ -6,6 +6,7 @@ import org.apache.ibatis.annotations.Mapper
 import org.apache.ibatis.annotations.Options
 import org.apache.ibatis.annotations.Param
 import org.apache.ibatis.annotations.Select
+import org.apache.ibatis.annotations.Update
 
 /**
  * 支付渠道实现位的配置行（M2-2 §27.5）。
@@ -45,6 +46,20 @@ interface PayChannelConfigMapper {
     )
     @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
     fun insert(c: PayChannelConfigDO): Int
+
+    /** 改配置（批F §29.6：开户/开关都走这条；密钥列由服务层先加密再进来） */
+    @Update(
+        "UPDATE pay_channel_config SET merchant_no = #{merchantNo}, app_id = #{appId}, api_key = #{apiKey}, " +
+            "notify_url = #{notifyUrl}, extra = #{extra}, status = #{status}, updated = #{updated} " +
+            "WHERE id = #{id} AND company_id = #{companyId}",
+    )
+    fun update(c: PayChannelConfigDO): Int
+
+    @Select(
+        "SELECT id, company_id, channel, merchant_no, app_id, api_key, notify_url, extra, status, created, updated " +
+            "FROM pay_channel_config WHERE company_id = #{companyId} ORDER BY id",
+    )
+    fun listByCompany(@Param("companyId") companyId: Long): List<PayChannelConfigDO>
 
     /** e2e 现建现改用的清理口（e2e 独立库跑完即清，不带 COMPANY 前置也安全） */
     @Select("SELECT id, company_id, channel, merchant_no, app_id, api_key, notify_url, extra, status, created, updated FROM pay_channel_config")

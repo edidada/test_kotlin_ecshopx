@@ -289,6 +289,26 @@ interface OrdersMapper {
     @Update("UPDATE orders_normal_orders SET invoice_status = #{invoiceStatus}, updated = #{updated} " +
         "WHERE order_id = #{orderId}")
     fun syncInvoiceStatus(@Param("orderId") orderId: Long, @Param("invoiceStatus") invoiceStatus: String, @Param("updated") updated: Long): Int
+
+    /**
+     * 结算账期单的费用补充列（批F §29.6）：trade 只记实付/实退，
+     * 运费/佣金/推广佣金得回订单表补。id 由服务层从 trade.order_id 转换成数值，
+     * 这里不做 VARCHAR<->BIGINT 强转，两方言同一份 SQL。
+     */
+    @Select(
+        "<script>SELECT order_id, freight_fee, total_rebate, commission_fee FROM orders_normal_orders " +
+            "WHERE order_id IN <foreach item='id' collection='ids' open='(' separator=',' close=')'>#{id}</foreach>" +
+            "</script>",
+    )
+    fun listStatementFees(@Param("ids") ids: List<Long>): List<OrderFeeRow>
+}
+
+/** 结算补充列的承载行（不整个回捞 NormalOrderDO，账期只关心四个数） */
+class OrderFeeRow {
+    var orderId: Long = 0
+    var freightFee: Long = 0
+    var totalRebate: Long = 0
+    var commissionFee: Long = 0
 }
 
 /** orders_associations：按单号路由 + 跨类列表查询（状态由 OrdersMapper.syncAssoc 维护） */

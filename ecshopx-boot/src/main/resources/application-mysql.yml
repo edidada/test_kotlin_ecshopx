@@ -1,0 +1,41 @@
+# M2-4 生产化：MySQL profile（批F，docs/04 §29.6 / docs/06 手册）
+# 启动：java -jar ecshopx-boot.jar --spring.profiles.active=mysql
+#       （或 SPRING_PROFILES_ACTIVE=mysql；数据库名/凭据走环境变量）
+#
+# 两条硬约定（与 H2 形态的差异只有数据库，不改任何业务代码）：
+#  1. **SQL 脚本不直跑 MySQL**——同一份 `sql/schema.sql` 里有 H2 方形字（CLOB、
+#     `ALTER ... RESTART WITH`），MySQL 8 吃不了。首跑前用 ETL 脚本把这份 DDL
+#     方言翻译出来（tools/etl_php_to_mysql.py --translate，产物 CLOB→LONGTEXT、
+#     RESTART→AUTO_INCREMENT），profile 指向翻译产物；业务 SQL（Mapper 里那些）写法
+#     在两方言交集上（M0 就剧定了 <script>/<if> 与 LIMIT #{offset} #{limit} 这类的
+#     共同子集），**不需要**为 MySQL 另存一份。
+#  2. sql.init 仍 mode=always：schema/seed 已全部幂等化（IF NOT EXISTS / INSERT IGNORE），
+#     MySQL 面上同样幂等；第二次起跑只跳过（EXISTS/IGNORE），**不会**把已有行洗掉。
+spring:
+  datasource:
+    url: jdbc:mysql://${ECX_MYSQL_HOST:127.0.0.1}:${ECX_MYSQL_PORT:3306}/${ECX_MYSQL_DB:ecshopx}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: ${ECX_MYSQL_USER:ecshopx}
+    password: ${ECX_MYSQL_PASSWORD:ecshopx}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 生产并发位（M0 压测的池龄教训：默认 10 会被打穿，docs/05 §打满 64 那条）
+    hikari:
+      maximum-pool-size: ${ECX_MYSQL_POOL:32}
+      minimum-idle: 8
+  sql:
+    init:
+      mode: always
+      encoding: UTF-8
+      # 部署侧先跑 ETL 生成（docs/06 §首装）；路径交给环境变量，jar 里不藏第二份 DDL
+      schema-locations: file:${ECX_SQL_DIR:/opt/ecshopx/sql}/mysql_schema.sql
+      data-locations: file:${ECX_SQL_DIR:/opt/ecshopx/sql}/seed.sql
+
+ecx:
+  pay:
+    # 密钥加密的 KEK（必配，且全实例一致；换了 KEK 旧行解不开要先迁移重写）
+    kek: ${ECX_PAY_KEK:}
+  schedule:
+    # 多实例部署注意（docs/06 §多实例）：结算账期任务与聚合入账任务的**首行 INSERT**会撞
+    # UNIQUE——差量不会丢（会改走 UPDATE 再并入一次），但是多实例同时跑不是推荐形态，
+    # 生产上把这两个任务指到单实例（用 company-ids/实例标签控制或调度到指定节点）。
+    statement-settle-company-ids: ${ECX_STATEMENT_COMPANY_IDS:1}
+    openapi-stats-flush-ms: ${ECX_OPENAPI_STATS_FLUSH_MS:60000}

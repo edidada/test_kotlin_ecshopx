@@ -4,7 +4,7 @@ import com.ecshopx.kotlin.common.api.BizException
 import com.ecshopx.kotlin.common.api.ErrorCode
 import com.ecshopx.kotlin.dao.order.NormalOrderDO
 import com.ecshopx.kotlin.dao.pay.PayChannelConfigDO
-import com.ecshopx.kotlin.dao.pay.PayChannelConfigMapper
+import com.ecshopx.kotlin.service.pay.PayChannelConfigService
 import com.ecshopx.kotlin.dao.pay.TradeDO
 import com.ecshopx.kotlin.dao.pay.TradeMapper
 import com.fasterxml.jackson.databind.ObjectMapper
@@ -53,7 +53,7 @@ object ChannelSign {
  * 子类只声明 `payType` 与"参数包的形状键"（四件事里唯一逐家不同的地方）。
  */
 sealed class JsonTradeChannel(
-    protected val configs: PayChannelConfigMapper,
+    protected val configs: PayChannelConfigService,
     protected val trades: TradeMapper,
     protected val mapper: ObjectMapper,
 ) : PayChannel {
@@ -196,7 +196,7 @@ sealed class JsonTradeChannel(
 
 @PayChannelProfile("adapay")
 class AdaPayChannel(
-    configs: PayChannelConfigMapper,
+    configs: PayChannelConfigService,
     trades: TradeMapper,
     mapper: ObjectMapper,
 ) : JsonTradeChannel(configs, trades, mapper) {
@@ -206,7 +206,7 @@ class AdaPayChannel(
 
 @PayChannelProfile("bspay")
 class BsPayChannel(
-    configs: PayChannelConfigMapper,
+    configs: PayChannelConfigService,
     trades: TradeMapper,
     mapper: ObjectMapper,
 ) : JsonTradeChannel(configs, trades, mapper) {
@@ -216,7 +216,7 @@ class BsPayChannel(
 
 @PayChannelProfile("hfpay")
 class HfPayChannel(
-    configs: PayChannelConfigMapper,
+    configs: PayChannelConfigService,
     trades: TradeMapper,
     mapper: ObjectMapper,
 ) : JsonTradeChannel(configs, trades, mapper) {

@@ -152,3 +152,58 @@ interface OpenapiDeveloperMapper {
     )
     fun page(@Param("f") f: Map<String, Any?>, @Param("offset") offset: Long, @Param("limit") limit: Int): List<OpenapiDeveloperRow>
 }
+
+/** 网关调用量日聚合（批F §29.6，D76 收口的"账"） */
+class OpenapiCallStatsDO : Stampable {
+    var id: Long = 0
+    var companyId: Long = 0
+    var day: Int = 0
+    var calls: Long = 0
+    var success: Long = 0
+    var fails: Long = 0
+    override var created: Long = 0
+    override var updated: Long = 0
+}
+
+@Mapper
+interface OpenapiCallStatsMapper {
+
+    @Select(
+        "SELECT id, company_id, day, calls, success, fails, created, updated " +
+            "FROM openapi_call_stats WHERE company_id = #{companyId} AND day = #{day}",
+    )
+    fun find(
+        @Param("companyId") companyId: Long,
+        @Param("day") day: Int,
+    ): OpenapiCallStatsDO?
+
+    @Select(
+        "SELECT id, company_id, day, calls, success, fails, created, updated " +
+            "FROM openapi_call_stats WHERE company_id = #{companyId} ORDER BY day DESC LIMIT #{limit} OFFSET #{offset}",
+    )
+    fun pageByCompany(
+        @Param("companyId") companyId: Long,
+        @Param("offset") offset: Long,
+        @Param("limit") limit: Int,
+    ): List<OpenapiCallStatsDO>
+
+    @Insert(
+        "INSERT INTO openapi_call_stats(company_id, day, calls, success, fails, created, updated) " +
+            "VALUES(#{companyId}, #{day}, #{calls}, #{success}, #{fails}, #{created}, #{updated})",
+    )
+    fun insert(s: OpenapiCallStatsDO): Int
+
+    /** 累加并入（"账"的语义：只加不覆，多实例并发各并各的，同一行两次 UPDATE 都成立） */
+    @Update(
+        "UPDATE openapi_call_stats SET calls = calls + #{calls}, success = success + #{success}, " +
+            "fails = fails + #{fails}, updated = #{updated} WHERE company_id = #{companyId} AND day = #{day}",
+    )
+    fun accumulate(
+        @Param("companyId") companyId: Long,
+        @Param("day") day: Int,
+        @Param("calls") calls: Long,
+        @Param("success") success: Long,
+        @Param("fails") fails: Long,
+        @Param("updated") updated: Long,
+    ): Int
+}

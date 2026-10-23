@@ -1681,4 +1681,57 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 3. **M22**：地区树首省=浙江省、第二级 level=2（seed 结构性断言，不数体量）。
 4. **M23/M24**：上传 1×1 PNG → url `/storage/**` → 静态面 GET 200；图片库翻页含该行。
 5. **M25**：`admin` 重置 → 临时口令出场即可登录成功（真改密的读证）；不存在的 username 同回 E5000。
-### 29.6 M2-4 生产化（本批后补）
+### 29.6 M2-4 生产化（M2-4 批F 已交付）
+
+**表（91→93）**：`statement_period_setting`（每租户每种结算对象一行周期设置；任务只跑 distributor 位，C244）+ `openapi_call_stats`（网关调用量 `租户 × 自然日` 聚合行，D76 收口）。
+
+**结算域（M0 建表、本批起服务）**：
+
+| 面 | 路由 | 鉴权/口径 |
+|---|---|---|
+| ST-A0 | `GET/POST /api/statement/period/setting` | 读 88 / 写 89；seller 对象只认 `distributor/supplier`，周期只认 `daily/weekly/monthly` |
+| ST-A1 | `GET /api/statement/summarized` | 读 88；`merchant_type/distributor_id/statement_status` 可选筛 |
+| ST-A2 | `GET /api/statement/detail/{id}` | 读 88；头 + 明细一单一行 |
+| ST-A3 | `POST /api/statement/confirm/{id}` | 写 89（`@Audited`）；ready→confirmed 一格，重复确认幂等回当前态 |
+
+- **事实源只认一条**：`trade.is_settled=TRUE AND trade_state='SUCCESS'`，窗口按**结清时刻**（`trade.updated`，回调 CAS 结清写的），退款取 `trade.refunded_fee`，运费/佣金/推广佣金回 orders 补（`OrdersMapper.listStatementFees`）；
+- **算式（C241）**：`total_fee`=Σ实付；`refund_fee`=Σ已退（生成那一刻累计）；`statement_fee`=total−refund−**平台佣金**（commission_fee）；推广佣金（total_rebate）**单列供核对，不再从应结里扣一次**；明细 `num`=1 每单一行、`refund_num`=有退款置 1；
+- **一单一生**：已铺过单的 order_id 先捞出来在服务层过滤——`trade.order_id` VARCHAR 与 `statement_details.order_id` BIGINT 的 JOIN 强转在 H2/MySQL 两方言写法不同，判据放 Kotlin 一处（C241 同条）；
+- **生成幂等**：`statement_no = ST-{类型}-{店铺}-{窗口日}`，撞号不重铺；任务腿（`StatementSettleJob`，默认白名单 company 1，按各自账期周期跑上一个已闭合窗口）与 e2e 直调 `StatementService.generate` 同一条，不开"测试专用口"；
+- **打款位不做（C242）**：`confirmed→paid` 要接财务回单，没有回单就置"已付"等于凭空宣布付过钱；`statement_status` 列保留 paid 位次。
+
+**调用量聚合（D76 收口）**：
+- `OpenapiMetrics.drainTo` 把【当前值−上次基线】的**差量**交给任务（**不消费进程内读口**，OP-A6 的 gateway 三位语义不变）；闸门就失败的 UNKNOWN 桶认不出租户，**不入租户账**；
+- `OpenapiStatsFlushJob` 每分钟把差量并入 `openapi_call_stats(company_id, day)`（UPDATE 累加；首行 INSERT 撞 UNIQUE 时把差量改走 UPDATE 一次）——多实例各自并、不重不漏；
+- OP-A6 新增 `aggregate` 键组（`day/calls/success/fails`），note 写明三个数字不同源；`OpenapiContract.STATS/STATS_AGGREGATE` 同步，M21 门槛⑤补子契约断言。
+
+**支付渠道 Admin 面（兑现 §27.5 留位）**：
+
+| 面 | 路由 | 口径 |
+|---|---|---|
+| PC-C1 | `GET /api/pay/channel/config/list` | 读 90；密钥只出**掩码**（`Mask.secret`，前4后4），密文前缀也不回显 |
+| PC-C2 | `POST /api/pay/channel/config` | 写 91；upsert by channel；`api_key` **空串=不改**（改开关不抹密钥），非空覆盖并加密 |
+| PC-C3 | `POST /api/pay/channel/config/{channel}/toggle` | 写 91；开关 1/0；关掉的渠道在支付面同答 422"未配置" |
+
+- **密钥加密（§27.5 遗留兑现）**：AES-256-GCM（`enc-v1:{iv}:{ct}`，密钥由 `ecx.pay.kek` SHA-256 派生，部署注入）；**兼容判据**——没有前缀的按明文读（老行/e2e 直插假密钥照跑），有前缀才解密，加密上线不停机不改表；解不开按原样返回不抛（宁可签名失败也不 500）；
+- **加密收口在服务层**（`PayChannelConfigService`）：写侧加密、读侧解密成对出现；三家 JSON 渠道（`JsonTradeChannel`）的 `configs.find` 全部改走服务层，签名/验签用的是**明文原值**（判定层永远读原值，MASK-R1 同律），掩码只发生在后台出参。
+
+**生产化文档承诺（同批交付，不在这批的代码断言里）**：MySQL profile（`application-mysql.yml` + 列映射注意）、一次性 ETL 脚本（PHP 库→新库）、部署与运维手册（备份/恢复/压测口径），见 `docs/06-部署与运维手册.md` 与 `tools/etl_php_to_mysql.py`。
+
+差异表（§29.6）：
+
+| ID | 差异 | 理由 |
+|---|---|---|
+| C241 | **应结算式与"一单一生"的落点**：应结=实付−退款−平台佣金，推广佣金单列不复扣；去重判据放 Kotlin 不放 SQL（VARCHAR/BIGINT JOIN 强转两方言漂移） | 两方言同一份语义 |
+| C242 | **打款位不做**：确认只推 ready→confirmed 一格 | 没有财务回单就不宣布"已付" |
+| C243 | **账期单由任务生成，接口只读/只确认**：运营侧没有"手动出账"口子（出账即改账） | 权限最小化 |
+| C244 | **本批只跑 distributor 账位**：supplier 建了设置行、位次留着，但本项目订单链上 supplier_id 恒 0，没有可对账事实源 | 有据才出账 |
+| C245 | **源 `/api/statement/*` 是店铺 jwt 面，本项目归后台**（读 88/写 89）："平台与店铺之间的账"谁能看是权限问题不是身份问题 | 归位一致 |
+| C246 | **OP-A6 三位读数 + 聚合账并排**：进程内读口不消费，聚合表只并差量；UNKNOWN 探测不入租户账 | 账租户的加不得 |
+
+门槛用例（并入 `M24EndToEndTest` @Order(1)..4，独立 H2 `exccm24`）：
+
+1. **渠道配置面**：开户（掩码不含原值）→ 落库 `enc-v1:` 前缀 → 服务层读回明文 → 开关往返 → `api_key` 空串不覆盖 → 台账含行 → viewer 读/写都 403。
+2. **结算账期**：下单 → mock 回调结清 → `generate` 窗口一张、重复跑 0 张 → 翻页/详情/确认（幂等确认）→ 账期设置 daily→weekly 往返 + 非法周期 422。
+3. **调用量聚合**：网关三连（两成 一E5301）+ UNKNOWN 探测 → 倾倒一次 `calls=3/2/1` → 再倾倒 0 差量（不重并）→ OP-A6 aggregate 与表行同数。
+4. 旧面不回归：BootSmoke 表数 91→93。

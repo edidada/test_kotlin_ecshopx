@@ -32,6 +32,14 @@ object ActivityCodes {
     /** M2-3 批D 次卡（§29.4）：读 85（台账与流水）/ 改 86（手工发放/补录） */
     const val RIGHTS_LISTS = "promotions.rights.lists"
     const val RIGHTS_UPDATE = "promotions.rights.update"
+
+    /** M2-4 批F 生产化（§29.6）：读 88（对账单与设置）/ 改 89（确认结算、改设置） */
+    const val STATEMENT_LISTS = "settle.statements.lists"
+    const val STATEMENT_UPDATE = "settle.statements.update"
+
+    /** M2-4 批F 生产化（§29.6）：读 90（渠道配置台账）/ 改 91（开户与开关） */
+    const val PAYCONFIG_LISTS = "pay.config.lists"
+    const val PAYCONFIG_UPDATE = "pay.config.update"
 }
 
 /**

@@ -38,9 +38,10 @@ object OpenapiContract {
     val METHOD_ROW = setOf("id", "version", "method", "verb", "summary", "required", "required_any")
 
     /** OP-A6 概况：网关三位（进程内）与出站四位（表里）不同源，因此分成两个键组 */
-    val STATS = setOf("developer_id", "app_key", "gateway", "delivery", "note")
+    val STATS = setOf("developer_id", "app_key", "gateway", "delivery", "aggregate", "note")
     val STATS_GATEWAY = setOf("total", "success", "fail")
     val STATS_DELIVERY = setOf("pending", "running", "success", "fail")
+    val STATS_AGGREGATE = setOf("day", "calls", "success", "fails")
 
     /** 任何对外读面都不许出现的密钥列（§25.3 判据 1/2 的机械化断言） */
     val FORBIDDEN = setOf("app_secret", "external_app_secret", "secret")

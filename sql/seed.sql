@@ -630,3 +630,18 @@ INSERT IGNORE INTO sys_jurisdiction (id, parent_id, name, level, sort) VALUES
   (15, 6, '鹿城区', 3, 1),
   (16, 7, '玄武区', 3, 1), (17, 7, '鼓楼区', 3, 2),
   (18, 8, '姑苏区', 3, 1);
+
+-- ===== M2-4 批F 追加：账期设置 seed（§29.6）=====
+INSERT IGNORE INTO statement_period_setting (id, company_id, merchant_type, period_type, created, updated) VALUES
+  (1, 1, 'distributor', 'daily', 0, 0),
+  (2, 1, 'supplier', 'daily', 0, 0);
+
+-- 权限码 88..91：结算读/写（确认）、渠道配置读/写。挂 M2-4 新开的目录 87（生产化）。
+INSERT IGNORE INTO resources (resource_id, parent_id, resource_name, resource_code, resource_type) VALUES
+  (87, 0,  '生产化中心',   'production',               'catalog'),
+  (88, 87, '结算对账单读', 'settle.statements.lists',  'actived'),
+  (89, 87, '结算确认',     'settle.statements.update', 'actived'),
+  (90, 87, '支付渠道配置读', 'pay.config.lists',       'actived'),
+  (91, 87, '支付渠道配置写', 'pay.config.update',      'actived');
+INSERT IGNORE INTO role_rel_resources (role_id, resource_id) VALUES
+  (1, 88), (1, 89), (1, 90), (1, 91), (1, 87);

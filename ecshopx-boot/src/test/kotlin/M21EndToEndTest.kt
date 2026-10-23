@@ -925,6 +925,7 @@ class M21EndToEndTest {
         assertContract(stats, OpenapiContract.STATS, "OP-A6 信封")
         assertContract(stats.path("gateway"), OpenapiContract.STATS_GATEWAY, "OP-A6 网关三位")
         assertContract(stats.path("delivery"), OpenapiContract.STATS_DELIVERY, "OP-A6 出站四位")
+        assertContract(stats.path("aggregate"), OpenapiContract.STATS_AGGREGATE, "OP-A6 聚合四位（批F）")
         assertNoSecret(stats, "OP-A6 概况")
         assertEquals(3L, stats.path("gateway").path("total").asLong(), "本进程内数得清：绑过身份的三次")
         assertEquals(2L, stats.path("gateway").path("success").asLong())
