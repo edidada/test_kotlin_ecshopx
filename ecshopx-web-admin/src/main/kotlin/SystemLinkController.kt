@@ -67,6 +67,19 @@ class SystemLinkController(
         request: HttpServletRequest,
     ): Map<String, Any?> = inbound.ome(pathMethod, merge(params, body), ipOf(request))
 
+    /**
+     * SL-J（批I）：jushuitan 入站（第三支签名 + 第三副信封）。
+     *
+     * 路径带 `companyId`——这条链的租户是**路径声明的**，不是签名反推的（源系统同形，§30.3 C250）；
+     * 签名只覆盖 query（源 `$request->query()`），业务载荷读 body（源 `$request->post()`）。
+     */
+    @PostMapping("/api/systemlink/jushuitan/{companyId}")
+    fun jushuitan(
+        @PathVariable("companyId") companyId: Long,
+        @RequestParam params: Map<String, String>,
+        @RequestBody(required = false) body: String?,
+    ): Map<String, Any?> = inbound.jushuitan(companyId, params, bodyMap(body))
+
     /** SL-A1 对接设置（两把 token 恒掩码） */
     @RequiresResource("systemlink.lists")
     @GetMapping("/api/setting/systemlink")
@@ -123,6 +136,16 @@ class SystemLinkController(
         n.isBoolean -> n.asBoolean()
         n.isNumber -> n.asText()
         else -> n.asText()
+    }
+
+    /** jushuitan 的业务载荷只认 body（源 `$request->post()`）；不是 JSON 对象就当没给 */
+    private fun bodyMap(body: String?): Map<String, Any?> {
+        if (body.isNullOrBlank()) return emptyMap()
+        val node = runCatching { mapper.readTree(body) }.getOrNull()
+        if (node == null || !node.isObject) return emptyMap()
+        val out = LinkedHashMap<String, Any?>()
+        node.fields().forEach { (k, v) -> out[k] = plain(v) }
+        return out
     }
 
     /** 取真实来源 IP（`X-Forwarded-For` 首个，网关/反代场景；没有就 socket 地址） */

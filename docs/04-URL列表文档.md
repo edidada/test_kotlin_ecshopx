@@ -1743,3 +1743,41 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 4. **积压告警读面（批G）**：空库四档桶全零行、`oldest_created` 显式 null、契约集逐键对、viewer 403。
 5. **启动序列校正（批G）**：显式把演示行改到 id=250 → 调 `realign()`（与启动框架调的是同一条）→ 自动新增 → 断言新 id = 251。
 6. **批量重推（批H WH-B1）**：窗口筛位命中窗口内两条 fail（running/success/窗口外不动）→ 置回后 `wakeNow` 同步实投一轮、对端（本机拒连端口）秒拒 → 失败按退避回排 `pending` 且 `next_try_at>0`；无筛位 400、`limit>500` 400、`limit=1` 时**最老一条**先走（created 升序实证）且截断者留 `fail`、未知 topic 422。插入行 `attempts` 缺省 0（给 5 会在 wake 失败后到 maxAttempts 直接回 `fail`，断言竞态）。
+
+## 30. SystemLink 第三条链 —— jushuitan 入站（批I 追加，只读调研 `thirdparty/ECShopX` 原文所得，不回改上文）
+
+来源四件：`routes/systemlink/jushuitan.php`（路由与中间件）、`SystemLinkBundle/Middleware/JushuitanCheck.php`（第三支签名）、`Http/JushuitanApi/V1/Action/{Verify,Order,Item,Aftersales,Oauth}.php`（分发与三条 method）、`Services/Jushuitan/{OrderAftersalesService,Request}.php`（售后状态与出站 OAuth）。
+
+### 30.1 三条 method（源 `Verify::jushuitanApi` 常量表的全部）
+
+| ID | method | 落点 | 关键判据 |
+|---|---|---|---|
+| SL-J1 | `logistics.upload` | 发货 → `OrderFlowService.ship`（拆单） | `so_id/l_id/lc_id/items[]` 必填；`items[].outer_oi_id` = 订单行 id、`qty` = 本次件数；只发 `delivery_status=PENDING` 且被点名的行；`DONE` 重复发货 fail；一件不中 = "发货商品有误" |
+| SL-J2 | `inventory.upload` | 库存绝对回写 `items.store` | `datas[].shop_sku_id` = 商品 bn、`datas[].qty` = 实物库存；**减在途占用**（未付未超时 + 已付未发货两截之和，C252）；进行中的拼团/秒杀商品**跳过**；不认识的 bn 静默跳过；恒答"操作成功" |
+| SL-J3 | `refund.goods` | 售后状态机 `AftersalesService.confirmReceipt/cancelReceipt`（批I 新增） | `outer_as_id/so_id/action_name` 必填；`确认收货` → progress 8 + 明细 `refunded_num=num`；`取消收货` → 按 `sendback_data` 退 1 或 2 |
+
+### 30.2 三处形态差异（照抄，不统一；C250）
+
+- **租户是路径声明的**：`POST /api/systemlink/jushuitan/{companyId}`（源系统同形）；签名 token 是**全局一把** `config('jushuitan.app_secret')`（本仓 `ecx.jushuitan.app-secret`，**不分租户**）。与 openapi/ome 两条"租户从签名反推"的链相反——拿到这把 token 的对端可指定任意 companyId。这是源系统设计，本项目照抄并在部署侧把它当"全局密钥"管（泄漏面大于分租户密钥，轮换即全断）。
+- **签名只覆盖 query**：源中间件读 `$request->query()`、动作读 `$request->post()`；本仓同样只对 query 验签，dispatch 用 query ∪ body（body 优先，两种发送形状都能跑）。
+- **第三副应答信封**：动作层 `{code:"0"|"-1", err_msg}`（源 `api_response_shuyun`：`code` 是**字符串**）；中间件验签失败 `{code:0, msg:"sign error"}`（`code` 是**数字**、键是 `msg`）。两者不同形，不要统一。
+
+第三支签：`md5(method + partnerid + assemble(其余参数) + token)`——**单轮小写**，`method`/`partnerid` 摘出前置；`assemble` 语义同 OPENAPI（null 保留、false 空串）。与另两支（大写、md5 套 md5）不同形，e2e 手写期望串钉死（§30.4 门槛①）。
+
+### 30.3 差异表
+
+| ID | 差异 | 理由 |
+|---|---|---|
+| C250 | **jushuitan 链三处形态照抄**：租户路径声明 + 全局 token + 只对 query 验签 + 第三副信封 | 对端只认它自己那套；"统一成另两条链"= 换一条入口就报签名错误 |
+| C252 | **库存回写减「在途占用」，不是源系统单截的「未付占用」**：源系统 `store` 列是实物库存、`frozen`（NOTPAY）写入时现场扣、已付未发的货已扣在 `store` 里；本仓 `store` **下单即扣**（取消回补），所以等价改写 = 实物库存 −（未付未超时 + 已付未发货），两截都减才不把已付待发的货再卖一次 | 同一个"可用库存"定义，两种库存模型下的等价公式 |
+| C251 | **两处有意加强**：①`logistics.upload` 的内部业务异常翻成 fail（源 `doOrderDelivery` 吞异常后仍答"发货成功"）；②售后进 progress 8 时同步生成 READY 退款单（源把退款单留到后续 refundCheck），取消收货时同步作废 | ①答"成功"而没发出去，ERP 从此不再回传——错要让它重试；②本仓不变式：售后在待退款、退款列表里不能什么都没有 |
+
+### 30.4 门槛用例（并入 `M22EndToEndTest` @Order(8)，独立 H2 `exccm22`）
+
+①第三支签手写期望串（method/partnerid 前置、单轮小写）且与前两支不同形；②错签走中间件第三副信封 `{code:0,msg:"sign error"}`；③mock 结清真单 → `logistics.upload` 拆单发货落 DONE + 重复发货 fail + 未知 method "接口不存在"；④`inventory.upload`：qty 10 减未付占用（建一张 ORDER-2 未付单作占用）→ 进行中秒杀商品跳过回写；⑤`refund.goods`：确认收货 → progress 8 + `refunded_num=1` + READY 退款单；取消收货 → 退回 1（`sendback_data` 空）+ 退款单 CANCEL；未知动作/缺单号走 fail 形。
+
+### 30.5 本批遗留（各留出处）
+
+- **OAuth 回调**（源 `ANY /api/systemlink/jushuitan/oauth/callback`）：要拿 `code` 出站换 `access_token`（`Services/Jushuitan/Request::call('oauth_token')`），而本仓没有聚水潭出站客户端，换来的 token 无处消费——等出站（商品/订单上传、库存查询）那一批一起开，不做一个空转的回调。
+- **adapay 入站链**（`POST /api/systemlink/adapay/agent/callback`，无中间件）：源系统是 AdaPay **分账/代理**回调（`AdaPayBundle/Http/FrontApi/V1/Action/CallBack@handle`），本项目支付渠道里没有 AdaPay 分账产品的事实源（`AdaPayChannel` 是聚合支付通道，不是分账账户体系），落点不存在。
+- **积分商城分支**（源 `Item@updateItemStore` 的 `pointsmall` 两支）：本仓没有积分商城模块，同 §27 的裁剪口径。

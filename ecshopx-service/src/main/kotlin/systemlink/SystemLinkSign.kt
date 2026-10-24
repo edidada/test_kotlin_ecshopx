@@ -3,9 +3,9 @@ package com.ecshopx.kotlin.service.systemlink
 import java.security.MessageDigest
 
 /**
- * SystemLink 入站签名（M2-2 §27.1）。
+ * SystemLink 入站签名（M2-2 §27.1；第三支于批I 追加）。
  *
- * 源系统这一族有**两支** `gen_sign`，公式一模一样、`assemble` 不一样：
+ * 源系统这一族有**三支** `gen_sign`：前两支公式一模一样、`assemble` 不一样：
  * `SystemLinkBundle/Middleware/OpenApiCheck.php`（前缀 `/api/systemlink/openapi`）与
  * `ShopexErpCheck.php`（前缀 `/api/systemlink/ome`）。公式都是
  * `strtoupper(md5(strtoupper(md5(assemble(params))) + token))`，差异只有两处：
@@ -15,10 +15,12 @@ import java.security.MessageDigest
  * | `null` 值 | 保留，拼成 `键` + 空串 | 整体跳过（键也不出现） |
  * | 布尔值 | 保留，PHP 串化：`true→"1"`、`false→""` | 显式转 `1` / `0` |
  *
- * 这两处差异**不是笔误也不是可以统一的历史包袱**：对端是两份不同的代码，
+ * 第三支是 jushuitan 链（`JushuitanCheck::gen_sign`，批I 收）：**单轮小写 md5**、
+ * `method` 与 `partnerid` 从参数里摘出来前置到串首、`assemble` 语义同 [Mode.OPENAPI]。
+ * 三支的差别**不是笔误也不是可以统一的历史包袱**：对端是几份不同的代码，
  * 各按自己那一支算签。把它们合成一支，症状是"换一条入口就报签名错误"，
- * 而两边各自看代码都觉得自己对——所以这里用 [Mode] 把差异显式摆出来，
- * 并且 e2e 用**手写期望串**把两支的差别钉死（§27.6 门槛①）。
+ * 而两边各自看代码都觉得自己对——所以这里把差异显式摆出来，
+ * 并且 e2e 用**手写期望串**把各支的差别钉死（§27.6 门槛①、§30.4 门槛①）。
  *
  * 键序与嵌套规则同 [com.ecshopx.kotlin.service.openapi.OpenapiSign]（PHP `ksort(..., SORT_STRING)`、
  * 列表下标按字符串序 `"0" < "1" < "10" < "2"`、数字用字面量文本）。
@@ -72,12 +74,28 @@ object SystemLinkSign {
     fun sign(params: Map<String, Any?>, token: String, mode: SystemLinkSignMode): String =
         md5Upper(md5Upper(assemble(params, mode)) + token)
 
-    fun md5Upper(s: String): String {
-        val d = MessageDigest.getInstance("MD5").digest(s.toByteArray(Charsets.UTF_8))
-        val hex = StringBuilder(32)
-        d.forEach { b -> hex.append("%02x".format(b.toInt() and 0xff)) }
-        return hex.toString().uppercase()
+    /**
+     * 第三支（jushuitan，批I）：`md5(method + partnerid + assemble(其余参数) + token)`。
+     *
+     * 与上面两支的差别不止公式：**单轮 md5、小写**，`method` 与 `partnerid` 从 `assemble`
+     * 里摘出来前置到串首（源系统 `gen_sign` 先 `unset` 这两个键再拼）；`assemble` 语义同
+     * [SystemLinkSignMode.OPENAPI]（null 保留成空串、false 空串）。token 是全局
+     * `config('jushuitan.app_secret')`（不分租户），`sign` 键不参与计算。
+     */
+    fun jushuitan(params: Map<String, Any?>, token: String): String {
+        val method = (params["method"] as? String)?.trim().orEmpty()
+        val partnerid = (params["partnerid"] as? String)?.trim().orEmpty()
+        val rest = params.filterKeys { it != "method" && it != "partnerid" && it != "sign" }
+        return md5Hex(method + partnerid + assemble(rest, SystemLinkSignMode.OPENAPI) + token)
     }
+
+    /** 单轮 md5 小写（jushuitan 这支的形态；上面两支是 md5 套 md5 再大写） */
+    fun md5Hex(s: String): String {
+        val d = MessageDigest.getInstance("MD5").digest(s.toByteArray(Charsets.UTF_8))
+        return d.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+
+    fun md5Upper(s: String): String = md5Hex(s).uppercase()
 }
 
 /**

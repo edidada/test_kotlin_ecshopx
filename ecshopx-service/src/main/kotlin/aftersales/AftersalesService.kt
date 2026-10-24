@@ -348,6 +348,102 @@ class AftersalesService(
         return view(load(bn, companyId, userId))
     }
 
+    // ===================== 商家确认收货 / 取消（ERP 回传驱动，批I） =====================
+
+    /**
+     * 商家确认收货（源系统 `AftersalesService::confirmReceipt`，由 ERP 回传驱动；批I 收）。
+     *
+     * 守卫照抄源系统：`aftersales_status ∈ {0,1}`（未结案）、`progress ∈ {1,2}`（已接受申请，
+     * 买家还没寄回也允许——ERP 侧的退货物流不经过本站，这是这条链存在的意义）。
+     * 落点：`progress=8`（待退款）、明细 `refunded_num=num`（源系统唯一"整笔入库"写入点）。
+     *
+     * 本仓比源系统多一步：进 8 时**同步生成 READY 退款单**（与 [review] 的 D11 落点同一不变式——
+     * "售后在待退款、退款列表里却什么都没有"是本站不允许出现的中间态）。源系统把退款单留到
+     * 后续 refundCheck 才建，这里把它提前到进入 8 的那一刻，口径记 docs/04 §30.3 C251。
+     */
+    fun confirmReceipt(bn: Long, companyId: Long, orderId: Long? = null): Map<String, Any?> {
+        val a = load(bn, companyId, null)
+        if (orderId != null && a.orderId != orderId) throw BizException(ErrorCode.BIZ, "未获取到售后单信息")
+        if (a.aftersalesStatus != AftersalesStatus.PENDING && a.aftersalesStatus != AftersalesStatus.PROCESSING) {
+            throw BizException(ErrorCode.BIZ, "售后$bn已处理")
+        }
+        if (a.progress != AftersalesProgress.WAIT_BUYER_RETURN && a.progress != AftersalesProgress.BUYER_RETURNED) {
+            throw BizException(ErrorCode.BIZ, "售后$bn商家没有接受申请")
+        }
+        val now = TimeSec.now()
+        val o = order(a.orderId)
+        db.transactional {
+            val p = AftersalesMapper.TransitParam().apply {
+                this.bn = bn
+                this.companyId = companyId
+                fromStatus = a.aftersalesStatus
+                fromProgress = a.progress
+                toStatus = AftersalesStatus.PROCESSING
+                toProgress = AftersalesProgress.SELLER_CONFIRMED
+                updated = now
+            }
+            requireHit(aftersales.transit(p), "售后单状态已变更，请刷新后重试")
+            val dHit = details.transit(
+                bn, a.aftersalesStatus, a.progress,
+                AftersalesStatus.PROCESSING, AftersalesProgress.SELLER_CONFIRMED, now,
+            )
+            if (dHit == 0) throw BizException(ErrorCode.INTERNAL, "售后明细状态与主表不一致，已回滚")
+            details.listByBn(bn).forEach { details.markReceived(it.detailId, it.num, now) }
+            orderItems.setAftersalesStatus(itemRow(a).id, ItemAftersalesStatus.WAIT_SELLER_CONFIRM_GOODS, now)
+            if (refunds.countReadyByAftersales(bn) == 0L) refundService.createReady(a, a.refundFee, a.refundPoint, now)
+            log(o.orderId, null, "seller", "aftersales_confirm_receipt", "售后 $bn 商家确认收货，推进到「待退款」")
+            true
+        }
+        return view(load(bn, companyId, null))
+    }
+
+    /**
+     * 商家取消确认收货（源系统 `AftersalesService::cancelReceipt`，批I 收）。
+     *
+     * 守卫：`aftersales_status=1` 且 `progress=8`；退回 1（待回寄）或 2（已回寄）——
+     * 判据是 `sendback_data` 有没有填过（源系统同一条判据），不按"当初从哪一格进来的"倒推。
+     * 进 8 时生成的 READY 退款单**同步作废**：售后回到待回寄、退款单还能点，是两条账对不上。
+     */
+    fun cancelReceipt(bn: Long, companyId: Long, orderId: Long? = null): Map<String, Any?> {
+        val a = load(bn, companyId, null)
+        if (orderId != null && a.orderId != orderId) throw BizException(ErrorCode.BIZ, "未获取到售后单信息")
+        if (a.aftersalesStatus != AftersalesStatus.PROCESSING) {
+            throw BizException(ErrorCode.BIZ, "售后$bn已处理或还未处理")
+        }
+        if (a.progress != AftersalesProgress.SELLER_CONFIRMED) {
+            throw BizException(ErrorCode.BIZ, "售后$bn商家没有确认收货")
+        }
+        val back = if (a.sendbackData.isNullOrBlank()) AftersalesProgress.WAIT_BUYER_RETURN else AftersalesProgress.BUYER_RETURNED
+        val now = TimeSec.now()
+        val o = order(a.orderId)
+        db.transactional {
+            val p = AftersalesMapper.TransitParam().apply {
+                this.bn = bn
+                this.companyId = companyId
+                fromStatus = a.aftersalesStatus
+                fromProgress = a.progress
+                toStatus = AftersalesStatus.PROCESSING
+                toProgress = back
+                updated = now
+            }
+            requireHit(aftersales.transit(p), "售后单状态已变更，请刷新后重试")
+            val dHit = details.transit(bn, a.aftersalesStatus, a.progress, AftersalesStatus.PROCESSING, back, now)
+            if (dHit == 0) throw BizException(ErrorCode.INTERNAL, "售后明细状态与主表不一致，已回滚")
+            refunds.listByAftersales(bn)
+                .filter { it.refundStatus == RefundStatus.READY }
+                .forEach { refundService.cancel(it.refundBn, companyId, "商家取消确认收货，退款单同步作废", now) }
+            val itemStatus = if (back == AftersalesProgress.BUYER_RETURNED) {
+                ItemAftersalesStatus.WAIT_SELLER_CONFIRM_GOODS
+            } else {
+                ItemAftersalesStatus.WAIT_BUYER_RETURN_GOODS
+            }
+            orderItems.setAftersalesStatus(itemRow(a).id, itemStatus, now)
+            log(o.orderId, null, "seller", "aftersales_cancel_receipt", "售后 $bn 商家取消确认收货，退回「${AftersalesDict.progressMsg(back)}」")
+            true
+        }
+        return view(load(bn, companyId, null))
+    }
+
     // ===================== AF-F5 撤销 =====================
 
     /** 买家撤销申请：只有还没进入退款的单能撤（待处理 / 待回寄 / 已回寄未确认）。 */

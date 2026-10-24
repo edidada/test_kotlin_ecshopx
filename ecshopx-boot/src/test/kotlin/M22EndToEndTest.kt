@@ -32,9 +32,9 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put
 
 /**
- * M2-2 对接族 e2e（docs/04 §27.6 门槛①..⑥，docs/05 §M2-2）。
+ * M2-2 对接族 e2e（docs/04 §27.6 门槛①..⑥ + §30.4 门槛⑦，docs/05 §M2-2/批I）。
  *
- * 六道门槛在这一份里一次钉死，全部离线（H2 + mock profile，不连任何外网）：
+ * 七道门槛在这一份里一次钉死，全部离线（H2 + mock profile，不连任何外网）：
  *
  *  - **门槛①（两支签名）**：SystemLink 的 `assemble` **逐串**对上手写期望
  *    （含 `null`/布尔差异与 PHP `SORT_STRING` 的 "10" < "2" 字节序），同一参数两支签**必须不同**；
@@ -48,7 +48,11 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put
  *    未绑定租户 422 且**不落行**→A9 PNG 字节头与 link JSON→G2 验签（ticket 进 [WxComponentState]、
  *    authorized/unauthorized 翻 `wx_app.status`）；
  *  - **门槛⑥（PAY 三渠道）**：pay() 只出参数包 `settled=false`→回调验签通过才结清（订单 PAYED）、
- *    错签 `FAIL` 不动账、`refund()` 回 `pendingCallback`。
+ *    错签 `FAIL` 不动账、`refund()` 回 `pendingCallback`；
+ *  - **门槛⑦（jushuitan 第三条链，批I）**：第三支签（单轮小写 md5、method/partnerid 前置）手写期望串对一遍；
+ *    错签走中间件第三副信封 `{code:0,msg}`；`logistics.upload` 拆单发货 + 重复发货 fail；
+ *    `inventory.upload` 实物库存减在途占用、进行中秒杀商品跳过；`refund.goods` 确认收货→progress 8
+ *    + `refunded_num` + READY 退款单，取消收货→退回 1 且退款单作废。
  *
  * key 点：`ecx.pay.active-channel-profile=mock,adapay,bspay,hfpay`——三家聚合渠道按 pay_type
  * 隔离注册，mock 与它们不抢同一个键；`ecx.wx.component-token` 与门槛⑤验签用的 token 是同一把。
@@ -62,6 +66,7 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put
         "ecx.schedule.webhook-deliver-ms=3600000",
         "ecx.pay.active-channel-profile=mock,adapay,bspay,hfpay",
         "ecx.wx.component-token=wxcomp_token_22",
+        "ecx.jushuitan.app-secret=jy_secret_22",
     ],
 )
 @AutoConfigureMockMvc
@@ -576,6 +581,149 @@ class M22EndToEndTest {
         assertFalse(out.settled, "退款不当场结清")
         assertTrue(out.pendingCallback, "三家退款回执等回调推进")
     }
+
+    // ================= 门槛⑦（批I：jushuitan 第三支签 + 三条 method + 第三副信封） =================
+
+    @Test @Order(8) fun `门槛七 jushuitan 第三签 三条method 第三信封`() {
+        // ① 第三支签：单轮小写 md5、method/partnerid 前置到串首、其余键 ksort 拼接（手写期望串对一遍）
+        val signSample = linkedMapOf<String, Any?>(
+            "method" to "logistics.upload", "partnerid" to "p1", "b" to "2", "a" to "1",
+        )
+        val expect = java.security.MessageDigest.getInstance("MD5")
+            .digest("logistics.uploadp1a1b2jy_secret_22".toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        assertEquals(expect, SystemLinkSign.jushuitan(signSample, "jy_secret_22"), "第三支：单轮小写 md5 + method/partnerid 前置")
+        assertNotEquals(
+            SystemLinkSign.sign(signSample, "jy_secret_22", SystemLinkSignMode.OPENAPI),
+            SystemLinkSign.jushuitan(signSample, "jy_secret_22"),
+            "同一份参数、同一把 token：第三支与前两支不同形",
+        )
+
+        // ② 错签：第三副信封（数字 0 + msg），与动作层 `{code:"0",err_msg}` 不是同一个形状
+        val bad = call("POST", jyUrl("logistics.upload").replace("sign=", "sign=bad"), null, emptyMap())
+        assertEquals(200, bad.response.status)
+        assertEquals(0, bodyOf(bad).path("code").asInt(), "中间件错签：code 是数字 0")
+        assertTrue(bodyOf(bad).path("code").isNumber, "中间件信封 code 是**数字**")
+        assertEquals("sign error", bodyOf(bad).path("msg").asText())
+
+        // ③ logistics.upload：mock 结清一张真单，再回传发货（items[].outer_oi_id = 订单行 id）
+        val create = createOrder(payType = "wxpay")
+        val orderId = create.path("order_id").asLong()
+        val tradeId = create.path("trade_id").asText()
+        assertTrue(
+            utf8(
+                mvc.perform(
+                    post("/api/notify/wxpay").contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                        .param("out_trade_no", tradeId).param("total_fee", create.path("total_fee").asText())
+                        .param("transaction_id", "WX22-$tradeId").param("trade_state", "SUCCESS"),
+                ).andReturn().response.contentAsByteArray,
+            ).contains("SUCCESS"),
+            "mock 回调结清",
+        )
+        val itemRowId = jdbc.queryForObject(
+            "SELECT MIN(id) FROM orders_normal_orders_items WHERE order_id = ?", Long::class.java, orderId,
+        )!!
+        val shipBody = mapOf(
+            "so_id" to orderId.toString(), "l_id" to "SF22-1", "lc_id" to "SF",
+            "items" to listOf(mapOf("outer_oi_id" to itemRowId.toString(), "qty" to 1)),
+        )
+        val shipped = bodyOf(call("POST", jyUrl("logistics.upload"), null, shipBody))
+        assertEquals("0", shipped.path("code").asText(), "成功码是字符串 0")
+        assertTrue(shipped.path("code").isTextual, "动作层信封 code 是**字符串**（与中间件不同形）")
+        assertEquals("发货成功", shipped.path("err_msg").asText())
+        assertEquals("DONE", orderCol(orderId.toString(), "delivery_status"), "拆单发货落到订单")
+        assertEquals("SF22-1", orderCol(orderId.toString(), "delivery_code"))
+        val again = bodyOf(call("POST", jyUrl("logistics.upload"), null, shipBody))
+        assertEquals("-1", again.path("code").asText())
+        assertEquals("订单已发货，请勿重复发货", again.path("err_msg").asText())
+        assertEquals("接口不存在", bodyOf(call("POST", jyUrl("nope.method"), null, emptyMap())).path("err_msg").asText())
+
+        // ④ inventory.upload：实物库存减"未付未超时"占用；进行中的秒杀商品跳过（活动池自己管）
+        val bn3 = jdbc.queryForObject("SELECT item_bn FROM items WHERE item_id = 3 AND company_id = 1", String::class.java)!!
+        createOrder() // ORDER-2：只建单不付 → 占住 1 件（未付占用）
+        // 在途占用 = 未付未超时 + 已付未发货（本仓下单即扣，C252）；用同一条判据算期望值
+        val holds = jdbc.queryForObject(
+            "SELECT COALESCE(SUM(i.num), 0) FROM orders_normal_orders_items i " +
+                "JOIN orders_normal_orders o ON o.order_id = i.order_id " +
+                "WHERE o.company_id = 1 AND i.item_id = 3 AND (" +
+                "(o.order_status = 'NOTPAY' AND o.auto_cancel_time > ?) " +
+                "OR (o.pay_status IN ('PAYED', 'REFUND_PART') AND i.delivery_status != 'DONE' " +
+                "AND o.order_status != 'CANCEL'))",
+            Long::class.java, now(),
+        )!!
+        val storeBody = mapOf("datas" to listOf(mapOf("shop_sku_id" to bn3, "qty" to 10)))
+        assertEquals("操作成功", bodyOf(call("POST", jyUrl("inventory.upload"), null, storeBody)).path("err_msg").asText())
+        assertEquals(10L - holds, itemStore(3), "实物库存 10 减在途占用（未付 + 已付未发）")
+        val t = now()
+        jdbc.update(
+            "INSERT INTO promotions_seckill_activity(seckill_id, company_id, activity_name, activity_start_time, " +
+                "activity_end_time, disabled, created, updated) VALUES(?, 1, 'jy22', ?, ?, FALSE, ?, ?)",
+            9924001L, t - 60, t + 3600, t, t,
+        )
+        jdbc.update(
+            "INSERT INTO promotions_seckill_rel_goods(seckill_id, item_id, activity_price, activity_store, " +
+                "sales_store, is_show, disabled) VALUES(9924001, 3, 100, 10, 0, TRUE, FALSE)",
+        )
+        val before = itemStore(3)
+        bodyOf(call("POST", jyUrl("inventory.upload"), null, mapOf("datas" to listOf(mapOf("shop_sku_id" to bn3, "qty" to 20)))))
+        assertEquals(before, itemStore(3), "进行中的活动商品跳过库存回写")
+        jdbc.update("DELETE FROM promotions_seckill_rel_goods WHERE seckill_id = 9924001")
+        jdbc.update("DELETE FROM promotions_seckill_activity WHERE seckill_id = 9924001")
+
+        // ⑤ refund.goods：确认收货 → progress 8 + 明细入库 + READY 退款单；取消收货 → 退回 1 且退款单作废
+        val asBn = 9924002L
+        jdbc.update(
+            "INSERT INTO aftersales(aftersales_bn, order_id, company_id, user_id, item_id, item_bn, num, " +
+                "aftersales_type, aftersales_status, progress, refund_fee, refund_point, created, updated) " +
+                "VALUES(?, ?, 1, 1, 3, ?, 1, 'REFUND_GOODS', 1, 1, 100, 0, ?, ?)",
+            asBn, orderId, bn3, now(), now(),
+        )
+        jdbc.update(
+            "INSERT INTO aftersales_detail(aftersales_bn, order_id, item_id, num, refunded_num, refund_fee, " +
+                "aftersales_type, aftersales_status, progress, created, updated) " +
+                "VALUES(?, ?, 3, 1, 0, 100, 'REFUND_GOODS', 1, 1, ?, ?)",
+            asBn, orderId.toString(), now(), now(),
+        )
+        val confirm = bodyOf(call("POST", jyUrl("refund.goods"), null, mapOf(
+            "outer_as_id" to asBn.toString(), "so_id" to orderId.toString(), "action_name" to "确认收货",
+        )))
+        assertEquals("0", confirm.path("code").asText(), confirm.toString())
+        assertEquals("操作成功", confirm.path("err_msg").asText())
+        assertEquals(8, jdbc.queryForObject("SELECT progress FROM aftersales WHERE aftersales_bn = ?", Int::class.java, asBn))
+        assertEquals(1, jdbc.queryForObject("SELECT refunded_num FROM aftersales_detail WHERE aftersales_bn = ?", Int::class.java, asBn))
+        assertEquals("READY", jdbc.queryForObject("SELECT refund_status FROM aftersales_refund WHERE aftersales_bn = ?", String::class.java, asBn),
+            "进 8 必须有 READY 退款单（本仓不变式，C251）")
+        val cancel = bodyOf(call("POST", jyUrl("refund.goods"), null, mapOf(
+            "outer_as_id" to asBn.toString(), "so_id" to orderId.toString(), "action_name" to "取消收货",
+        )))
+        assertEquals("0", cancel.path("code").asText())
+        assertEquals(1, jdbc.queryForObject("SELECT progress FROM aftersales WHERE aftersales_bn = ?", Int::class.java, asBn),
+            "没填过回寄数据：退回 1（待回寄）")
+        assertEquals("CANCEL", jdbc.queryForObject("SELECT refund_status FROM aftersales_refund WHERE aftersales_bn = ?", String::class.java, asBn),
+            "退款单同步作废")
+        // 未知动作 / 缺单号：动作层第三副信封的 fail 形
+        assertEquals("操作类型错误！", bodyOf(call("POST", jyUrl("refund.goods"), null, mapOf(
+            "outer_as_id" to asBn.toString(), "so_id" to orderId.toString(), "action_name" to "乱写",
+        ))).path("err_msg").asText())
+        assertEquals("售后单号缺少！", bodyOf(call("POST", jyUrl("refund.goods"), null, mapOf(
+            "so_id" to orderId.toString(), "action_name" to "确认收货",
+        ))).path("err_msg").asText())
+        jdbc.update("DELETE FROM aftersales_refund WHERE aftersales_bn = ?", asBn)
+        jdbc.update("DELETE FROM aftersales_detail WHERE aftersales_bn = ?", asBn)
+        jdbc.update("DELETE FROM aftersales WHERE aftersales_bn = ?", asBn)
+    }
+
+    /** jushuitan 调用的 URL：sign **只覆盖 query**（源 `$request->query()`），业务载荷走 body */
+    private fun jyUrl(method: String): String {
+        val q = linkedMapOf<String, Any?>("method" to method, "partnerid" to "p1")
+        q["sign"] = SystemLinkSign.jushuitan(q, "jy_secret_22")
+        return "/api/systemlink/jushuitan/1?" + q.entries.joinToString("&") { (k, v) ->
+            "$k=" + java.net.URLEncoder.encode(v.toString(), "UTF-8")
+        }
+    }
+
+    private fun itemStore(itemId: Long): Long =
+        jdbc.queryForObject("SELECT store FROM items WHERE item_id = ? AND company_id = 1", Long::class.java, itemId)!!
 
     private fun notifyBody(merchantNo: String, amount: String, status: String, tradeId: String, key: String): Map<String, Any?> {
         val params = linkedMapOf<String, Any?>(

@@ -114,6 +114,10 @@ ecx:
     # 测试里不靠这两个值跑投递（定时作业在测试里的行为就是"永远不跑"），由 e2e 直接调投递函数
     webhook-deliver-initial-delay-ms: 60000
     webhook-deliver-ms: 30000
+  jushuitan:
+    # 批I：聚水潭 ERP 入站验签密钥（源系统 `config('jushuitan.app_secret')`，**全局一把、不分租户**）。
+    # 空 = 一律答 sign error（不是"不校验"）：没配密钥的入站口等于匿名口。
+    app-secret: ${ECX_JUSHUITAN_APP_SECRET:}
   wx:
     # M2-2 §27.5。mock（缺省）不出网、不出网也不落库豁免（门槛⑤），real 走微信开放平台。
     profile: ${ECX_WX_PROFILE:mock}

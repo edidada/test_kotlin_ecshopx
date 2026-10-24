@@ -425,6 +425,32 @@ interface OrderItemsMapper {
         "<foreach item=\"i\" collection=\"ids\" open=\"(\" separator=\",\" close=\")\">#{i}</foreach> ORDER BY order_id, id</script>")
     fun listByOrders(@Param("ids") ids: List<Long>): List<OrderItemDO>
 
+    /**
+     * ERP 回写库存时的"在途占用"（批I jushuitan `inventory.upload`）。
+     *
+     * 源系统的 `store` 列是"实物库存 − 已付未发"、`未付未超时` 在写入时现场扣；
+     * 本仓的 `store` **下单即扣**（[ItemsMapper.deductStock]，取消回补），所以在途占用是两截之和：
+     *  1. 未支付、且还没到自动关单时刻的订单（源系统 `frozen`，`NOTPAY` + `auto_cancel_time`）；
+     *  2. **已付款但还没发货**的订单——这一截在源系统已经扣在 `store` 里了，本仓没有，
+     *     回写时漏掉它，已付待发的货就会被再卖一次。
+     *
+     * 取消单不计（关单时 [ItemsMapper.restoreStock] 已回补）；已发货不计（货已离仓，
+     * ERP 的实物库存本身也不含它）。口径记 docs/04 §30.3 C252。
+     */
+    @Select(
+        "SELECT COALESCE(SUM(i.num), 0) FROM orders_normal_orders_items i " +
+            "JOIN orders_normal_orders o ON o.order_id = i.order_id " +
+            "WHERE o.company_id = #{companyId} AND i.item_id = #{itemId} AND (" +
+            "(o.order_status = 'NOTPAY' AND o.auto_cancel_time > #{now}) " +
+            "OR (o.pay_status IN ('PAYED', 'REFUND_PART') AND i.delivery_status != 'DONE' " +
+            "AND o.order_status != 'CANCEL'))",
+    )
+    fun heldNum(
+        @Param("companyId") companyId: Long,
+        @Param("itemId") itemId: Long,
+        @Param("now") now: Long,
+    ): Long
+
     /** 发货时按明细推进度 */
     @Update("UPDATE orders_normal_orders_items SET delivery_status = #{deliveryStatus}, delivery_time = #{deliveryTime}, " +
         "delivery_item_num = #{deliveryItemNum}, updated = #{updated} WHERE id = #{id}")

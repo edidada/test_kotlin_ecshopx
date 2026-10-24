@@ -10,6 +10,9 @@ import com.ecshopx.kotlin.dao.goods.ItemsMapper
 import com.ecshopx.kotlin.dao.order.OrderItemsMapper
 import com.ecshopx.kotlin.dao.order.OrdersMapper
 import com.ecshopx.kotlin.dao.paging.PageHelper
+import com.ecshopx.kotlin.dao.promotion.GroupsActivityMapper
+import com.ecshopx.kotlin.dao.promotion.SeckillActivityMapper
+import com.ecshopx.kotlin.dao.promotion.SeckillGoodsMapper
 import com.ecshopx.kotlin.dao.systemlink.CompanyLicenseDO
 import com.ecshopx.kotlin.dao.systemlink.CompanyLicenseMapper
 import com.ecshopx.kotlin.dao.systemlink.OmsQueueLogDO
@@ -18,10 +21,12 @@ import com.ecshopx.kotlin.dao.systemlink.SiteCompanyDO
 import com.ecshopx.kotlin.dao.systemlink.SiteTenantMapper
 import com.ecshopx.kotlin.dao.systemlink.SystemLinkSettingDO
 import com.ecshopx.kotlin.dao.systemlink.SystemLinkSettingMapper
+import com.ecshopx.kotlin.service.aftersales.AftersalesService
 import com.ecshopx.kotlin.service.order.OrderDeliveryForm
 import com.ecshopx.kotlin.service.order.OrderFlowService
 import com.ecshopx.kotlin.service.seq.SeqGenerator
 import com.ecshopx.kotlin.service.tx.Db
+import com.fasterxml.jackson.databind.JsonNode
 import com.fasterxml.jackson.databind.ObjectMapper
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Service
@@ -127,11 +132,16 @@ class SystemLinkInboundService(
     private val orderItems: OrderItemsMapper,
     private val flow: OrderFlowService,
     private val items: ItemsMapper,
+    private val groups: GroupsActivityMapper,
+    private val seckill: SeckillActivityMapper,
+    private val seckillGoods: SeckillGoodsMapper,
+    private val aftersales: AftersalesService,
     private val seq: SeqGenerator,
     private val db: Db,
     private val mapper: ObjectMapper,
     @Value("\${ecx.systemlink.enabled:true}") private val enabled: Boolean,
     @Value("\${ecx.systemlink.require-ip-whitelist:false}") private val requireWhitelist: Boolean,
+    @Value("\${ecx.jushuitan.app-secret:}") private val jushuitanSecret: String,
 ) {
 
     // ===================== 入口 =====================
@@ -200,6 +210,39 @@ class SystemLinkInboundService(
         )
         queueLogs.finish(reqLog.id, null, if (r.ok) "success" else "fail", 0, TimeSec.now())
         return envelope
+    }
+
+    /**
+     * SL-J：jushuitan 入站（批I，源 `routes/systemlink/jushuitan.php` + `JushuitanCheck`）。
+     *
+     * 与上面两条链的三处**形态差异**（照抄，不统一）：
+     *  1. **租户是路径声明的**（`/jushuitan/{companyId}`），不是签名反推的；token 是全局一把
+     *     `jushuitan.app_secret`（源 `config('jushuitan.app_secret')`，不分租户）——拿到这把 token
+     *     的对端可以指定任意 companyId，这是源系统的设计，风险与边界记 docs/04 §30.3 C250；
+     *  2. **签名只覆盖 query**（源 `$request->query()`），业务载荷读 body（源 `$request->post()`）；
+     *     这里 dispatch 用 query ∪ body（同名 body 优先），验签严格只对 query——两种发送形状都能跑；
+     *  3. **应答是第三副信封** `{code:"0"|"-1", err_msg}`；验签失败是 `{code:0, msg:"sign error"}`
+     *     （源中间件 `response()->json` 的形状，与动作层不是同一个）。
+     *
+     * 三条 method 是源系统常量表的全部（`logistics.upload` / `inventory.upload` / `refund.goods`）。
+     * oauth 回调（`/jushuitan/oauth/callback`）**不在本批**：它要拿 code 去换 access_token（出站），
+     * 而本仓没有聚水潭出站客户端，换来的 token 无处消费——记 docs/04 §30.5 遗留，不做一个空转的回调。
+     */
+    fun jushuitan(companyId: Long, query: Map<String, Any?>, body: Map<String, Any?>): Map<String, Any?> {
+        if (!enabled) return jushuitanFail("对接未开启")
+        val given = (query["sign"] as? String)?.trim().orEmpty()
+        // 没配密钥 = 这条链没开：一律 sign error，不区分"没配"与"签不对"（与另两条链同一口径）
+        if (given.isEmpty() || jushuitanSecret.isBlank()) return jushuitanSignError()
+        if (SystemLinkSign.jushuitan(query, jushuitanSecret) != given) return jushuitanSignError()
+        val p = LinkedHashMap<String, Any?>()
+        query.forEach { (k, v) -> p[k] = v }
+        body.forEach { (k, v) -> p[k] = v }
+        return when ((p["method"] as? String)?.trim()) {
+            "logistics.upload" -> jushuitanDelivery(companyId, p)
+            "inventory.upload" -> jushuitanItemStore(companyId, p)
+            "refund.goods" -> jushuitanAftersales(companyId, p)
+            else -> jushuitanFail("接口不存在")
+        }
     }
 
     /**
@@ -455,6 +498,141 @@ class SystemLinkInboundService(
             )
         }
     }
+
+    // ===================== SL-J1..J3 jushuitan（批I） =====================
+
+    /**
+     * SL-J1：ERP 回传发货（`logistics.upload`）→ 委托 [OrderFlowService.ship]。
+     *
+     * `items[]` 的 `outer_oi_id` 是**订单行 id**（源系统按 `items.id` 对），`qty` 是本次发几件；
+     * 只有 `delivery_status=PENDING` 且被点名的行才进拆单发货，一件都点不中 = "发货商品有误"。
+     *
+     * 与源系统一处**有意的差异**（C251）：源 `doOrderDelivery` 把内部异常吞掉后仍答"发货成功"；
+     * 这里把 `ship` 的业务异常翻成 fail——让 ERP 知道没发出去、下一轮还会重试，
+     * 而不是让它以为已经发过、从此不再回传。
+     */
+    private fun jushuitanDelivery(companyId: Long, p: Map<String, Any?>): Map<String, Any?> {
+        val soId = str(p, "so_id") ?: return jushuitanFail("订单号缺少！")
+        val code = str(p, "l_id") ?: return jushuitanFail("缺少物流单号")
+        val corp = str(p, "lc_id") ?: return jushuitanFail("缺少物流公司编码")
+        val items = jushuitanItems(p["items"]) ?: return jushuitanFail("缺少发货商品")
+        val id = soId.toLongOrNull() ?: return jushuitanFail("此订单不存在")
+        val o = orders.findById(id)?.takeIf { it.companyId == companyId }
+            ?: return jushuitanFail("此订单不存在")
+        if (o.deliveryStatus == "DONE") return jushuitanFail("订单已发货，请勿重复发货")
+        val qtyByOid = items.toMap()
+        val parts = orderItems.listByOrder(o.orderId)
+            .filter { it.deliveryStatus == "PENDING" && qtyByOid.containsKey(it.id) }
+            .map {
+                com.ecshopx.kotlin.service.order.DeliveryItemForm(orderItemsId = it.id, num = qtyByOid[it.id])
+            }
+        if (parts.isEmpty()) return jushuitanFail("发货商品有误")
+        return try {
+            flow.ship(
+                o.orderId,
+                OrderDeliveryForm(orderId = o.orderId, deliveryCorp = corp, deliveryCode = code, items = parts),
+                operatorId = null,
+                operator = "systemlink:jushuitan",
+            )
+            jushuitanOk("发货成功")
+        } catch (e: BizException) {
+            jushuitanFail(e.message ?: "发货失败")
+        }
+    }
+
+    /**
+     * SL-J2：ERP 回写库存（`inventory.upload`）。
+     *
+     * 照抄源系统两条判据：①`shop_sku_id` 是商品 bn、`qty` 是**实物库存**；
+     * ②进行中的拼团/秒杀商品**跳过**——活动库存归活动池管，回写会把它踩掉。
+     * 第三条是与源系统公式的**等价改写**（C252）：源系统扣"未付占用"，本仓另有"已付未发"一截
+     * 也占着可用库存（下单即扣），所以减的是[OrderItemsMapper.heldNum]（两截之和）。
+     * 不认识的 bn 静默跳过（源系统只打日志），应答恒为"操作成功"。
+     */
+    private fun jushuitanItemStore(companyId: Long, p: Map<String, Any?>): Map<String, Any?> {
+        if (p["datas"] == null) return jushuitanFail("缺少数据")
+        val datas = jushuitanDatas(p["datas"]) ?: return jushuitanFail("数据有误")
+        val now = TimeSec.now()
+        val promoIds = activePromoItemIds(companyId, now)
+        datas.forEach { (bn, qty) ->
+            if (bn.isEmpty() || qty < 0) return@forEach
+            val it = items.findByBn(companyId, bn) ?: return@forEach
+            if (it.itemId in promoIds) return@forEach
+            items.setStore(it.itemId, qty - orderItems.heldNum(companyId, it.itemId, now), now)
+        }
+        return jushuitanOk("操作成功")
+    }
+
+    /** SL-J3：ERP 回传售后状态（`refund.goods`）——"确认收货"/"取消收货"两支，落点在售后状态机 */
+    private fun jushuitanAftersales(companyId: Long, p: Map<String, Any?>): Map<String, Any?> {
+        val asId = str(p, "outer_as_id") ?: return jushuitanFail("售后单号缺少！")
+        val soId = str(p, "so_id") ?: return jushuitanFail("订单号缺少！")
+        val action = str(p, "action_name") ?: return jushuitanFail("操作类型缺少！")
+        val bn = asId.toLongOrNull() ?: return jushuitanFail("未获取到售后单信息")
+        val orderId = soId.toLongOrNull() ?: return jushuitanFail("未获取到售后单信息")
+        return try {
+            when (action) {
+                "确认收货" -> aftersales.confirmReceipt(bn, companyId, orderId)
+                "取消收货" -> aftersales.cancelReceipt(bn, companyId, orderId)
+                else -> return jushuitanFail("操作类型错误！")
+            }
+            jushuitanOk("操作成功")
+        } catch (e: BizException) {
+            jushuitanFail(e.message ?: "操作失败")
+        }
+    }
+
+    /** 进行中的活动商品 id（拼团 `goods_id` + 秒杀 rel_goods `item_id`），源 `CheckPromotionsValid::getActivityItems` */
+    private fun activePromoItemIds(companyId: Long, now: Long): Set<Long> {
+        val ids = HashSet<Long>()
+        groups.listRunning(companyId, now).forEach { ids += it.goodsId }
+        seckill.listRunning(companyId, now).forEach { a ->
+            seckillGoods.listBySeckill(a.seckillId).forEach { ids += it.itemId }
+        }
+        return ids
+    }
+
+    /**
+     * `items[]` 解析：`[{outer_oi_id, qty}]`（JSON 数组，或 form 表单里塞的 JSON 串）。
+     * 返回 `null` = 没给/不是数组/点名的行 id 不合法（源系统 `required` 校验要拒）。
+     * `qty` 缺省/非正 = `null`（交给 `ship` 按整行发，与 SL-M6 的 `oid_list` 同一形状）。
+     */
+    private fun jushuitanItems(v: Any?): List<Pair<Long, Long?>>? {
+        val node = jushuitanNode(v) ?: return null
+        if (!node.isArray || node.isEmpty) return null
+        val out = ArrayList<Pair<Long, Long?>>()
+        node.forEach { n ->
+            val oid = n.path("outer_oi_id").asText("").trim().toLongOrNull() ?: return null
+            out += oid to n.path("qty").asLong(0).takeIf { it > 0 }
+        }
+        return out
+    }
+
+    /** `datas[]` 解析：`[{shop_sku_id, qty}]`；`qty` 缺失记 -1（源系统遇到 `!isset(quantity)` 直接跳过） */
+    private fun jushuitanDatas(v: Any?): List<Pair<String, Long>>? {
+        val node = jushuitanNode(v) ?: return null
+        if (!node.isArray || node.isEmpty) return null
+        val out = ArrayList<Pair<String, Long>>()
+        node.forEach { n ->
+            val bn = n.path("shop_sku_id").asText("").trim()
+            val qty = if (n.has("qty") && !n.path("qty").isNull) n.path("qty").asLong() else -1L
+            out += bn to qty
+        }
+        return out
+    }
+
+    private fun jushuitanNode(v: Any?): JsonNode? = when (v) {
+        null -> null
+        is String -> runCatching { mapper.readTree(v) }.getOrNull()
+        else -> mapper.valueToTree<JsonNode>(v)
+    }
+
+    private fun jushuitanOk(msg: String): Map<String, Any?> = linkedMapOf("code" to "0", "err_msg" to msg)
+
+    private fun jushuitanFail(msg: String): Map<String, Any?> = linkedMapOf("code" to "-1", "err_msg" to msg)
+
+    /** 源中间件 `response()->json(['code' => 0, 'msg' => 'sign error'])`：**数字** 0 + `msg`，与动作层不同形 */
+    private fun jushuitanSignError(): Map<String, Any?> = linkedMapOf("code" to 0, "msg" to "sign error")
 
     // ===================== 后台面 SL-A3/A4 =====================
 
