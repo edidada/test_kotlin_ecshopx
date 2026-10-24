@@ -266,16 +266,16 @@ class M24EndToEndTest {
     @Test @Order(6) fun `门槛五 启动件把自增序列校正到 MAX+1`() {
         // 现场模拟踩坑⑤：历史运行把 id 写到了 250（超过 seed 的 RESTART 常量 100），
         // 若没有启动校正，下一次重启会把序列拨回 100 → 新增撞号
-        val maxBefore = jdbc.queryForObject("SELECT MAX(id) FROM items_barcode", Number::class.java).toLong()
+        val maxBefore = jdbc.queryForObject("SELECT MAX(id) FROM items_barcode", Number::class.java)!!.toLong()
         jdbc.update("UPDATE items_barcode SET id = ? WHERE id = ?", 250L, maxBefore)
-        assertEquals(250L, jdbc.queryForObject("SELECT MAX(id) FROM items_barcode", Number::class.java).toLong())
+        assertEquals(250L, jdbc.queryForObject("SELECT MAX(id) FROM items_barcode", Number::class.java)!!.toLong())
 
         // realign() 与启动时框架调的是同一条（e2e 模拟"下一次重启"）
         realign.realign()
         jdbc.update(
             "INSERT INTO items_barcode(item_id, barcode, company_id) VALUES(3, 'BC-ALIGN-24', 1)",
         )
-        assertEquals(251L, jdbc.queryForObject("SELECT MAX(id) FROM items_barcode", Number::class.java).toLong(),
+        assertEquals(251L, jdbc.queryForObject("SELECT MAX(id) FROM items_barcode", Number::class.java)!!.toLong(),
             "校正后下一发默认主键 = 250+1")
         // 清场：realign 是幂等的，剩下的行不碍后来者
         jdbc.update("DELETE FROM items_barcode WHERE barcode = 'BC-ALIGN-24'")
