@@ -44,6 +44,7 @@ class StatementDO : Stampable {
     var startTime: Long = 0
     var endTime: Long = 0
     var statementStatus: String = "ready"
+    var receiptNo: String? = null
     override var created: Long = 0
     override var updated: Long = 0
 }
@@ -120,7 +121,7 @@ interface StatementPeriodSettingMapper {
 private const val ST_COLS =
     "id, statement_no, company_id, merchant_id, supplier_id, distributor_id, merchant_type, " +
         "order_num, total_fee, freight_fee, rebate_fee, refund_fee, statement_fee, commission_fee, " +
-        "start_time, end_time, statement_status, created, updated"
+        "start_time, end_time, statement_status, receipt_no, created, updated"
 
 @Mapper
 interface StatementsMapper {
@@ -174,10 +175,10 @@ interface StatementsMapper {
     @Insert(
         "INSERT INTO statements(statement_no, company_id, merchant_id, supplier_id, distributor_id, merchant_type, " +
             "order_num, total_fee, freight_fee, rebate_fee, refund_fee, statement_fee, commission_fee, " +
-            "start_time, end_time, statement_status, created, updated) " +
+            "start_time, end_time, statement_status, receipt_no, created, updated) " +
             "VALUES(#{statementNo}, #{companyId}, #{merchantId}, #{supplierId}, #{distributorId}, #{merchantType}, " +
             "#{orderNum}, #{totalFee}, #{freightFee}, #{rebateFee}, #{refundFee}, #{statementFee}, #{commissionFee}, " +
-            "#{startTime}, #{endTime}, #{statementStatus}, #{created}, #{updated})",
+            "#{startTime}, #{endTime}, #{statementStatus}, #{receiptNo}, #{created}, #{updated})",
     )
     @Options(useGeneratedKeys = true, keyProperty = "id", keyColumn = "id")
     fun insert(s: StatementDO): Int
@@ -192,6 +193,21 @@ interface StatementsMapper {
         @Param("companyId") companyId: Long,
         @Param("from") from: String,
         @Param("to") to: String,
+        @Param("now") now: Long,
+    ): Int
+
+    /**
+     * ST-A4 打款登记（批G）：confirmed→paid **连同回单号一起写**——账上"已付"的凭据就是这一列，
+     * CAS 前态判 confirmed：ready 越级、已被别人登记的都不命中。
+     */
+    @Update(
+        "UPDATE statements SET statement_status = 'paid', receipt_no = #{receiptNo}, updated = #{now} " +
+            "WHERE id = #{id} AND company_id = #{companyId} AND statement_status = 'confirmed'",
+    )
+    fun casPaid(
+        @Param("id") id: Long,
+        @Param("companyId") companyId: Long,
+        @Param("receiptNo") receiptNo: String,
         @Param("now") now: Long,
     ): Int
 }

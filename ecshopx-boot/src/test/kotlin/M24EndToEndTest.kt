@@ -1,5 +1,7 @@
 package com.ecshopx.kotlin.boot
 
+import com.ecshopx.kotlin.boot.contract.WebhookContract
+import com.ecshopx.kotlin.boot.web.IdentityRealignRunner
 import com.ecshopx.kotlin.service.distribution.StatementService
 import com.ecshopx.kotlin.service.openapi.OpenapiSign
 import com.ecshopx.kotlin.service.openapi.OpenapiStatsFlushJob
@@ -26,7 +28,7 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put
 
 /**
- * M2-4 生产化 e2e（docs/04 §29.6 门槛①..④，独立 H2 `exccm24`）。
+ * M2-4 生产化 e2e（docs/04 §29.6 门槛①..⑤，独立 H2 `exccm24`）。
  *
  *  1. **渠道配置面**：开户（api_key 空串=不改）、台账掩码、开关、viewer 写 403；
  *     落库即 AES-GCM 密文（`enc-v1:` 前缀），服务层读出来的必须是**明文**（签名的判据层读原值）。
@@ -35,7 +37,9 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put
  *  3. **调用量聚合（D76 收口）**：网关三连（两成功一失败）→ 倾倒任务一次 →
  *     `openapi_call_stats(company, today)` 行 `calls=3/success=2/fails=1`；**再倾倒一次 0 差量**（并过的基线不重并）。
  *     OP-A6 概况的 aggregate 三位与表行一致（一个数两个局面：进程内读数 ≠ 表上的账，note 里说清）。
- *  4. **静态资源与其他面不回归**：`/storage` 上传后立即可访问不再重测（M21 已钉），生产化只加面不改旧面。
+ *  4. **积压告警读面（批G WH-B0）**：空库四档桶全零行、`oldest_created` 显式 null、viewer 403。
+ *  5. **启动序列校正（批G，修 M2-1 踩坑⑤）**：显式插 id=250 → `realign()`（与启动调的是同一条）→
+ *     下一发默认主键 = 251。
  *
  * 不测嘴上的"压测 50 TPS"：并发护住的断言在 M0 的 OrderStockConcurrencyTest，生产化的压测脚本
  * 属于部署侧联调（docs/05 §M2-4 完成记录里写明出处），e2e 不重复背着它跑。
@@ -66,6 +70,7 @@ class M24EndToEndTest {
     @Autowired lateinit var payConfigs: PayChannelConfigService
     @Autowired lateinit var statementService: StatementService
     @Autowired lateinit var statsFlush: OpenapiStatsFlushJob
+    @Autowired lateinit var realign: IdentityRealignRunner
 
     private var tok = ""
     private var admin = ""
@@ -171,12 +176,32 @@ class M24EndToEndTest {
         val detail = okAdmin("GET", "/api/statement/detail/$statementId")
         assertEquals("ready", detail.path("statement_status").asText())
         assertEquals(1, detail.path("details").size(), "明细一单")
+        // ST-A4 越级：ready 状态下带齐回单号也 422（先确认再打款，C242）
+        expectAdmin("POST", "/api/statement/paid/$statementId", mapOf("receipt_no" to "RCP-24-EARLY"), 422, admin)
         val confirmed = okAdmin("POST", "/api/statement/confirm/$statementId")
         assertEquals("confirmed", confirmed.path("statement_status").asText())
         assertTrue(confirmed.path("operator").asText().startsWith("operator:"), "留痕里该有谁")
         // 已确认的重复确认：幂等回当前态，不改账
         assertEquals("confirmed", okAdmin("POST", "/api/statement/confirm/$statementId").path("statement_status").asText())
         expectAdmin("GET", "/api/statement/detail/999999", null, 404, admin)
+
+        // ST-A4 打款登记（批G）：回单号为空（body 缺键）→ 400，没凭据不许置 paid
+        expectAdmin("POST", "/api/statement/paid/$statementId", emptyMap(), 400, admin)
+        // 登记回单号：paid + 账头留 receipt_no
+        val paid = okAdmin("POST", "/api/statement/paid/$statementId", mapOf("receipt_no" to "RCP-24-000001"))
+        assertEquals("paid", paid.path("statement_status").asText())
+        assertEquals("RCP-24-000001", paid.path("receipt_no").asText())
+        assertTrue(paid.path("operator").asText().startsWith("operator:"), "打款也留痕")
+        // 已 paid 的重复登记：幂等回 paid，不覆盖已存回单号
+        val paid2 = okAdmin("POST", "/api/statement/paid/$statementId", mapOf("receipt_no" to "RCP-24-000002"))
+        assertEquals("paid", paid2.path("statement_status").asText())
+        assertEquals("RCP-24-000001", paid2.path("receipt_no").asText())
+        assertEquals("paid", jdbc.queryForObject(
+            "SELECT statement_status FROM statements WHERE id = ?", String::class.java, statementId,
+        ))
+        assertEquals("RCP-24-000001", jdbc.queryForObject(
+            "SELECT receipt_no FROM statements WHERE id = ?", String::class.java, statementId,
+        ))
 
         // 账期设置：seed 两种已配 daily；改成 weekly 再读回
         val s0 = okAdmin("GET", "/api/statement/period/setting")
@@ -221,6 +246,41 @@ class M24EndToEndTest {
         assertTrue(2L == stats.path("aggregate").path("success").asLong())
     }
 
+    // ================= 门槛④（积压告警读面，批G WH-B0） =================
+
+    @Test @Order(5) fun `门槛四 积压告警读面 空库形状与分桶完集`() {
+        val backdrop = okAdmin("GET", "/api/webhook/backlog")
+        assertEquals(WebhookContract.BACKLOG, backdrop.stringKeys(), "三项固定键")
+        assertEquals(WebhookContract.BACKLOG_PENDING, backdrop.path("pending").stringKeys(), "pending 三键")
+        assertEquals(WebhookContract.BACKLOG_BUCKETS, backdrop.path("pending").path("buckets").stringKeys(), "四档桶都在（空库也要给全零行）")
+        assertEquals(0L, backdrop.path("pending").path("total").asLong())
+        assertEquals(0L, backdrop.path("fail_total").asLong())
+        assertTrue(backdrop.path("pending").path("oldest_created").isNull, "没有积压就没有最老行（显式 null）")
+        assertTrue(backdrop.path("note").asText().contains("docs/06"), "口径说明在出参里")
+        // viewer（不在码内）读 403：backlog 是聚合读但仍是读，读码 webhook.lists 它没配
+        expectAdmin("GET", "/api/webhook/backlog", null, 403, viewer)
+    }
+
+    // ================= 门槛⑤（自增序列启动校正，批G 修 M2-1 踩坑⑤） =================
+
+    @Test @Order(6) fun `门槛五 启动件把自增序列校正到 MAX+1`() {
+        // 现场模拟踩坑⑤：历史运行把 id 写到了 250（超过 seed 的 RESTART 常量 100），
+        // 若没有启动校正，下一次重启会把序列拨回 100 → 新增撞号
+        val maxBefore = jdbc.queryForObject("SELECT MAX(id) FROM items_barcode", Number::class.java).toLong()
+        jdbc.update("UPDATE items_barcode SET id = ? WHERE id = ?", 250L, maxBefore)
+        assertEquals(250L, jdbc.queryForObject("SELECT MAX(id) FROM items_barcode", Number::class.java).toLong())
+
+        // realign() 与启动时框架调的是同一条（e2e 模拟"下一次重启"）
+        realign.realign()
+        jdbc.update(
+            "INSERT INTO items_barcode(item_id, barcode, company_id) VALUES(3, 'BC-ALIGN-24', 1)",
+        )
+        assertEquals(251L, jdbc.queryForObject("SELECT MAX(id) FROM items_barcode", Number::class.java).toLong(),
+            "校正后下一发默认主键 = 250+1")
+        // 清场：realign 是幂等的，剩下的行不碍后来者
+        jdbc.update("DELETE FROM items_barcode WHERE barcode = 'BC-ALIGN-24'")
+    }
+
     // ================= 调用件 =================
 
     private fun metricsBefore() {
@@ -240,6 +300,9 @@ class M24EndToEndTest {
     private fun utf8(b: ByteArray) = String(b, Charsets.UTF_8)
 
     private fun code(node: JsonNode): String = node.path("code").asText()
+
+    /** 出参键集合（门槛四按契约集逐键对） */
+    private fun JsonNode.stringKeys(): Set<String> = fieldNames().asSequence().toSet()
 
     /** fastbuy 快捷下单（item 3 坚果，distributor_id=1 随单拷进 trade） */
     private fun fastBuy(itemId: Long, num: Long = 1): Long =

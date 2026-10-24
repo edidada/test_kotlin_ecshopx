@@ -222,6 +222,30 @@ class StatementService(
         return rowView(after).apply { put("operator", operator); put("operator_id", operatorId) }
     }
 
+    /**
+     * ST-A4 打款登记位（批G，C242 的正着兑现）：`confirmed→paid` 必须登记**财务回单号**——
+     * 没有回单就置"已付"等于凭空宣布付过钱；有号登记就是打款完成本身。
+     * ready 越级打款 422"先确认"；已 paid 的重复登记幂等回当前态（**不覆盖**已存的回单号，
+     * 登记过一次的账再补别的号属于人工对账问题，不该由接口悄悄改账）。
+     */
+    fun registerPaid(companyId: Long, id: Long, receiptNo: String?, operator: String?): Map<String, Any?> {
+        val receipt = receiptNo?.trim()?.takeIf { it.isNotEmpty() }
+            ?: throw BizException(
+                ErrorCode.VALIDATION, "回单号必填",
+                mapOf("receipt_no" to listOf("打款完成要凭财务回单号登记，回单号进账头 receipt_no 列")),
+            )
+        val s = statements.find(companyId, id) ?: throw BizException(ErrorCode.NOT_FOUND, "结算单不存在")
+        if (s.statementStatus == "ready") {
+            throw BizException(ErrorCode.BIZ, "先确认再打款", mapOf("statement_status" to listOf("ready 尚未确认，先走确认结算")))
+        }
+        if (s.statementStatus != "paid") {
+            val n = statements.casPaid(id, companyId, receipt, TimeSec.now())
+            if (n == 0) throw BizException(ErrorCode.BIZ, "结算单状态已变更，请刷新重试")
+        }
+        val after = statements.find(companyId, id)!!
+        return rowView(after).apply { put("operator", operator) }
+    }
+
     private fun rowView(s: com.ecshopx.kotlin.dao.distribution.StatementDO): LinkedHashMap<String, Any?> =
         linkedMapOf(
             "statement_id" to s.id,
@@ -239,6 +263,7 @@ class StatementService(
             "start_time" to s.startTime,
             "end_time" to s.endTime,
             "statement_status" to s.statementStatus,
+            "receipt_no" to s.receiptNo,
             "created" to s.created,
         )
 

@@ -1243,6 +1243,7 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 | WH-A7 | POST | `/api/webhook/delivery/{id}/retry` | 手动重推：行重置为 `pending`、`next_try_at=now`、`attempts` **不清零**（清零会让"这一条到底试过几次"失去意义），投递时 `msg_id` 不变 |
 | WH-A8 | GET | `/api/webhook/topics` | 事件目录 + 每个 topic 的载荷字段说明（读注册表，与 OP-A5 同一个纪律：文档面从代码出，不另维护一份会漂的表） |
 | WH-A9 | POST | `/api/webhook/test` | 发一条测试事件到指定 `url`：`{url(Y), developer_id(Y), topic?=webhook.test}`，签名与正式推送同一套；**落一条 `delivery_log`**（测试也要留痕，否则对接方拿"测试通了"当证据时对不上） |
+| WH-B0 | GET | `/api/webhook/backlog` | **积压告警读面（批G）**：待投行按出生时刻 `created` 分桶（`0_6h`/`6_24h`/`24_72h`/`over_72h` 四档，`pending`+`running` 同一拨"在路上"）+ 最老一条出生时刻 + 终态 `fail` 总数；空库也回全零化的四档桶。复用读码 `webhook.lists`（投递记录的一种聚合读，不另开权限位）；`over_72h` 与 `fail_total` 走 WH-A7 手动重推，人工介入步骤见 docs/06 §7 |
 
 ### 25.4 事件与出站（Webhook）
 
@@ -1681,7 +1682,7 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 3. **M22**：地区树首省=浙江省、第二级 level=2（seed 结构性断言，不数体量）。
 4. **M23/M24**：上传 1×1 PNG → url `/storage/**` → 静态面 GET 200；图片库翻页含该行。
 5. **M25**：`admin` 重置 → 临时口令出场即可登录成功（真改密的读证）；不存在的 username 同回 E5000。
-### 29.6 M2-4 生产化（M2-4 批F 已交付）
+### 29.6 M2-4 生产化（M2-4 批F+批G 已交付）
 
 **表（91→93）**：`statement_period_setting`（每租户每种结算对象一行周期设置；任务只跑 distributor 位，C244）+ `openapi_call_stats`（网关调用量 `租户 × 自然日` 聚合行，D76 收口）。
 
@@ -1693,12 +1694,13 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 | ST-A1 | `GET /api/statement/summarized` | 读 88；`merchant_type/distributor_id/statement_status` 可选筛 |
 | ST-A2 | `GET /api/statement/detail/{id}` | 读 88；头 + 明细一单一行 |
 | ST-A3 | `POST /api/statement/confirm/{id}` | 写 89（`@Audited`）；ready→confirmed 一格，重复确认幂等回当前态 |
+| ST-A4 | `POST /api/statement/paid/{id}` | 写 89（`@Audited`，批G）；confirmed→paid **必须登记财务回单号** `receipt_no`（账头同名列）：空回单号 400、ready 越级 422、已 paid 幂等回当前态**不覆盖**已存回单号 |
 
 - **事实源只认一条**：`trade.is_settled=TRUE AND trade_state='SUCCESS'`，窗口按**结清时刻**（`trade.updated`，回调 CAS 结清写的），退款取 `trade.refunded_fee`，运费/佣金/推广佣金回 orders 补（`OrdersMapper.listStatementFees`）；
 - **算式（C241）**：`total_fee`=Σ实付；`refund_fee`=Σ已退（生成那一刻累计）；`statement_fee`=total−refund−**平台佣金**（commission_fee）；推广佣金（total_rebate）**单列供核对，不再从应结里扣一次**；明细 `num`=1 每单一行、`refund_num`=有退款置 1；
 - **一单一生**：已铺过单的 order_id 先捞出来在服务层过滤——`trade.order_id` VARCHAR 与 `statement_details.order_id` BIGINT 的 JOIN 强转在 H2/MySQL 两方言写法不同，判据放 Kotlin 一处（C241 同条）；
 - **生成幂等**：`statement_no = ST-{类型}-{店铺}-{窗口日}`，撞号不重铺；任务腿（`StatementSettleJob`，默认白名单 company 1，按各自账期周期跑上一个已闭合窗口）与 e2e 直调 `StatementService.generate` 同一条，不开"测试专用口"；
-- **打款位不做（C242）**：`confirmed→paid` 要接财务回单，没有回单就置"已付"等于凭空宣布付过钱；`statement_status` 列保留 paid 位次。
+- **打款位（C242，批G 兑现）**：`confirmed→paid` 走**手工登记位** `ST-A4`——带财务回单号登记即打款完成，`receipt_no` 进账头；没有回单就不许置 paid，不接财务系统接口（回单号是人登记的，系统不凭空造）。
 
 **调用量聚合（D76 收口）**：
 - `OpenapiMetrics.drainTo` 把【当前值−上次基线】的**差量**交给任务（**不消费进程内读口**，OP-A6 的 gateway 三位语义不变）；闸门就失败的 UNKNOWN 桶认不出租户，**不入租户账**；
@@ -1723,15 +1725,18 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 | ID | 差异 | 理由 |
 |---|---|---|
 | C241 | **应结算式与"一单一生"的落点**：应结=实付−退款−平台佣金，推广佣金单列不复扣；去重判据放 Kotlin 不放 SQL（VARCHAR/BIGINT JOIN 强转两方言漂移） | 两方言同一份语义 |
-| C242 | **打款位不做**：确认只推 ready→confirmed 一格 | 没有财务回单就不宣布"已付" |
+| C242 | **打款位=手工登记回单号（批G 兑现）**：confirmed→paid 必须带 `receipt_no`（账头新列），空号 400、ready 越级 422、重复登记幂等不覆盖 | 没有财务回单就不宣布"已付"；不接财务接口，登记位就是打款本身 |
 | C243 | **账期单由任务生成，接口只读/只确认**：运营侧没有"手动出账"口子（出账即改账） | 权限最小化 |
 | C244 | **本批只跑 distributor 账位**：supplier 建了设置行、位次留着，但本项目订单链上 supplier_id 恒 0，没有可对账事实源 | 有据才出账 |
 | C245 | **源 `/api/statement/*` 是店铺 jwt 面，本项目归后台**（读 88/写 89）："平台与店铺之间的账"谁能看是权限问题不是身份问题 | 归位一致 |
 | C246 | **OP-A6 三位读数 + 聚合账并排**：进程内读口不消费，聚合表只并差量；UNKNOWN 探测不入租户账 | 账租户的加不得 |
+| C247 | **自增序列按 MAX+1 校正放启动件而不放 SQL（批G，修 M2-1 踩坑⑤）**：H2 官方语法 `RESTART [ WITH long ]` 只收字面量，"按 MAX(id)+1 复位"写不进 SQL；"只冷启动跑"又与 sql.init mode=always 的幂等纪律冲突。落第三条路：`IdentityRealignRunner`（boot 组件）在启动脚本跑完后用 JDBC 逐表校正值 **max(MAX(列)+1, 100)**（`表:列[:下限]` 配置清单；H2 `ALTER COLUMN c RESTART WITH n` / MySQL `AUTO_INCREMENT=n`，后者低值重置 InnoDB 自动忽略），seed 的 `RESTART WITH 100` 保留为**冷启动下限**——下限同时是 e2e 判据（演示行占 1..4、"新建 itemId ≥ 100"），只拨 MAX+1 会破它；每表失败只 warn 不阻断启动 | 能算数的只有应用层；不变量两条并立 = 下一发默认主键 > 当前最大 id 且 ≥ 下限 |
+| C248 | **WH backlog 桶按 `created` 计龄（批G WH-B0）**：待投分桶不按 `next_try_at`——退避把排程来回推，出生时刻才是"卡了多久"；复用读码 `webhook.lists` 不新占权限位 | 排程会动、出生不动；聚合读不另开码 |
 
-门槛用例（并入 `M24EndToEndTest` @Order(1)..4，独立 H2 `exccm24`）：
+门槛用例（并入 `M24EndToEndTest` @Order(1)..6，独立 H2 `exccm24`；批F 加前四例，批G 加后两例）：
 
 1. **渠道配置面**：开户（掩码不含原值）→ 落库 `enc-v1:` 前缀 → 服务层读回明文 → 开关往返 → `api_key` 空串不覆盖 → 台账含行 → viewer 读/写都 403。
-2. **结算账期**：下单 → mock 回调结清 → `generate` 窗口一张、重复跑 0 张 → 翻页/详情/确认（幂等确认）→ 账期设置 daily→weekly 往返 + 非法周期 400（VALIDATION）。
+2. **结算账期**：下单 → mock 回调结清 → `generate` 窗口一张、重复跑 0 张 → 翻页/详情/确认（幂等确认）→ **打款登记（批G）**：ready 越级 422、空回单号 400、登记即 paid 账头留 `receipt_no`、重复登记幂等不覆盖 → 账期设置 daily→weekly 往返 + 非法周期 400（VALIDATION）。
 3. **调用量聚合**：网关三连（两成 一E5301）+ UNKNOWN 探测 → 倾倒一次 `calls=3/2/1` → 再倾倒 0 差量（不重并）→ OP-A6 aggregate 与表行同数。
-4. 旧面不回归：BootSmoke 表数 91→93。
+4. **积压告警读面（批G）**：空库四档桶全零行、`oldest_created` 显式 null、契约集逐键对、viewer 403。
+5. **启动序列校正（批G）**：显式把演示行改到 id=250 → 调 `realign()`（与启动框架调的是同一条）→ 自动新增 → 断言新 id = 251。

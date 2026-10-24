@@ -29,8 +29,9 @@ import org.springframework.web.bind.annotation.RestController
  * 两条口径写在代码里而不是文档里：
  *  1. **账期单由任务生成，不由接口生成**：这里没有"手动出账"的口子——
  *     账单一出就带金额，手工触发的出账等于让一个 HTTP 请求改账；补跑靠运维触发任务腿。
- *  2. **确认只推一格**：`ready→confirmed`；`confirmed→paid`（打款完成）本批不做——
- *     打款要接财务回单，没有回单就置"已付"等于凭空宣布付过钱（C242）。
+ *  2. **确认只推一格、打款要凭回单**：`ready→confirmed` 在[confirm]；
+ *     `confirmed→paid` 在[registerPaid]，**必须登记财务回单号**——没有回单就置"已付"
+ *     等于凭空宣布付过钱（C242；批G 起以"手工登记位"兑现）。
  */
 @RestController
 class StatementAdminController(private val statements: StatementService) {
@@ -86,6 +87,26 @@ class StatementAdminController(private val statements: StatementService) {
         ),
     )
 
+    /**
+     * ST-A4 打款登记（批G，confirmed→paid）：body 带财务回单号 `receipt_no`。
+     * 空回单号 400（没有凭据不许置已付）；ready 越级 422（先确认）；已 paid 幂等回当前态不覆盖已存回单号。
+     */
+    @RequiresResource(ActivityCodes.STATEMENT_UPDATE)
+    @Audited(route = "statement.paid")
+    @PostMapping("/api/statement/paid/{id}")
+    fun registerPaid(
+        @PathVariable id: String,
+        @RequestBody(required = false) form: PaidForm?,
+        @AuthenticationPrincipal p: Principal?,
+    ): ApiResponse<Map<String, Any?>> = ApiResponse.ok(
+        statements.registerPaid(
+            cid(p),
+            id.toLongOrNull() ?: throw BizException(ErrorCode.VALIDATION, "参数不合法", mapOf("id" to listOf("必须是数字"))),
+            form?.receiptNo,
+            p?.let { "operator:${it.id}" },
+        ),
+    )
+
     private fun cid(p: Principal?): Long = p?.companyId ?: TenantContext.companyId
 }
 
@@ -94,4 +115,10 @@ class StatementAdminController(private val statements: StatementService) {
 data class PeriodSettingForm(
     val merchantType: String? = null,
     val periodType: String? = null,
+)
+
+/** ST-A4 打款登记入参：`receipt_no` = 财务回单号（账头 receipt_no 列，paid 的凭据） */
+@JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy::class)
+data class PaidForm(
+    val receiptNo: String? = null,
 )

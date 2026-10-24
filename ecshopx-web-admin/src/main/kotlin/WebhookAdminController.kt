@@ -104,6 +104,17 @@ class WebhookAdminController(private val webhook: WebhookService) {
     fun topics(): ApiResponse<List<Map<String, Any?>>> = ApiResponse.ok(webhook.topics())
 
     /**
+     * WH-B0 积压告警读面（批G）：待投按出生时刻分桶 + 终态 fail 数。
+     * 复用读码 `webhook.lists`——它本来就是投递记录的一种聚合读，不另开权限位；
+     * 出参形状见 `WebhookContract.BACKLOG`（e2e 钉空库形状）。
+     */
+    @RequiresResource("webhook.lists")
+    @GetMapping("/backlog")
+    fun backlog(
+        @AuthenticationPrincipal p: Principal?,
+    ): ApiResponse<Map<String, Any?>> = ApiResponse.ok(webhook.backlog(cid(p)))
+
+    /**
      * WH-A9 测试事件：签名与正式推送同一套，且**落一条 `delivery_log`**。
      *
      * 入参形状不做表单类：`echo` 要出的是"入参原样"， typed DTO 会先把没声明的键丢掉，

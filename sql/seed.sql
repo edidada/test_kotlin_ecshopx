@@ -138,8 +138,12 @@ INSERT IGNORE INTO sys_config (company_id, config_key, config_value, updated) VA
   (1, 'site.tdk.description', 'Kotlin 重写版 ECShopX 前台', 0),
   (1, 'site.tdk.keywords', 'ECShopX,Kotlin,商城', 0);
 
--- 演示行显式指定主键后，自增序列必须越过它们（否则 GOODS-3 新增会撞 PK）
--- H2 语法；MySQL 部署时改写为 `ALTER TABLE <表名> AUTO_INCREMENT = 100;`
+-- 演示行显式指定主键后，自增序列必须越过它们（否则 GOODS-3 新增会撞 PK）。
+-- `RESTART WITH 100` 只是**冷启动下限**：H2 官方语法只收字面量，写不了"按 MAX(id)+1 复位"。
+-- 常驻库历史运行写过更大 id 时靠启动件校正（boot/web 的 IdentityRealignRunner 按 MAX+1 复核，
+-- 批G；MySQL 的 AUTO_INCREMENT 低值重置 InnoDB 自动忽略，语义不受影响）。
+-- **给新表加演示行时：这里加一条 RESTART 行，application.yml 的
+-- ecx.schema.identity-realign-tables 清单也要跟着加一张。**
 ALTER TABLE items ALTER COLUMN item_id RESTART WITH 100;
 ALTER TABLE items_attributes ALTER COLUMN attribute_id RESTART WITH 100;
 ALTER TABLE items_attribute_values ALTER COLUMN attribute_value_id RESTART WITH 100;

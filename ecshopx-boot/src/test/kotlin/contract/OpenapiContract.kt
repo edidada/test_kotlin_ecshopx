@@ -91,4 +91,9 @@ object WebhookContract {
 
     /** 分页信封（`PageResult` 只有这两键，与其余各域同一形状） */
     val LIST_ENVELOPE = setOf("total_count", "list")
+
+    /** WH-B0 积压告警读面（批G）：pending 桶账 + 终态 fail 数 + 一句口径说明 */
+    val BACKLOG = setOf("pending", "fail_total", "note")
+    val BACKLOG_PENDING = setOf("total", "buckets", "oldest_created")
+    val BACKLOG_BUCKETS = setOf("0_6h", "6_24h", "24_72h", "over_72h")
 }

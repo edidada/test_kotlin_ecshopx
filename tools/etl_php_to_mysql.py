@@ -6,8 +6,10 @@ ETL 脚本（M2-4 批F，docs/04 §29.6 成字、docs/06 手册的执行件）�
 两件职责，一次脚本：
 
   1. `--translate`   方言翻译：把 `sql/schema.sql`（H2 MySQL 兼容模式方言）翻译成
-                     MySQL 8 直跑的 `mysql_schema.sql`，seed 原样带出（写了
-                     INSERT IGNORE/TRUE/FALSE/GREATEST 这些两方言共同子集）。
+                     MySQL 8 直跑的 `mysql_schema.sql`；`sql/seed.sql` 里唯一一处
+                     H2 独家写法（自增序列 `ALTER TABLE x ALTER COLUMN c RESTART WITH 100`）
+                     翻成 MySQL 的 `ALTER TABLE x AUTO_INCREMENT = 100`，其余原样带出
+                     （写了 INSERT IGNORE/TRUE/FALSE/GREATEST 这些两方言共同子集）。
                      这一步是**首装的一次性动作**，产物给 application-mysql.yml 的
                      sql.init 引用——jar 里不藏第二份 DDL，schema.sql 仍是唯一事实源。
 
@@ -32,7 +34,6 @@ ETL 脚本（M2-4 批F，docs/04 §29.6 成字、docs/06 手册的执行件）�
 
 import argparse
 import re
-import shutil
 import sys
 from pathlib import Path
 
@@ -49,6 +50,13 @@ DDL_RESIDUE = re.compile(
     r"\bCOMMENT ON\b|FETCH FIRST|@identity",
     re.IGNORECASE,
 )
+# H2 独家写法只收字面量：`RESTART [ WITH long ]`（官方语法），"按 MAX(id)+1 复位"写不进 SQL。
+# seed 里这批语句翻译为 MySQL 的 AUTO_INCREMENT 等值式；批G 起 H2 侧还有启动件
+# IdentityRealignRunner 按 MAX+1 校正（MySQL 的低值重置 InnoDB 自动忽略，语义不受翻译影响）。
+SEED_RESTART = re.compile(
+    r"ALTER TABLE (\w+) ALTER COLUMN \w+ RESTART WITH (\d+);",
+    re.IGNORECASE,
+)
 
 
 def cmd_translate(repo_root: Path, out_dir: Path) -> None:
@@ -60,11 +68,18 @@ def cmd_translate(repo_root: Path, out_dir: Path) -> None:
         text, n = re.subn(pat, rep, text, flags=re.IGNORECASE)
         print(f"[translate] {pat} -> {rep}: {n} 处")
 
+    # seed 翻译：RESTART WITH（H2 字面量语法）→ MySQL AUTO_INCREMENT；其余已是共同子集
+    seed_text = seed_src.read_text(encoding="utf-8")
+    seed_text, seed_n = SEED_RESTART.subn(r"ALTER TABLE \1 AUTO_INCREMENT = \2;", seed_text)
+    print(f"[translate] seed RESTART -> AUTO_INCREMENT: {seed_n} 处")
+
     residue = [f"L{i}: {ln.strip()[:80]}" for i, ln in enumerate(text.splitlines(), 1)
                if DDL_RESIDUE.search(ln)]
-    if residue:
+    seed_residue = [f"seed L{i}: {ln.strip()[:80]}" for i, ln in enumerate(seed_text.splitlines(), 1)
+                    if DDL_RESIDUE.search(ln)]
+    if residue or seed_residue:
         print("[translate] 警告：以下行仍含两方言之外的写法，请人工裁决：", file=sys.stderr)
-        for r in residue:
+        for r in residue + seed_residue:
             print("  " + r, file=sys.stderr)
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -77,8 +92,15 @@ def cmd_translate(repo_root: Path, out_dir: Path) -> None:
         encoding="utf-8",
     )
     seed_out = out_dir / "seed.sql"
-    # seed 全部写在两方言共同子集上（INSERT IGNORE / TRUE/FALSE / GREATEST 均原生支持），原样带出
-    shutil.copyfile(seed_src, seed_out)
+    # seed 除 RESTART 一族外全部写在两方言共同子集上（INSERT IGNORE / TRUE/FALSE / GREATEST 均原生支持）；
+    # RESTART 行已译成 AUTO_INCREMENT 形式（InnoDB 对低值重置自动忽略，覆盖不改语义）
+    seed_out.write_text(
+        "-- 本文件由 tools/etl_php_to_mysql.py --translate 从 sql/seed.sql 生成，未提交进库。\n"
+        "-- 唯一事实源是 sql/seed.sql；改 seed 改那边，再跑一次翻译。\n"
+        f"-- 方言差异收敛为一处：RESTART WITH→AUTO_INCREMENT（{seed_n} 处，自增序列下限）。\n\n"
+        + seed_text,
+        encoding="utf-8",
+    )
     print(f"[translate] 产物：{schema_out} / {seed_out}")
     print("[translate] 启动配置：ECX_SQL_DIR 指向该目录后 --spring.profiles.active=mysql")
 
@@ -184,7 +206,7 @@ def _upsert_new(conn, table: str, cols: list, vals: list, pk: str) -> None:
 def main() -> None:
     root = Path(__file__).resolve().parent.parent
     p = argparse.ArgumentParser(description="ECShopX PHP→Kotlin 生产化 ETL")
-    p.add_argument("--translate", action="store_true", help="schema.sql 方言翻译出 mysql_schema.sql")
+    p.add_argument("--translate", action="store_true", help="schema/seed 方言翻译出 mysql_schema.sql 与 seed.sql")
     p.add_argument("--out-dir", default=str(root / "build" / "sql"))
     p.add_argument("--migrate", action="store_true", help="PHP 旧库数据搬家")
     p.add_argument("--old-host", default="127.0.0.1"); p.add_argument("--old-port", type=int, default=3306)

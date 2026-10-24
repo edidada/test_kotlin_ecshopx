@@ -114,6 +114,12 @@ class WebhookStatusCountDO {
     var cnt: Long = 0
 }
 
+/** 积压分桶行（WH-B0 批G）：`bucket` 是服务侧写的固定四档名，`cnt` 是桶内行数 */
+class WebhookBucketRow {
+    var bucket: String? = null
+    var cnt: Long = 0
+}
+
 /**
  * 一次投递尝试的结果 —— `markSuccess` / `markRetry` / `markFail` 三条状态迁移共用的入参形状。
  *
@@ -339,4 +345,36 @@ interface WebhookDeliveryMapper {
         @Param("companyId") companyId: Long,
         @Param("developerId") developerId: Long,
     ): List<WebhookStatusCountDO>
+
+    /**
+     * 待投行按**出生时刻**分桶（WH-B0 批G，告警读面的账）。
+     * 按龄不看 `next_try_at`：那一位在退避里推来推去（成功重试也会推远），
+     * "卡了多久"只能看事件出生多久了 `created`；`pending` 与 `running` 算同一拨"在路上"。
+     * 分桶界从服务层传值，让"算多久"与"查多久"是同一份常量。
+     */
+    @Select(
+        "SELECT CASE WHEN created >= #{h6} THEN '0_6h' WHEN created >= #{h24} THEN '6_24h' " +
+            "WHEN created >= #{h72} THEN '24_72h' ELSE 'over_72h' END AS bucket, COUNT(*) AS cnt " +
+            "FROM webhook_delivery_log " +
+            "WHERE company_id = #{companyId} AND status IN ('pending', 'running') " +
+            "GROUP BY CASE WHEN created >= #{h6} THEN '0_6h' WHEN created >= #{h24} THEN '6_24h' " +
+            "WHEN created >= #{h72} THEN '24_72h' ELSE 'over_72h' END",
+    )
+    fun pendingByAge(
+        @Param("companyId") companyId: Long,
+        @Param("h6") h6: Long,
+        @Param("h24") h24: Long,
+        @Param("h72") h72: Long,
+    ): List<WebhookBucketRow>
+
+    /** 待投行里最老的一条出生时刻（null = 没有积压） */
+    @Select(
+        "SELECT MIN(created) FROM webhook_delivery_log " +
+            "WHERE company_id = #{companyId} AND status IN ('pending', 'running')",
+    )
+    fun pendingOldest(@Param("companyId") companyId: Long): Long?
+
+    /** 终态 fail 数（自动重试已经救不回来、等人工 WH-A7 的一拨） */
+    @Select("SELECT COUNT(*) FROM webhook_delivery_log WHERE company_id = #{companyId} AND status = 'fail'")
+    fun countFail(@Param("companyId") companyId: Long): Long
 }

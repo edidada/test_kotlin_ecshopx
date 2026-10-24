@@ -282,6 +282,34 @@ class WebhookService(
     /** 概况里那一位：`WH-A1` 的页脚用（"还有多少在路上"），不是筛选条件 */
     fun inFlight(companyId: Long): Long = deliveries.countInFlight(companyId)
 
+    /**
+     * WH-B0 积压告警读面（批G，docs/06 §7 那段人工 SQL 收进代码）。
+     *
+     * 三个读数并排：`pending`（按出生时刻分桶 + 最老一条）是"自动化还没救回来的"，
+     * `fail_total` 是"自动化确定救不回来、只能 WH-A7 手动重推的"。
+     * 分桶按 `created` 不按 `next_try_at`（退避会把排程来回推，出生时刻才是"卡了多久"）；
+     * `0_6h` 之内是正常重试循环，`24h` 起该看对端是不是挂了，超过 `72h` 其实已经该人工介入。
+     */
+    fun backlog(companyId: Long): Map<String, Any?> {
+        val now = TimeSec.now()
+        val h6 = now - 6L * 3600
+        val h24 = now - 24L * 3600
+        val h72 = now - 72L * 3600
+        val buckets = linkedMapOf("0_6h" to 0L, "6_24h" to 0L, "24_72h" to 0L, "over_72h" to 0L)
+        for (r in deliveries.pendingByAge(companyId, h6, h24, h72)) {
+            r.bucket?.let { buckets[it] = r.cnt }
+        }
+        return linkedMapOf(
+            "pending" to linkedMapOf<String, Any?>(
+                "total" to buckets.values.sumOf { it },
+                "buckets" to buckets,
+                "oldest_created" to deliveries.pendingOldest(companyId),
+            ),
+            "fail_total" to deliveries.countFail(companyId),
+            "note" to "桶按 created 计龄；over_72h 与 fail_total 走 WH-A7 手动重推，介入步骤见 docs/06 §7",
+        )
+    }
+
     // ---- 校验 ----
 
     private fun requireTopic(v: String?): String {

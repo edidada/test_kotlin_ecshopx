@@ -1211,6 +1211,7 @@ CREATE TABLE IF NOT EXISTS statements (
   start_time       BIGINT NOT NULL,
   end_time         BIGINT NOT NULL,
   statement_status VARCHAR(16) NOT NULL DEFAULT 'ready',    -- ready/confirmed/paid
+  receipt_no       VARCHAR(64),                             -- 打款回单号（批G ST-A4：登记了它才允许 paid，C242）
   created          BIGINT NOT NULL DEFAULT 0,
   updated          BIGINT NOT NULL DEFAULT 0
 );

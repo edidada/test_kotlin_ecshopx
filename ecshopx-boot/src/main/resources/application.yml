@@ -71,6 +71,13 @@ ecx:
   seq:
     node: 1
     step: 100
+  schema:
+    # 批G：启动后按 MAX(id)+1 校正自增序列（IdentityRealignRunner）。seed 里的
+    # `RESTART WITH 100` 只是冷启动下限——H2 官方语法只收字面量、SQL 里写不了
+    # "按 MAX(id)+1 复位"，所以校正这步只能由应用层在启动脚本跑完后做（见 boot/web 组件）。
+    # **改 seed.sql 演示行/给新表加 RESTART 行时，这张清单必须跟着加**，格式 `表:列[:下限]`
+    # （下限缺省 100 = seed 现行 RESTART 常量；校正值 = max(MAX(id)+1, 下限)，保住"新建 id≥100"判据）。
+    identity-realign-tables: items:item_id,items_attributes:attribute_id,items_attribute_values:attribute_value_id,items_rel_attributes:id,items_barcode:id,items_tags:tag_id,items_rel_tags:id,servicelabels:label_id,items_rel_type:id,deposit_recharge_rule:id,members_items_fav:fav_id,members_browse_history:history_id
   security:
     jwt-secret: M0-dev-secret-change-me-0123456789abcdef
     jwt-ttl-seconds: 43200
