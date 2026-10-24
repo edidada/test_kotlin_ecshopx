@@ -96,4 +96,7 @@ object WebhookContract {
     val BACKLOG = setOf("pending", "fail_total", "note")
     val BACKLOG_PENDING = setOf("total", "buckets", "oldest_created")
     val BACKLOG_BUCKETS = setOf("0_6h", "6_24h", "24_72h", "over_72h")
+
+    /** WH-B1 批量重推（批H）：命中目标数 + 实际置回数（reset < matched = 本批 limit 截断还有余量） */
+    val REPLAY = setOf("matched", "reset")
 }

@@ -377,4 +377,21 @@ interface WebhookDeliveryMapper {
     /** 终态 fail 数（自动重试已经救不回来、等人工 WH-A7 的一拨） */
     @Select("SELECT COUNT(*) FROM webhook_delivery_log WHERE company_id = #{companyId} AND status = 'fail'")
     fun countFail(@Param("companyId") companyId: Long): Long
+
+    /**
+     * WH-B1 批量重推（批H）：目标行 id 清单——**只扫终态 `fail`**，最老最先，
+     * `limit` 闸住单次体量（`running` 正在投不动、`pending` 本来就在路上，都不进来）。
+     */
+    @Select(
+        "<script>SELECT l.id FROM webhook_delivery_log l WHERE 1=1$L_FILTER_SQL AND l.status = 'fail' " +
+            "ORDER BY l.created, l.id LIMIT #{limit}</script>",
+    )
+    fun replayTargets(@Param("f") f: Map<String, Any?>, @Param("limit") limit: Int): List<Long>
+
+    /** 目标行置回 pending（id 清单由服务层先查后传；MySQL 拒 UPDATE 同表子查询 [1093]，两步走两方言同语义） */
+    @Update(
+        "<script>UPDATE webhook_delivery_log SET status = 'pending', next_try_at = #{now}, updated = #{now} " +
+            "WHERE id IN <foreach collection='ids' item='v' open='(' separator=',' close=')'>#{v}</foreach></script>",
+    )
+    fun replayMarkPending(@Param("ids") ids: List<Long>, @Param("now") now: Long): Int
 }

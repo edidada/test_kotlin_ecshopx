@@ -28,7 +28,7 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put
 
 /**
- * M2-4 生产化 e2e（docs/04 §29.6 门槛①..⑤，独立 H2 `exccm24`）。
+ * M2-4 生产化 e2e（docs/04 §29.6 门槛①..⑥，独立 H2 `exccm24`）。
  *
  *  1. **渠道配置面**：开户（api_key 空串=不改）、台账掩码、开关、viewer 写 403；
  *     落库即 AES-GCM 密文（`enc-v1:` 前缀），服务层读出来的必须是**明文**（签名的判据层读原值）。
@@ -40,6 +40,8 @@ import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put
  *  4. **积压告警读面（批G WH-B0）**：空库四档桶全零行、`oldest_created` 显式 null、viewer 403。
  *  5. **启动序列校正（批G，修 M2-1 踩坑⑤）**：显式插 id=250 → `realign()`（与启动调的是同一条）→
  *     下一发默认主键 = 251。
+ *  6. **批量重推（批H WH-B1）**：只扫终态 fail、至少一个筛位、`limit` 闸量、最老最先；
+ *     在投的 running 与 success 不动；`reset < matched` 的余量分批续。
  *
  * 不测嘴上的"压测 50 TPS"：并发护住的断言在 M0 的 OrderStockConcurrencyTest，生产化的压测脚本
  * 属于部署侧联调（docs/05 §M2-4 完成记录里写明出处），e2e 不重复背着它跑。
@@ -279,6 +281,66 @@ class M24EndToEndTest {
             "校正后下一发默认主键 = 250+1")
         // 清场：realign 是幂等的，剩下的行不碍后来者
         jdbc.update("DELETE FROM items_barcode WHERE barcode = 'BC-ALIGN-24'")
+    }
+
+    // ================= 门槛⑥（批量重推，批H WH-B1） =================
+
+    @Test @Order(7) fun `门槛六 批量重推 最老优先 只扫fail 至少一筛 限界`() {
+        val now = com.ecshopx.kotlin.common.domain.TimeSec.now()
+        // 对端用本机必然拒连的端口：wake 是同步实投一轮，拒连秒回、不依赖 CI 出网；
+        // attempts 缺省 0 —— 重推后的下一轮失败按退避回排 pending（给 5 会在 wake 失败后到 maxAttempts 又回 fail，断言竞态）
+        fun insertFail(msg: String, topic: String, created: Long) {
+            jdbc.update(
+                "INSERT INTO webhook_delivery_log(company_id, developer_id, subscription_id, msg_id, topic, url, " +
+                    "status, created, updated) " +
+                    "VALUES(1, 1, 0, ?, ?, 'http://127.0.0.1:1/hook', 'fail', ?, ?)",
+                msg, topic, created, now,
+            )
+        }
+        // 五行现场：窗口内两条 fail、一条 running、一条 success；窗口外一条老 fail（最老优先要靠它证）
+        insertFail("WHR24-OLD", "order.created", now - 100 * 3600)
+        insertFail("WHR24-IN1", "order.created", now - 2)
+        insertFail("WHR24-IN2", "order.created", now - 1)
+        jdbc.update(
+            "INSERT INTO webhook_delivery_log(company_id, developer_id, subscription_id, msg_id, topic, url, status, created, updated) " +
+                "VALUES(1, 1, 0, 'WHR24-RUN', 'order.created', 'http://127.0.0.1:1/hook', 'running', ?, ?)",
+            now - 2, now,
+        )
+        jdbc.update(
+            "INSERT INTO webhook_delivery_log(company_id, developer_id, subscription_id, msg_id, topic, url, status, created, updated) " +
+                "VALUES(1, 1, 0, 'WHR24-OK', 'order.created', 'http://127.0.0.1:1/hook', 'success', ?, ?)",
+            now - 2, now,
+        )
+        val end = now + 10
+        // 窗口重推：命中的是窗口内两条 fail（running/success/窗口外全不动）；
+        // wake 同步实投一轮，对端拒连 → 失败按退避回排 pending（attempts 1、next_try_at>0）
+        val r1 = okAdmin(
+            "POST",
+            "/api/webhook/deliveries/replay?topic=order.created&created_start=${now - 4}&created_end=$end",
+        )
+        assertEquals(WebhookContract.REPLAY, r1.stringKeys(), "两项固定键")
+        assertEquals(2L, r1.path("matched").asLong())
+        assertEquals(2L, r1.path("reset").asLong())
+        assertEquals(2, jdbc.queryForObject(
+            "SELECT COUNT(*) FROM webhook_delivery_log WHERE msg_id LIKE 'WHR24-IN%' AND status = 'pending' AND next_try_at > 0",
+            Int::class.java,
+        ), "重推即排程：失败过一轮也回到 pending 再排")
+        assertEquals("running", jdbc.queryForMap("SELECT status FROM webhook_delivery_log WHERE msg_id = 'WHR24-RUN'")["status"], "在投的不动")
+        assertEquals("success", jdbc.queryForMap("SELECT status FROM webhook_delivery_log WHERE msg_id = 'WHR24-OK'")["status"], "成功的更不动")
+
+        // 无筛位兜底：批量重推不给一键全量（全租户失败史全量打向对端的事不由一个忘带筛位的请求决定）
+        expectAdmin("POST", "/api/webhook/deliveries/replay", emptyMap(), 400, admin)
+        // 限界：limit > 500 拒；limit=1 + 无窗口 → 最老的一条先走（created 升序实证）
+        expectAdmin("POST", "/api/webhook/deliveries/replay?topic=order.created&limit=501", null, 400, admin)
+        insertFail("WHR24-NEW", "order.created", now)
+        val r2 = okAdmin("POST", "/api/webhook/deliveries/replay?topic=order.created&limit=1")
+        assertEquals(1L, r2.path("matched").asLong())
+        assertEquals("pending", jdbc.queryForMap("SELECT status FROM webhook_delivery_log WHERE msg_id = 'WHR24-OLD'")["status"], "最老最先")
+        assertEquals("fail", jdbc.queryForMap("SELECT status FROM webhook_delivery_log WHERE msg_id = 'WHR24-NEW'")["status"], "limit 截断留到下一轮")
+        // 未知 topic 的筛位直接 BIZ 拒
+        expectAdmin("POST", "/api/webhook/deliveries/replay?topic=nope.nope", null, 422, admin)
+        // 清场
+        jdbc.update("DELETE FROM webhook_delivery_log WHERE msg_id LIKE 'WHR24-%'")
     }
 
     // ================= 调用件 =================

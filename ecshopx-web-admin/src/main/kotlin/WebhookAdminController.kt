@@ -115,6 +115,18 @@ class WebhookAdminController(private val webhook: WebhookService) {
     ): ApiResponse<Map<String, Any?>> = ApiResponse.ok(webhook.backlog(cid(p)))
 
     /**
+     * WH-B1 批量重推（批H）：终态 fail 按 topic / developer_id / 时间段筛出，最老优先置回 pending。
+     * `webhook.push` 同 WH-A9——批量重投是**主动往外打流量**的动作，不是配置；不给一键全量，`limit` 闸量。
+     */
+    @Audited(route = "webhook.batch_replay")
+    @RequiresResource("webhook.push")
+    @PostMapping("/deliveries/replay")
+    fun replay(
+        @RequestParam raw: Map<String, String>,
+        @AuthenticationPrincipal p: Principal?,
+    ): ApiResponse<Map<String, Any?>> = ApiResponse.ok(webhook.replay(cid(p), raw))
+
+    /**
      * WH-A9 测试事件：签名与正式推送同一套，且**落一条 `delivery_log`**。
      *
      * 入参形状不做表单类：`echo` 要出的是"入参原样"， typed DTO 会先把没声明的键丢掉，

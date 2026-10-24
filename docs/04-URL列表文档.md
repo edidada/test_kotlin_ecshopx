@@ -1244,6 +1244,7 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 | WH-A8 | GET | `/api/webhook/topics` | 事件目录 + 每个 topic 的载荷字段说明（读注册表，与 OP-A5 同一个纪律：文档面从代码出，不另维护一份会漂的表） |
 | WH-A9 | POST | `/api/webhook/test` | 发一条测试事件到指定 `url`：`{url(Y), developer_id(Y), topic?=webhook.test}`，签名与正式推送同一套；**落一条 `delivery_log`**（测试也要留痕，否则对接方拿"测试通了"当证据时对不上） |
 | WH-B0 | GET | `/api/webhook/backlog` | **积压告警读面（批G）**：待投行按出生时刻 `created` 分桶（`0_6h`/`6_24h`/`24_72h`/`over_72h` 四档，`pending`+`running` 同一拨"在路上"）+ 最老一条出生时刻 + 终态 `fail` 总数；空库也回全零化的四档桶。复用读码 `webhook.lists`（投递记录的一种聚合读，不另开权限位）；`over_72h` 与 `fail_total` 走 WH-A7 手动重推，人工介入步骤见 docs/06 §7 |
+| WH-B1 | POST | `/api/webhook/deliveries/replay` | **批量重推运营面（批H）**：按 `topic?`/`developer_id?`/`created_start?`/`created_end?` 至少一个筛位（**不给一键全量 400**——全租户失败史全量打向对端的事不由一个忘带筛位的请求决定），把筛中的**终态 `fail`** 按最老最先（`ORDER BY created, id`）置回 `pending`（`next_try_at=now`），出参 `{matched, reset}`（`reset < matched` = 本批 `limit` 截断还有余量，下一轮分批续；`limit` 缺省 100 上限 500 超界 400）。`running` 与 `pending` 都不进来（在投的不动、在路上的不用动），单条动 `running` 走 WH-A7；码 `webhook.push` 同 WH-A9——主动往外打流量的动作不是配置；置回后唤醒一轮即时投递（`WAKE_LIMIT` 闸内同步实投，余量交给定期投递作业） |
 
 ### 25.4 事件与出站（Webhook）
 
@@ -1682,7 +1683,7 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 3. **M22**：地区树首省=浙江省、第二级 level=2（seed 结构性断言，不数体量）。
 4. **M23/M24**：上传 1×1 PNG → url `/storage/**` → 静态面 GET 200；图片库翻页含该行。
 5. **M25**：`admin` 重置 → 临时口令出场即可登录成功（真改密的读证）；不存在的 username 同回 E5000。
-### 29.6 M2-4 生产化（M2-4 批F+批G 已交付）
+### 29.6 M2-4 生产化（批F+批G 收官；批H 增 WH-B1 批量重推）
 
 **表（91→93）**：`statement_period_setting`（每租户每种结算对象一行周期设置；任务只跑 distributor 位，C244）+ `openapi_call_stats`（网关调用量 `租户 × 自然日` 聚合行，D76 收口）。
 
@@ -1732,11 +1733,13 @@ assemble(map): 键按字节序升序排序（PHP 的 ksort(…, SORT_STRING)）�
 | C246 | **OP-A6 三位读数 + 聚合账并排**：进程内读口不消费，聚合表只并差量；UNKNOWN 探测不入租户账 | 账租户的加不得 |
 | C247 | **自增序列按 MAX+1 校正放启动件而不放 SQL（批G，修 M2-1 踩坑⑤）**：H2 官方语法 `RESTART [ WITH long ]` 只收字面量，"按 MAX(id)+1 复位"写不进 SQL；"只冷启动跑"又与 sql.init mode=always 的幂等纪律冲突。落第三条路：`IdentityRealignRunner`（boot 组件）在启动脚本跑完后用 JDBC 逐表校正值 **max(MAX(列)+1, 100)**（`表:列[:下限]` 配置清单；H2 `ALTER COLUMN c RESTART WITH n` / MySQL `AUTO_INCREMENT=n`，后者低值重置 InnoDB 自动忽略），seed 的 `RESTART WITH 100` 保留为**冷启动下限**——下限同时是 e2e 判据（演示行占 1..4、"新建 itemId ≥ 100"），只拨 MAX+1 会破它；每表失败只 warn 不阻断启动 | 能算数的只有应用层；不变量两条并立 = 下一发默认主键 > 当前最大 id 且 ≥ 下限 |
 | C248 | **WH backlog 桶按 `created` 计龄（批G WH-B0）**：待投分桶不按 `next_try_at`——退避把排程来回推，出生时刻才是"卡了多久"；复用读码 `webhook.lists` 不新占权限位 | 排程会动、出生不动；聚合读不另开码 |
+| C249 | **批量重推只扫终态 `fail`、至少一个筛位、`limit` 闸量（批H WH-B1）**：`running` 正在投（动它是与别的实例抢同一行）、`pending` 在路上，都不进来；不给一键全量（全租户失败史全量打向对端不该由忘带筛位的请求代表运营决定）；命中再多也只重投最老一批（缺省 100/上限 500），`reset < matched` 即余量分批续。两步走：先查 id 再 IN 更新——MySQL 拒 UPDATE 同表子查询（1093），两步走两方言同语义；置回后 `wakeNow()` 同步实投一轮（`WAKE_LIMIT` 闸内），不逐条发 HTTP（那是 WH-A7 的场景）、余量交给定期投递作业 | 与 WH-B0 成对（B0 看、B1 动）；出站流量闸由代码挡，不靠运营记住 |
 
-门槛用例（并入 `M24EndToEndTest` @Order(1)..6，独立 H2 `exccm24`；批F 加前四例，批G 加后两例）：
+门槛用例（并入 `M24EndToEndTest` @Order(1)..7，独立 H2 `exccm24`；批F 加前四例，批G 加后两例，批H 加末一例）：
 
 1. **渠道配置面**：开户（掩码不含原值）→ 落库 `enc-v1:` 前缀 → 服务层读回明文 → 开关往返 → `api_key` 空串不覆盖 → 台账含行 → viewer 读/写都 403。
 2. **结算账期**：下单 → mock 回调结清 → `generate` 窗口一张、重复跑 0 张 → 翻页/详情/确认（幂等确认）→ **打款登记（批G）**：ready 越级 422、空回单号 400、登记即 paid 账头留 `receipt_no`、重复登记幂等不覆盖 → 账期设置 daily→weekly 往返 + 非法周期 400（VALIDATION）。
 3. **调用量聚合**：网关三连（两成 一E5301）+ UNKNOWN 探测 → 倾倒一次 `calls=3/2/1` → 再倾倒 0 差量（不重并）→ OP-A6 aggregate 与表行同数。
 4. **积压告警读面（批G）**：空库四档桶全零行、`oldest_created` 显式 null、契约集逐键对、viewer 403。
 5. **启动序列校正（批G）**：显式把演示行改到 id=250 → 调 `realign()`（与启动框架调的是同一条）→ 自动新增 → 断言新 id = 251。
+6. **批量重推（批H WH-B1）**：窗口筛位命中窗口内两条 fail（running/success/窗口外不动）→ 置回后 `wakeNow` 同步实投一轮、对端（本机拒连端口）秒拒 → 失败按退避回排 `pending` 且 `next_try_at>0`；无筛位 400、`limit>500` 400、`limit=1` 时**最老一条**先走（created 升序实证）且截断者留 `fail`、未知 topic 422。插入行 `attempts` 缺省 0（给 5 会在 wake 失败后到 maxAttempts 直接回 `fail`，断言竞态）。

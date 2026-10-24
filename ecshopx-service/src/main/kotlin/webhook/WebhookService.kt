@@ -310,6 +310,46 @@ class WebhookService(
         )
     }
 
+    /**
+     * WH-B1 批量重推（批H，M2-1 顺延项「按 topic + 时间段批量重投时再开」的兑现）。
+     *
+     * 与 WH-B0 是一对：积压读面负责**看**（哪个桶在涨），这个面负责**动**（把救不回来的
+     * 终态 `fail` 按最老最先置回 `pending`）。三条保守口径：
+     *  1. **只扫终态 `fail`**：`running` 正在投（动它是与别的实例抢同一行）、`pending` 本来就在路上；单条想动 `running` 走 WH-A7；
+     *  2. **不给一键全量**：`topic` / `developer_id` / 时间段至少给一个——不然一次重投就是把全租户的失败史全量打向对端，出站流量不该由一个忘带筛位的请求代表运营决定；
+     *  3. **`limit` 闸量（缺省 100、上限 500）**：命中再多也只重投最老的一批，`reset < matched` 的下一轮补（出参两个数对不上就是"还有余量"）。
+     *
+     * 置回后 `sender.wakeNow()` 同步实投一轮（`WAKE_LIMIT` 闸内）：批量重推不逐条发 HTTP（那是 WH-A7 逐条等结果的场景），
+     * 但也不把"动了"变成"要等下一个 30 秒作业"的客套话——命中首批当场就有人试；余量交给定期的投递作业。
+     */
+    fun replay(companyId: Long, raw: Map<String, String>): Map<String, Any?> {
+        val f = filter(companyId)
+        raw["topic"]?.trim()?.takeIf { it.isNotEmpty() }?.let { t ->
+            if (!WebhookTopics.isKnown(t)) throw BizException(ErrorCode.BIZ, "未知事件：$t")
+            f["topic"] = t
+        }
+        raw["developer_id"]?.trim()?.takeIf { it.isNotEmpty() }?.let {
+            f["developerId"] = it.toLongOrNull() ?: throw BizException(ErrorCode.VALIDATION, "developer_id 必须是数字")
+        }
+        timeRange(raw["created_start"], "created_start")?.let { f["createdStart"] = it }
+        timeRange(raw["created_end"], "created_end")?.let { f["createdEnd"] = it }
+        if (f.keys.none { it != "companyId" }) {
+            throw BizException(
+                ErrorCode.VALIDATION, "批量重推不给一键全量",
+                mapOf("filter" to listOf("至少给 topic / developer_id / created_start / created_end 之一")),
+            )
+        }
+        val limit = raw["limit"]?.trim()?.takeIf { it.isNotEmpty() }?.toIntOrNull() ?: REPLAY_LIMIT
+        if (limit < 1 || limit > REPLAY_LIMIT_MAX) {
+            throw BizException(ErrorCode.VALIDATION, "limit 超界", mapOf("limit" to listOf("1..$REPLAY_LIMIT_MAX，余量分批再调")))
+        }
+        val ids = deliveries.replayTargets(f, limit)
+        if (ids.isEmpty()) return linkedMapOf("matched" to 0, "reset" to 0)
+        val reset = deliveries.replayMarkPending(ids, TimeSec.now())
+        runCatching { sender.wakeNow() }   // EcxWebhook 关掉时只是不投，行照常落 pending（与总开关同口径）
+        return linkedMapOf("matched" to ids.size, "reset" to reset)
+    }
+
     // ---- 校验 ----
 
     private fun requireTopic(v: String?): String {
@@ -421,5 +461,9 @@ class WebhookService(
     private companion object {
         const val MAX_URL = 255
         val DELIVERY_STATUS = setOf("pending", "running", "success", "fail")
+
+        /** WH-B1 批量重推的缺省批量与单次上限（余量分批续投，出参 matched/reset 对不上即知） */
+        const val REPLAY_LIMIT = 100
+        const val REPLAY_LIMIT_MAX = 500
     }
 }
