@@ -365,10 +365,10 @@ class AftersalesService(
         val a = load(bn, companyId, null)
         if (orderId != null && a.orderId != orderId) throw BizException(ErrorCode.BIZ, "未获取到售后单信息")
         if (a.aftersalesStatus != AftersalesStatus.PENDING && a.aftersalesStatus != AftersalesStatus.PROCESSING) {
-            throw BizException(ErrorCode.BIZ, "售后$bn已处理")
+            throw BizException(ErrorCode.BIZ, "售后${bn}已处理")
         }
         if (a.progress != AftersalesProgress.WAIT_BUYER_RETURN && a.progress != AftersalesProgress.BUYER_RETURNED) {
-            throw BizException(ErrorCode.BIZ, "售后$bn商家没有接受申请")
+            throw BizException(ErrorCode.BIZ, "售后${bn}商家没有接受申请")
         }
         val now = TimeSec.now()
         val o = order(a.orderId)
@@ -408,10 +408,10 @@ class AftersalesService(
         val a = load(bn, companyId, null)
         if (orderId != null && a.orderId != orderId) throw BizException(ErrorCode.BIZ, "未获取到售后单信息")
         if (a.aftersalesStatus != AftersalesStatus.PROCESSING) {
-            throw BizException(ErrorCode.BIZ, "售后$bn已处理或还未处理")
+            throw BizException(ErrorCode.BIZ, "售后${bn}已处理或还未处理")
         }
         if (a.progress != AftersalesProgress.SELLER_CONFIRMED) {
-            throw BizException(ErrorCode.BIZ, "售后$bn商家没有确认收货")
+            throw BizException(ErrorCode.BIZ, "售后${bn}商家没有确认收货")
         }
         val back = if (a.sendbackData.isNullOrBlank()) AftersalesProgress.WAIT_BUYER_RETURN else AftersalesProgress.BUYER_RETURNED
         val now = TimeSec.now()
